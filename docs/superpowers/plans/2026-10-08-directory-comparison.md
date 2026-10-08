@@ -95,11 +95,33 @@
 - [x] **Step 3: Implement HTML/CSS/JS and static routes.** Strip one root component from webkit paths; client bounds checks match server; multipart payload encodes exact fields; render via textContent; prevent duplicate submissions; reset stale results on changes; handle failures and retry. Avoid third-party UI dependencies.
 - [x] **Step 4: Run all pytest tests; run live Uvicorn + smoke and browser tests.** Expect real comparisons and sidebar interactions pass.
 - [x] **Step 5: Document setup/run/test, encoding, options and upload limits; pin transitive dependencies; validate install repeatability.**
-- [ ] **Step 6: Save tested `install_script` and `start_skill` to cloud draft, with work directory, service restart/readiness and existing-checkout guidance.**
-- [ ] **Step 7: Review complete changes, commit on `main`, check/push the new remote branch without force, verify remote SHA and save repository metadata when required.**
+- [x] **Step 6: Save tested `install_script` and `start_skill` to cloud draft, with work directory, service restart/readiness and existing-checkout guidance.**
+- [x] **Step 7: Review complete changes, commit on `main`, check/push the new remote branch without force, verify remote SHA and save repository metadata when required.**
 
 ## Execution
 
 현재 세션에서 직접 구현한다. 요구사항은 하나의 화면/API/비교 로직으로 연결되어 있으므로
 순서대로 구현하고 각 단계에서 필요한 테스트를 실행한다.
 사용자에게 구현과 검증 결과, 원격 반영 여부, 저장한 설정과 게시 단계를 보고한다.
+
+## 검증과 완료 기록
+
+- Python 테스트 66개 통과, 실패·건너뛴 테스트 없음.
+- Uvicorn 재시작 후 실제 HTTP 화면/정적 파일/업로드/옵션 조합 검사 통과.
+- 실제 Chromium에서 폴더 선택, 옵션 4개, 상태 필터, 메뉴 접기/펼치기,
+  오류 후 재시도, 파일명 텍스트 표시, 모바일 폭, 외부 요청 없는 화면 검사 통과.
+- 독립 검토에서 발견한 경로의 잘못된 Unicode와 과도한 JSON 중첩을
+  각각 회귀 테스트로 재현한 뒤 400 요청 오류로 수정.
+- 고정 버전 설치 스크립트를 반복 실행하고 의존성 일관성과 추적 파일 보존 확인.
+- 검증한 `install_script`와 `start_skill`을 클라우드 환경 초안에 저장.
+- GitHub에 새 `main`을 생성하고 원격/로컬 커밋 일치를 확인.
+
+구현 판단: 사용자가 요청한 첫 `main`과 기존 격리 체크아웃에서 직접 구현했다.
+제공되지 않은 스킬 보조 스크립트는 같은 기능의 로컬 진행 기록으로 대신했다.
+Starlette가 권장하는 httpx2 테스트 전송을 사용하고 브라우저 검사도 Python
+Playwright로 통일했다. 이런 선택은 개발 절차/의존성에만 영향을 주며 비교 규칙은
+승인한 설계를 따른다. 실제 실행 검증 범위는 Linux/Chromium이며, Windows/macOS
+폴더 선택, 화면 낭독기 사용 및 동시 업로드 부하를 검증했다고 주장하지 않는다.
+
+환경 초안 저장은 게시와 구별된다. 사용자가 환경 설정에서 검토·저장한 뒤
+게시해야 새 작업에서의 복원이 활성화된다. 새 작업 복원 자체는 이번 검증 범위에 포함하지 않는다.
