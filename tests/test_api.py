@@ -68,6 +68,18 @@ def test_bad_path_lists_rejected(client, value):
     assert client.post("/api/compare", data=form_data(left_paths=[] ) | {"left_paths": value}, files=pair()).status_code == 400
 
 
+@pytest.mark.parametrize("value", [
+    '["\\ud800"]',
+    '["\\udfff"]',
+    "[" * 10000 + "0" + "]" * 10000,
+], ids=["high-surrogate", "low-surrogate", "deep-json"])
+def test_malformed_unicode_and_deep_json_are_request_errors(api, value):
+    with TestClient(api.app, raise_server_exceptions=False) as client:
+        response = client.post("/api/compare", data=form_data() | {"left_paths": value}, files=pair())
+        assert response.status_code == 400
+        assert client.get("/health").json() == {"status": "ok"}
+
+
 def test_empty_sides_rejected(client):
     assert client.post("/api/compare", data=form_data(left_paths=[], right_paths=[]), files=[("left_files", ("a", b"a"))]).status_code == 400
 

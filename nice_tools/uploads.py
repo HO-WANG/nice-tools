@@ -39,7 +39,7 @@ def parse_count(form: FormData, name: str) -> int:
 def parse_paths(form: FormData, name: str, count: int) -> list[str]:
     try:
         paths = json.loads(single_field(form, name))
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         raise HTTPException(400, "폴더의 파일 경로 목록이 잘못되었습니다.") from None
     if not isinstance(paths, list) or len(paths) != count:
         raise HTTPException(400, "파일 목록과 상대 경로의 개수가 일치하지 않습니다.")
@@ -48,7 +48,7 @@ def parse_paths(form: FormData, name: str, count: int) -> list[str]:
         if (
             not isinstance(path, str) or not path or "\\" in path
             or re.match(r"^[A-Za-z]:", path)
-            or any(ord(char) < 32 or ord(char) == 127 for char in path)
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in path)
             or any(part in ("", ".", "..") for part in path.split("/"))
         ):
             raise HTTPException(400, "유효한 폴더 내 상대 경로만 사용할 수 있습니다.")
