@@ -1,6 +1,6 @@
 # Directory Comparison Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** 사용자 PC의 폴더 두 개를 비교하는 첫 도구와 접이식 메뉴를 제공한다.
 
@@ -43,15 +43,15 @@
 - Produces: `compare_directories(left: dict[str, bytes], right: dict[str, bytes], options: CompareOptions) -> dict`.
 - Result: `summary` with `total`, `same`, `different`, `left_only`, `right_only`, `error`; `results` with sorted `path`, `status`, optional `message`.
 
-- [ ] **Step 1: Write failing comparison tests.**
+- [x] **Step 1: Write failing comparison tests.**
   `test_summary_and_path_pairing`: 같은 하위 상대 경로끼리 대응; `same=1`, `different=1`, `left_only=1`, `right_only=1`, `total=4`.
   Parametrize normalization for BOM/newlines, empty files, internal empty lines, sorting with duplicates, Unicode whitespace, prefix/suffix removal, combined options.
   `test_unicode_and_overlapping_slices`: `"😀가나다"` with start 1/end 1 gives `"가나"`; start 3/end 3 gives `""`.
   `test_invalid_text_reports_per_file_error`: invalid UTF-8 and NUL are `error`, other pairs still compare.
-- [ ] **Step 2: Create `.venv`, pin/install dependencies and run `.venv/bin/python -m pytest tests/test_comparison.py -q`.** Expect missing comparison module (red).
-- [ ] **Step 3: Implement interfaces in `nice_tools/comparison.py`.** Use immutable validated options, explicit CR/LF normalization, Python string slices, `str.isspace`, sorted lists preserving duplicates, sorted path union.
-- [ ] **Step 4: Run `.venv/bin/python -m pytest tests/test_comparison.py -q`.** Expect all collected cases pass.
-- [ ] **Step 5: Commit comparison core and dependency configuration.**
+- [x] **Step 2: Create `.venv`, pin/install dependencies and run `.venv/bin/python -m pytest tests/test_comparison.py -q`.** Expect missing comparison module (red).
+- [x] **Step 3: Implement interfaces in `nice_tools/comparison.py`.** Use immutable validated options, explicit CR/LF normalization, Python string slices, `str.isspace`, sorted lists preserving duplicates, sorted path union.
+- [x] **Step 4: Run `.venv/bin/python -m pytest tests/test_comparison.py -q`.** Expect all collected cases pass.
+- [x] **Step 5: Commit comparison core and dependency configuration.**
 
 ### Task 2: 실제 업로드 API와 수신 제한
 
@@ -68,14 +68,14 @@
 - `read_uploads(form) -> tuple[dict[str, bytes], dict[str, bytes], CompareOptions]` validates uploaded data and paths; the endpoint uses `async with request.form(...)` to close files on success and failure.
 - `BodyLimitMiddleware(app, max_bytes: int = 50 * 1024 * 1024)` bounds declared and actually received body sizes.
 
-- [ ] **Step 1: Write failing API tests with `TestClient`.**
+- [x] **Step 1: Write failing API tests with `TestClient`.**
   Assert a real two-sided multipart request produces expected summary/statuses; invalid paths (`../a`, `/a`, duplicate, Windows drive), mismatched path counts, negative/fractional options return 400.
   Assert 1,001 files, >10 MiB file, >50 MiB declared body fail; oversized streaming body without Content-Length fails 413 followed by healthy request.
   Assert upload handles close after success/error and invalid text is a per-file result.
-- [ ] **Step 2: Run `.venv/bin/python -m pytest tests/test_api.py -q`.** Expect missing HTTP app (red).
-- [ ] **Step 3: Implement multipart validation, bounded receive middleware and app.** Decode path arrays strictly, reject unsafe/duplicate paths, check total file count and per-file size, parse checkbox booleans and nonnegative integers explicitly, execute CPU comparison outside async event loop.
-- [ ] **Step 4: Run `.venv/bin/python -m pytest tests/test_comparison.py tests/test_api.py -q`.** Expect full pass, no skipped cases.
-- [ ] **Step 5: Commit API and limits.**
+- [x] **Step 2: Run `.venv/bin/python -m pytest tests/test_api.py -q`.** Expect missing HTTP app (red).
+- [x] **Step 3: Implement multipart validation, bounded receive middleware and app.** Decode path arrays strictly, reject unsafe/duplicate paths, check total file count and per-file size, parse checkbox booleans and nonnegative integers explicitly, execute CPU comparison outside async event loop.
+- [x] **Step 4: Run `.venv/bin/python -m pytest tests/test_comparison.py tests/test_api.py -q`.** Expect full pass, no skipped cases.
+- [x] **Step 5: Commit API and limits.**
 
 ### Task 3: 화면, 실제 사용 검증과 재사용 설정
 
@@ -83,18 +83,18 @@
 - Create: `nice_tools/static/index.html`, `nice_tools/static/styles.css`, `nice_tools/static/app.js`.
 - Modify: `nice_tools/main.py` to serve `/` and `/static` from absolute package path.
 - Create: `README.md`, `scripts/smoke.py`.
-- Test: `tests/test_frontend.py`, `tests/browser-smoke.mjs`.
+- Test: `tests/test_frontend.py`, `tests/browser_smoke.py`.
 
 **Interfaces:**
 - Consumes: Task 2 multipart API and Task 1 result field names/statuses.
 - Produces: Korean HTML UI at `/`, native directory pickers, options, accessible collapsible sidebar, summary/status-filtered results.
 - Produces: `.venv/bin/python scripts/smoke.py` verifying health, static assets and representative multipart response of a running server at default loopback port 8000.
 
-- [ ] **Step 1: Add failing static/functional tests.** `GET /` contains the tool and controls; static script/style are available. Browser smoke selects two fixture folders with different root names, asserts summary, changes all four options and rechecks results; toggles sidebar; retries after an error; displays a filename containing HTML syntax as plain text.
-- [ ] **Step 2: Run frontend HTTP tests and browser smoke.** Expect absent screen/assets or controls (red).
-- [ ] **Step 3: Implement HTML/CSS/JS and static routes.** Strip one root component from webkit paths; client bounds checks match server; multipart payload encodes exact fields; render via textContent; prevent duplicate submissions; reset stale results on changes; handle failures and retry. Avoid third-party UI dependencies.
-- [ ] **Step 4: Run all pytest tests; run live Uvicorn + smoke and browser tests.** Expect real comparisons and sidebar interactions pass.
-- [ ] **Step 5: Document setup/run/test, encoding, options and upload limits; pin transitive dependencies; validate install repeatability.**
+- [x] **Step 1: Add failing static/functional tests.** `GET /` contains the tool and controls; static script/style are available. Browser smoke selects two fixture folders with different root names, asserts summary, changes all four options and rechecks results; toggles sidebar; retries after an error; displays a filename containing HTML syntax as plain text.
+- [x] **Step 2: Run frontend HTTP tests and browser smoke.** Expect absent screen/assets or controls (red).
+- [x] **Step 3: Implement HTML/CSS/JS and static routes.** Strip one root component from webkit paths; client bounds checks match server; multipart payload encodes exact fields; render via textContent; prevent duplicate submissions; reset stale results on changes; handle failures and retry. Avoid third-party UI dependencies.
+- [x] **Step 4: Run all pytest tests; run live Uvicorn + smoke and browser tests.** Expect real comparisons and sidebar interactions pass.
+- [x] **Step 5: Document setup/run/test, encoding, options and upload limits; pin transitive dependencies; validate install repeatability.**
 - [ ] **Step 6: Save tested `install_script` and `start_skill` to cloud draft, with work directory, service restart/readiness and existing-checkout guidance.**
 - [ ] **Step 7: Review complete changes, commit on `main`, check/push the new remote branch without force, verify remote SHA and save repository metadata when required.**
 
