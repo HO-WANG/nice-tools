@@ -22,7 +22,7 @@ $LibiconvSha512 = "1e8150f9bca907579330cd9c44ebbee46a260271fbe8f50d5ee24a39ef29c
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 
 function Run-Native([string]$File, [string[]]$Arguments) {
-    $Command = Get-Command $File -CommandType Application -ErrorAction Stop
+    $Command = Get-Command $File -CommandType Application -ErrorAction Stop | Select-Object -First 1
     $AseCommandOutput = @()
     $SavedErrorPreference = $ErrorActionPreference
     try {
@@ -69,10 +69,11 @@ try {
     $Dumpbin = Join-Path $Msvc.FullName "bin\Hostx64\x64\dumpbin.exe"
     if (-not (Test-Path -LiteralPath $Dumpbin)) { throw "MSVC dumpbin.exe was not found." }
     if (-not $Perl) {
-        $PerlCommand = Get-Command perl -ErrorAction SilentlyContinue
+        $PerlCommand = Get-Command perl -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($PerlCommand) { $Perl = $PerlCommand.Source }
         else {
-            $GitRoot = Split-Path -Parent (Split-Path -Parent (Get-Command git).Source)
+            $GitCommand = Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1
+            $GitRoot = Split-Path -Parent (Split-Path -Parent $GitCommand.Source)
             $Perl = Join-Path $GitRoot "usr\bin\perl.exe"
         }
     }
