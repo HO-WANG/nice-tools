@@ -2,7 +2,7 @@
 
 (() => {
   const get = (id) => document.getElementById(id);
-  const pages = { "directory-tool": "디렉토리 비교", "jasypt-tool": "Jasypt 암호화" };
+  const pages = { "directory-tool": "디렉토리 비교", "jasypt-tool": "Jasypt 암호화", "ase-tool": "ASE / BCP" };
   function showPage() {
     const selected = Object.hasOwn(pages, location.hash.slice(1)) ? location.hash.slice(1) : "directory-tool";
     for (const id of Object.keys(pages)) get(id).hidden = id !== selected;

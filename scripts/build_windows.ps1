@@ -20,6 +20,8 @@ try {
     & $BuildPython -m pip check
     if ($LASTEXITCODE -ne 0) { throw "Build dependencies are inconsistent." }
 
+    & (Join-Path $PSScriptRoot "build_ase_native.ps1") -Python $BuildPython
+
     & $BuildPython -m PyInstaller --noconfirm --clean packaging/nice-tools.spec
     if ($LASTEXITCODE -ne 0) { throw "Executable build failed." }
 

@@ -9,12 +9,14 @@ Python, 필요한 라이브러리와 HTML·CSS·JavaScript 화면을 EXE에 포�
 브라우저에서 선택하고, 같은 하위 상대 경로의 파일을 비교합니다.
 두 번째 도구는 **Jasypt 암호화**입니다. 왼쪽 메뉴에서 선택해 문자열을
 암호화·복호화하며, Java Jasypt와 호환되는 설정을 지원합니다.
+세 번째 도구는 **ASE / BCP**입니다. Sybase ASE의 오브젝트를 탐색하고,
+PC의 문자형 파일로 BCP IN / OUT을 실행합니다. 필요한 DB 클라이언트도 EXE 안에 포함합니다.
 
 ## 사용자 실행 방법
 
 1. 검증된 `nice-tools.exe`를 사용자 PC로 옮깁니다.
 2. EXE를 더블클릭합니다. 실행창이 열리고 기본 브라우저가 자동으로 열립니다.
-3. Chrome 또는 Edge에서 폴더 두 개를 선택하고 비교합니다.
+3. Chrome 또는 Edge의 왼쪽 메뉴에서 사용할 도구를 선택합니다.
 4. 종료하려면 실행창에서 `Ctrl+C`를 누릅니다. 브라우저 탭만 닫으면 앱은 계속 실행됩니다.
 
 사용자 PC에 Python이나 라이브러리를 설치할 필요가 없습니다.
@@ -128,6 +130,58 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
 입력·비밀번호·결과를 파일·로그·브라우저 저장소에 저장하지 않고 같은 PC 안에서 처리합니다.
 사용자 PC에는 Java를 설치할 필요가 없습니다.
 
+## ASE / BCP
+
+1. 왼쪽 **ASE / BCP** 메뉴를 열고 호스트, 포트(기본 5000), 사용자와 비밀번호를 입력해 연결합니다.
+2. 데이터베이스와 소유자를 선택합니다. 이름 검색과 종류 필터로 오브젝트를 찾고,
+   선택하여 컬럼의 순서·자료형·NULL·IDENTITY 정보를 확인합니다.
+3. **OUT** 또는 **IN**을 선택하고 파일 인코딩, 컬럼/행 구분자와 배치 행 수를 설정합니다.
+4. **파일 선택**을 누릅니다. Windows 파일 선택 창에서 IN은 기존 파일,
+   OUT은 저장할 위치를 지정합니다. 파일을 브라우저에 업로드하지 않습니다.
+5. **실행 내용 확인**에서 대상·설정을 확인합니다. IN은 전체 파일을 검사하고 첫 20행을 보여 줍니다.
+6. **BCP 시작**을 누릅니다. 상태와 처리 행 수를 확인하며, 필요하면 **취소**합니다.
+
+테이블은 IN/OUT, 뷰는 OUT을 지원합니다. 프로시저는 탐색만 가능합니다.
+**IN은 기존 데이터에 행을 추가합니다. 삭제·TRUNCATE를 실행하지 않습니다.**
+완료된 배치는 실패·취소 후에도 남을 수 있습니다. 같은 파일을 재실행하면 중복 행이 생길 수 있습니다.
+OUT은 같은 폴더의 임시 파일에 쓰고, 전송이 성공했을 때만 지정한 파일을 교체합니다.
+기존 파일을 덮어쓰려면 Windows 저장 창에서 확인합니다.
+파일이나 테이블 구조가 확인 이후 변경되면 다시 확인해야 합니다.
+IN을 실행하는 동안 입력 파일은 Windows에서 읽기 전용 공유로 열어 편집·삭제를 막습니다.
+
+| 설정 | 문자형 BCP 규칙 |
+| --- | --- |
+| 파일 형식 | SAP `bcp -c`에 해당하는 문자 형식. native 형식과 format 파일은 지원하지 않습니다. |
+| 인코딩 | UTF-8, CP949, EUC-KR. 파일에 실제 사용한 인코딩을 선택합니다. |
+| 컬럼 구분자 | 기본 `\t`(탭). 쉼표·파이프 등의 문자와 `\t`, `\n`, `\r`, `\\`을 입력할 수 있습니다. |
+| 행 구분자 | 기본 `\n`(LF). Windows CRLF 파일에는 `\r\n`을 선택합니다. 마지막 행에도 구분자가 필요합니다. |
+| NULL / 빈 문자열 | 빈 필드는 NULL, 문자 필드의 단일 NUL 바이트는 BCP 빈 문자열 표시입니다. |
+| 컬럼 순서 | 선택한 테이블의 모든 컬럼을 순서대로 포함합니다. CSV 따옴표·이스케이프 규칙은 적용하지 않습니다. |
+| IDENTITY | 기본은 새 ID 생성입니다. 파일에 IDENTITY 자리도 포함합니다. 기존 ID를 유지하려면 체크합니다. |
+| 배치 | 기본 1,000행. IN의 배치 완료 행 수와 최종 전송 행 수를 표시합니다. |
+
+파일 전체를 스트리밍 검사하며 고정된 파일 크기 제한을 두지 않습니다.
+미리보기에서 긴 셀을 줄여 표시해도 검사하거나 전송하는 파일은 자르지 않습니다.
+숫자의 범위·소수 자릿수와 문자 길이를 검사하며, 날짜 변환·제약조건·권한은 ASE가 최종 판단합니다.
+`unichar`/`univarchar`는 UTF-16 저장 길이를 검사합니다. 일반 문자 컬럼은 서버 문자셋을
+알 수 없는 사전 검사에서 파일 인코딩의 바이트 길이를 보수적으로 사용합니다.
+UTF-8 파일을 CP949 서버의 좁은 문자 컬럼에 넣으면 실제로 들어갈 값도 사전 검사에서
+거절될 수 있으므로, 이 경우 서버 문자셋에 맞는 파일 인코딩을 사용하세요.
+FreeTDS는 문자 값의 끝 공백을 제거할 수 있어 해당 값이 있으면 확인 화면에 알립니다.
+첫 버전 IN은 binary/varbinary/image/timestamp와 알 수 없는 자료형을 포함한 테이블을 거절합니다.
+계산·자동 생성·암호화 컬럼의 IN은 지원 범위에 포함하지 않습니다.
+
+EXE에는 FreeTDS 1.5.19, GNU libiconv와 OpenSSL을 포함하며 TDS 5.0으로 ASE에 접속합니다.
+SAP 클라이언트, ODBC 드라이버, 별도 `bcp.exe` 설치는 필요 없습니다.
+접속 정보는 실행 중 메모리에만 유지하고, 비밀번호를 명령행·파일·로그·브라우저 저장소에 남기지 않습니다.
+데이터가 이동하는 범위는 **사용자 PC와 입력한 ASE 서버 사이**입니다.
+서버 네트워크 접근과 계정의 조회/BCP 권한, DB의 bulk-copy 설정은 기존 사내 설정을 사용합니다.
+
+소스·브라우저 검사와 Windows DLL/EXE 실행 검증은 실제 ASE 왕복 테스트를 대신하지 않습니다.
+현재 개발 환경에 ASE 서버가 없어 실제 서버의 문자셋, IDENTITY, LOB와 날짜 데이터를
+IN/OUT하여 검증하지 못했습니다. 운영 데이터에 사용하기 전에 사내 ASE의 테스트 테이블에서
+같은 설정으로 OUT → IN과 행 수·내용을 확인하세요.
+
 ## 테스트와 실행 확인
 
 ```bash
@@ -152,6 +206,7 @@ Chromium 또는 Chrome이 설치되어 있으면 실제 폴더 선택과 화면 
 ```bash
 .venv/bin/python tests/browser_smoke.py --chromium /usr/bin/chromium
 .venv/bin/python tests/browser_jasypt.py --chromium /usr/bin/chromium
+.venv/bin/python scripts/browser_ase.py --url http://127.0.0.1:8000
 ```
 
 다른 서버/포트에는 `--url`을 사용합니다. Chrome 실행 파일이 다른 위치에 있으면
@@ -171,7 +226,9 @@ Java가 없는 개발 환경에서도 기준 암호문 테스트를 실행할 �
 
 ## Windows EXE 만들기 (개발자용)
 
-Windows x64 PC에 64비트 Python 3.12를 설치한 뒤 저장소 루트에서 실행합니다.
+Windows x64 빌드 PC에 Python 3.12, Visual Studio 2022의 C++ 빌드 도구와 Windows SDK,
+CMake, Git, Perl을 준비한 뒤 저장소 루트에서 실행합니다. Git for Windows의 Perl도 사용할 수 있습니다.
+이 도구들은 빌드 개발자에게만 필요합니다.
 
 ```powershell
 powershell -NoProfile -File scripts\build_windows.ps1
@@ -180,6 +237,10 @@ powershell -NoProfile -File scripts\build_windows.ps1
 빌드 도구는 `.venv-build`에 설치합니다. 빌드와 실제 실행 검증이 통과하면
 `dist\nice-tools.exe`가 만들어집니다. 배포 폴더에는 이 파일 하나만 있어야 합니다.
 PowerShell 실행 정책은 사내 정책을 따릅니다.
+빌드 중 고정된 vcpkg revision과 FreeTDS·libiconv·OpenSSL 소스를 내려받고 체크섬을 검사합니다.
+ASE DLL·필요한 CRT와 라이선스·원본 소스·패치를 EXE에 포함합니다.
+FreeTDS에는 Unicode 경로, 바이너리 파일 열기, 날짜 소수 6자리, 오버플로 검사와
+전송 실패 전파 패치를 적용합니다. `build/ase-native`와 vcpkg 바이너리 캐시는 개발용 중간 산출물입니다.
 
 실행기 개발은 다음 명령으로 확인할 수 있습니다.
 
@@ -196,12 +257,19 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 화면/정적 파일, 실제 비교 API와 파일별 diff API를 검사합니다. 큰 파일의 끝부분 차이와 diff, 54 MiB
 업로드 요청도 검증하며 Windows x64 PE 헤더를 확인합니다.
 Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개도 실제 EXE에서 검사합니다.
+ASE는 EXE의 실제 worker에서 모든 네이티브 함수의 로드와 접속 거절 오류·비밀번호 비노출을 검사합니다.
+Windows 소스 검사에는 입력 파일의 읽기 공유 잠금도 포함됩니다. ASE 전송 성공은 서버가 있어야 검증할 수 있습니다.
 
 ## 구조와 도구 추가
 
 - `nice_tools/comparison.py`: 텍스트 정규화와 디렉토리 비교
 - `nice_tools/diff.py`: 선택한 파일의 unified diff, 줄 번호와 주변 문맥
 - `nice_tools/jasypt.py`: Java Jasypt 호환 문자열 암호화·복호화
+- `nice_tools/ase_native.py`: FreeTDS DB-Library 연결·카탈로그·문자형 BCP
+- `nice_tools/ase_files.py`: 스트리밍 파일 검사와 미리보기
+- `nice_tools/ase_worker.py`, `ase_picker.py`: 격리 프로세스와 Windows 파일 선택
+- `nice_tools/ase_api.py`, `ase_jobs.py`: 로컬 API, 메모리 접속·확인·취소 작업
+- `scripts/build_ase_native.ps1`: 네이티브 라이브러리 빌드·체크섬·배포 자료
 - `nice_tools/uploads.py`: 업로드·경로·옵션 검증
 - `nice_tools/limits.py`: 비교할 파일 개수 정책
 - `nice_tools/main.py`: 정적 화면, 상태 확인, 비교·diff API

@@ -72,7 +72,7 @@ def verify(path: Path, allow_non_windows: bool = False):
                 lines.append(line)
                 match = re.search(r"http://127\.0\.0\.1:\d+", line)
                 if match:
-                    smoke_main(["--url", match.group(), "--large-files"])
+                    smoke_main(["--url", match.group(), "--large-files"] + (["--require-ase"] if not allow_non_windows else []))
                     break
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")
@@ -90,4 +90,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}".replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print("::error::Single EXE verification failed: " + detail, flush=True)
+        raise

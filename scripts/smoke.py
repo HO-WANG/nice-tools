@@ -3,7 +3,36 @@
 import argparse
 import json
 import urllib.request
+import urllib.error
+import socket
 from pathlib import Path
+
+
+def ase_checks(base, require_native=False):
+    with urllib.request.urlopen(f"{base}/api/ase/status", timeout=30) as response:
+        assert response.headers["Cache-Control"] == "no-store"
+        status = json.load(response)
+    if require_native:
+        assert status.get("available") and "1.5.19" in status.get("version", ""), status
+        # A reserved, non-listening loopback socket exercises native login and
+        # DB-Library error callbacks without contacting a real database.
+        with socket.socket() as unused:
+            unused.bind(("127.0.0.1", 0))
+            password = "smoke-password-never-log"
+            payload = {"host": "127.0.0.1", "port": unused.getsockname()[1], "user": "smoke", "password": password}
+            request = urllib.request.Request(f"{base}/api/ase/connect", data=json.dumps(payload).encode(), headers={"Content-Type": "application/json", "X-Nice-Tools": "ase"})
+            try:
+                urllib.request.urlopen(request, timeout=30)
+            except urllib.error.HTTPError as response:
+                assert response.code == 400
+                assert response.headers["Cache-Control"] == "no-store"
+                detail = response.read().decode()
+                assert password not in detail
+            else:
+                raise AssertionError("Native connection to a refused port unexpectedly succeeded")
+        print("ASE EXE smoke: bundled DB-Library loading and sanitized connection refusal passed; no live ASE transfer tested.")
+    else:
+        print("ASE HTTP smoke: local driver status passed (native availability:", status.get("available"), ").")
 
 
 def jasypt_checks(base):
@@ -49,14 +78,15 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--large-files", action="store_true", help="Verify files >10 MiB and total requests >50 MiB")
+    parser.add_argument("--require-ase", action="store_true", help="Require the bundled native ASE driver (Windows release validation)")
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
     with urllib.request.urlopen(f"{base}/health", timeout=10) as response:
         assert json.load(response) == {"status": "ok"}
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
         page = response.read()
-        assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page
-    for asset in ("styles.css", "app.js", "tools.js"):
+        assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page
+    for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
     result = compare_request(base, {
@@ -102,6 +132,7 @@ def main(argv=None):
     assert (repeated_fallback["additions"], repeated_fallback["deletions"]) == (129, 129)
     print("HTTP smoke: health, tool screen, assets, comparison options and unified file diffs passed.")
     jasypt_checks(base)
+    ase_checks(base, args.require_ase)
     if args.large_files:
         prefix = b"a" * (10 * 1024 * 1024 + 1)
         compare_request(base, {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [

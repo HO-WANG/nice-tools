@@ -1,6 +1,7 @@
 """웹 화면과 도구 API의 실행 진입점."""
 
 from pathlib import Path
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
@@ -13,8 +14,19 @@ from .diff import file_diff
 from .limits import MAX_FILES
 from .uploads import read_uploads
 from .jasypt import transform
+from .ase_api import router as ase_router
+from .ase_jobs import manager as ase_manager
 
-app = FastAPI(title="nice-tools", docs_url=None, redoc_url=None, openapi_url=None)
+@asynccontextmanager
+async def lifespan(app):
+    try:
+        yield
+    finally:
+        ase_manager.close()
+
+
+app = FastAPI(title="nice-tools", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+app.include_router(ase_router)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

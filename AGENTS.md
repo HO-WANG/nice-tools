@@ -23,3 +23,12 @@ The user requires no fixed byte-size cap for individual files or complete upload
 Jasypt changes must pass the real Java Jasypt 1.9.3 bidirectional check (`scripts/check_jasypt_java.py`), not just Python round trips. Keep the pinned Java reference fixtures and executable checks for both AES and MD5/DES settings. Java is for developer validation only; user PCs still need only the single EXE and a browser. Never persist passwords/plaintext in logs or browser storage, and keep Jasypt API responses `Cache-Control: no-store` with sanitized validation errors.
 
 Run the source suite with the project's virtualenv: `.venv/bin/python -m pytest -q` on Linux or `.venv\Scripts\python -m pytest -q` on Windows. Windows CI must run source tests, build the single EXE and verify the executable before uploading it as the distribution artifact.
+
+## ASE / BCP
+
+- Keep ASE credentials only in memory and worker stdin; never in arguments, logs, persistent settings or browser storage. Keep ASE JSON responses no-store and enforce the loopback/custom-header boundary.
+- Use the bundled, checksum-verified FreeTDS Sybase DB-Library with TDS 5.0 and isolated workers of the same EXE. Do not replace character BCP with ordinary INSERT statements.
+- IN appends. Completed batches may survive failure/cancel; show this before execution. Revalidate reviewed schema and the complete input file, and hold the Windows read-sharing guard through native transfer.
+- Publish OUT only after success under the parent's cancellation lock; preserve an existing destination on failure/cancel.
+- Preserve native source pins, checksum guards and precision/binary/failure-propagation patches. Verify the full application's native binding, not a hand-picked subset of symbols.
+- Source/mock/native-load tests do not prove ASE compatibility. Report whether real ASE IN/OUT was tested, including server charset, identity, LOB and date fidelity.
