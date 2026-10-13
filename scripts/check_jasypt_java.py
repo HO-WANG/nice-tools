@@ -36,7 +36,7 @@ def main():
     parser.add_argument('--java', default='java', help='Java 17+ JDK executable used only for tests')
     args = parser.parse_args()
     if not shutil.which(args.java):
-        raise SystemExit('A Java 17+ JDK is required for this developer-only interoperability check.')
+        raise RuntimeError('A Java 17+ JDK is required for this developer-only interoperability check.')
     with tempfile.TemporaryDirectory(prefix='nice-tools-jasypt-') as directory:
         jar = args.jar
         if jar is None:
@@ -44,16 +44,24 @@ def main():
             with urllib.request.urlopen(JAR_URL, timeout=30) as response:
                 jar.write_bytes(response.read())
         if hashlib.sha256(jar.read_bytes()).hexdigest() != JAR_SHA256:
-            raise SystemExit('Jasypt JAR SHA256 does not match the pinned reference.')
+            raise RuntimeError('Jasypt JAR SHA256 does not match the pinned reference.')
         cases = json.loads((ROOT / 'tests/fixtures/jasypt.json').read_text(encoding='utf-8'))['cases']
         for case in cases:
             config = {key: value for key, value in case.items() if key not in ('text', 'ciphertext')}
             java_encrypted = java_transform(args.java, jar, 'encrypt', case, case['text'])
-            assert transform(config | {'operation': 'decrypt', 'text': java_encrypted}) == case['text']
+            if transform(config | {'operation': 'decrypt', 'text': java_encrypted}) != case['text']:
+                raise RuntimeError(f'Python could not decrypt Java output for {case["algorithm"]}, {case["salt_generator"]}/{case["iv_generator"]}, {case["output_type"]}.')
             python_encrypted = transform(config | {'operation': 'encrypt', 'text': case['text']})
-            assert java_transform(args.java, jar, 'decrypt', case, python_encrypted) == case['text']
+            if java_transform(args.java, jar, 'decrypt', case, python_encrypted) != case['text']:
+                raise RuntimeError(f'Java could not decrypt Python output for {case["algorithm"]}, {case["salt_generator"]}/{case["iv_generator"]}, {case["output_type"]}.')
         print(f'Java Jasypt 1.9.3 interoperability: {len(cases)} configurations passed in both directions.')
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except Exception as exc:
+        # Make failures readable from the public Actions annotations as well as logs.
+        message = str(exc).replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+        print('::error::Jasypt interoperability: ' + message, flush=True)
+        raise
