@@ -1,5 +1,6 @@
 # The end-user distribution is one executable. Keep all runtime assets inside it.
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules, copy_metadata
 
 root = Path(SPECPATH).resolve().parent
 
@@ -7,13 +8,13 @@ analysis = Analysis(
     [str(root / "desktop_entry.py")],
     pathex=[str(root)],
     binaries=[],
-    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")],
+    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + copy_metadata("rapidfuzz"),
     hiddenimports=[
         "uvicorn.logging",
         "uvicorn.loops.asyncio",
         "uvicorn.protocols.http.h11_impl",
         "uvicorn.lifespan.on",
-    ],
+    ] + collect_submodules("rapidfuzz"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

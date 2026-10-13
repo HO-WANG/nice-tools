@@ -8,6 +8,28 @@ const labels = { same: "동일", different: "차이", left_only: "왼쪽만", ri
 const descriptions = { same: "옵션 적용 후 내용이 같습니다", different: "옵션 적용 후 내용이 다릅니다", left_only: "왼쪽 폴더에만 있습니다", right_only: "오른쪽 폴더에만 있습니다" };
 let results = [];
 let busy = false;
+let selectedPath = null;
+let diffController = null;
+let diffData = null;
+let diffPage = 0;
+const linesPerPage = 200;
+
+function clearDiff() {
+  diffController?.abort();
+  diffController = null;
+  selectedPath = null;
+  diffData = null;
+  $("diff-content").hidden = true;
+  $("diff-path").hidden = true;
+  $("diff-note").hidden = true;
+  $("diff-message").hidden = false;
+  $("diff-message").textContent = "목록에서 파일을 선택하세요.";
+  $("diff-retry").hidden = true;
+  $("diff-mode").value = "compared";
+  $("diff-mode").disabled = true;
+  $("diff-code").replaceChildren();
+  $("diff-panel").setAttribute("aria-busy", "false");
+}
 
 function feedback(message = "", tone = "info") {
   $("feedback").textContent = message;
@@ -16,6 +38,7 @@ function feedback(message = "", tone = "info") {
 }
 
 function clearResults() {
+  clearDiff();
   results = [];
   $("result-content").hidden = true;
   $("empty-state").hidden = false;
@@ -35,7 +58,7 @@ function updateSelection() {
   }
   const ready = fileInputs.left.files.length > 0 && fileInputs.right.files.length > 0;
   $("compare-button").disabled = busy || !ready;
-  $("selection-status").textContent = ready ? "준비되었습니다. 선택한 폴더를 서버로 보내 비교합니다." : "폴더 두 개를 선택하면 비교할 수 있습니다.";
+  $("selection-status").textContent = ready ? "준비되었습니다. 내 PC에서 비교합니다." : "폴더 두 개를 선택하면 비교할 수 있습니다.";
 }
 
 function setBusy(value) {
@@ -66,14 +89,18 @@ function buildForm() {
       form.append(`${side}_files`, file, file.name);
     }
   }
+  appendOptions(form);
+  return form;
+}
+
+function appendOptions(form, original = false) {
   for (const [name, id] of [["ignore_start", "ignore-start"], ["ignore_end", "ignore-end"]]) {
     const input = $(id);
-    if (!/^\d+$/.test(input.value)) throw new Error("무시할 글자 수는 0 이상의 정수여야 합니다.");
-    form.append(name, input.value);
+    if (!original && !/^\d+$/.test(input.value)) throw new Error("무시할 글자 수는 0 이상의 정수여야 합니다.");
+    form.append(name, original ? "0" : input.value);
   }
-  form.append("sort_lines", String($("sort-lines").checked));
-  form.append("ignore_whitespace", String($("ignore-whitespace").checked));
-  return form;
+  form.append("sort_lines", String(!original && $("sort-lines").checked));
+  form.append("ignore_whitespace", String(!original && $("ignore-whitespace").checked));
 }
 
 function renderRows() {
@@ -82,27 +109,122 @@ function renderRows() {
   const fragment = document.createDocumentFragment();
   for (const entry of rows) {
     const row = document.createElement("tr");
+    row.classList.toggle("selected-row", entry.path === selectedPath);
     const path = document.createElement("td");
-    path.textContent = entry.path;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "file-button";
+    button.textContent = entry.path;
+    button.dataset.path = entry.path;
+    button.title = entry.message || descriptions[entry.status] || "";
+    button.setAttribute("aria-pressed", String(entry.path === selectedPath));
+    path.append(button);
+    if (entry.message) {
+      const message = document.createElement("small");
+      message.className = "file-error";
+      message.textContent = entry.message;
+      path.append(message);
+    }
     const status = document.createElement("td");
     const badge = document.createElement("span");
     badge.className = `status-badge ${entry.status}`;
     badge.textContent = labels[entry.status] || entry.status;
     status.append(badge);
-    const description = document.createElement("td");
-    description.textContent = entry.message || descriptions[entry.status] || "";
-    row.append(path, status, description);
+    row.append(path, status);
     fragment.append(row);
   }
   if (!rows.length) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
-    cell.colSpan = 3;
+    cell.colSpan = 2;
     cell.textContent = "이 상태의 파일이 없습니다.";
     row.append(cell);
     fragment.append(row);
   }
   $("result-body").replaceChildren(fragment);
+}
+
+function renderDiffPage() {
+  const fragment = document.createDocumentFragment();
+  const start = diffPage * linesPerPage;
+  for (const line of diffData.lines.slice(start, start + linesPerPage)) {
+    const row = document.createElement("tr");
+    row.className = line.kind;
+    if (line.kind === "hunk") {
+      const cell = document.createElement("td");
+      cell.colSpan = 4;
+      cell.textContent = line.text;
+      row.append(cell);
+    } else {
+      for (const value of [line.old_line ?? "", line.new_line ?? "", line.kind === "add" ? "+" : line.kind === "delete" ? "-" : " ", line.text]) {
+        const cell = document.createElement("td");
+        cell.textContent = String(value);
+        row.append(cell);
+      }
+    }
+    fragment.append(row);
+  }
+  $("diff-code").replaceChildren(fragment);
+  const pages = Math.ceil(diffData.lines.length / linesPerPage);
+  $("diff-pagination").hidden = pages <= 1;
+  $("diff-page-label").textContent = `${diffPage + 1} / ${pages} · ${diffData.lines.length.toLocaleString("ko-KR")}줄`;
+  $("diff-prev").disabled = diffPage === 0;
+  $("diff-next").disabled = diffPage >= pages - 1;
+  document.querySelector(".diff-scroll").scrollTop = 0;
+}
+
+async function showDiff(path) {
+  diffController?.abort();
+  const controller = new AbortController();
+  diffController = controller;
+  selectedPath = path;
+  diffData = null;
+  diffPage = 0;
+  for (const button of $("result-body").querySelectorAll("button[data-path]")) {
+    const selected = button.dataset.path === path;
+    button.setAttribute("aria-pressed", String(selected));
+    button.closest("tr").classList.toggle("selected-row", selected);
+  }
+  $("diff-path").textContent = path;
+  $("diff-path").hidden = false;
+  $("diff-mode").disabled = false;
+  $("diff-content").hidden = true;
+  $("diff-code").replaceChildren();
+  $("diff-retry").hidden = true;
+  $("diff-note").hidden = false;
+  const original = $("diff-mode").value === "original";
+  $("diff-note").textContent = original ? "원본 줄 기준 · 줄바꿈 형식과 마지막 줄바꿈 유무는 무시합니다." : "옵션 적용 후 줄 기준 · 정렬 시 줄 번호도 정렬된 순서입니다.";
+  $("diff-message").hidden = false;
+  $("diff-message").textContent = "변경 내용을 읽고 있습니다…";
+  $("diff-panel").setAttribute("aria-busy", "true");
+  try {
+    const form = new FormData();
+    for (const [side, input] of Object.entries(fileInputs)) {
+      const file = Array.from(input.files).find((item) => item.webkitRelativePath.split("/").slice(1).join("/") === path);
+      form.append(`${side}_paths`, JSON.stringify(file ? [path] : []));
+      if (file) form.append(`${side}_files`, file, file.name);
+    }
+    appendOptions(form, original);
+    const response = await fetch("/api/diff", { method: "POST", body: form, signal: controller.signal });
+    const data = await response.json().catch(() => null);
+    if (diffController !== controller) return;
+    if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "변경 내용을 읽지 못했습니다.");
+    if (!data || !Array.isArray(data.lines)) throw new Error("변경 내용을 읽지 못했습니다.");
+    diffData = data;
+    $("diff-content").hidden = false;
+    $("diff-added").textContent = `+${data.additions.toLocaleString("ko-KR")} 추가`;
+    $("diff-deleted").textContent = `−${data.deletions.toLocaleString("ko-KR")} 삭제`;
+    $("diff-headers").textContent = `diff --git a/${path} b/${path}\n--- ${data.old_exists ? `a/${path}` : "/dev/null"}\n+++ ${data.new_exists ? `b/${path}` : "/dev/null"}`;
+    $("diff-message").hidden = data.lines.length > 0;
+    $("diff-message").textContent = data.identical ? "표시할 줄 차이가 없습니다." : "한쪽 폴더에만 있는 빈 파일입니다.";
+    renderDiffPage();
+  } catch (error) {
+    if (diffController !== controller || error.name === "AbortError") return;
+    $("diff-message").textContent = error instanceof TypeError ? "앱에 연결할 수 없습니다. 실행창을 확인한 뒤 다시 시도하세요." : error.message;
+    $("diff-retry").hidden = false;
+  } finally {
+    if (diffController === controller) $("diff-panel").setAttribute("aria-busy", "false");
+  }
 }
 
 $("compare-form").addEventListener("submit", async (event) => {
@@ -133,7 +255,19 @@ $("compare-form").addEventListener("submit", async (event) => {
 
 for (const input of Object.values(fileInputs)) input.addEventListener("change", () => { clearResults(); updateSelection(); });
 for (const input of optionInputs) input.addEventListener("input", clearResults);
-$("status-filter").addEventListener("change", renderRows);
+$("status-filter").addEventListener("change", () => {
+  const filter = $("status-filter").value;
+  if (selectedPath && !results.some((entry) => entry.path === selectedPath && (filter === "all" || entry.status === filter))) clearDiff();
+  renderRows();
+});
+$("result-body").addEventListener("click", (event) => {
+  const button = event.target.closest("button[data-path]");
+  if (button) showDiff(button.dataset.path);
+});
+$("diff-mode").addEventListener("change", () => { if (selectedPath) showDiff(selectedPath); });
+$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath); });
+$("diff-prev").addEventListener("click", () => { diffPage -= 1; renderDiffPage(); });
+$("diff-next").addEventListener("click", () => { diffPage += 1; renderDiffPage(); });
 $("reset-options").addEventListener("click", () => {
   $("sort-lines").checked = false;
   $("ignore-whitespace").checked = false;

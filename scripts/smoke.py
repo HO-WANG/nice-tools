@@ -5,7 +5,7 @@ import json
 import urllib.request
 
 
-def compare_request(base, fields, files, expected):
+def upload_request(base, route, fields, files):
     boundary = "nice-tools-smoke-boundary"
     parts = []
     for name, value in fields.items():
@@ -13,9 +13,14 @@ def compare_request(base, fields, files, expected):
     for name, filename, content in files:
         parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\nContent-Type: text/plain\r\n\r\n'.encode() + content + b"\r\n")
     parts.append(f"--{boundary}--\r\n".encode())
-    request = urllib.request.Request(f"{base}/api/compare", data=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    request = urllib.request.Request(f"{base}/api/{route}", data=b"".join(parts), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
     with urllib.request.urlopen(request, timeout=30) as response:
         result = json.load(response)
+    return result
+
+
+def compare_request(base, fields, files, expected):
+    result = upload_request(base, "compare", fields, files)
     assert result["summary"] == expected, result
     return result
 
@@ -29,7 +34,8 @@ def main(argv=None):
     with urllib.request.urlopen(f"{base}/health", timeout=10) as response:
         assert json.load(response) == {"status": "ok"}
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
-        assert b'id="left-folder"' in response.read()
+        page = response.read()
+        assert b'id="left-folder"' in page and b'id="diff-panel"' in page
     for asset in ("styles.css", "app.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
@@ -45,19 +51,53 @@ def main(argv=None):
         ("right_files", "only-right.txt", b"right"),
     ], {"total": 3, "same": 1, "different": 0, "left_only": 1, "right_only": 1, "error": 0})
     assert result["results"][0] == {"path": "a.txt", "status": "same"}, result
-    print("HTTP smoke: health, tool screen, assets, upload and all four comparison options passed.")
+    diff = upload_request(base, "diff", {"left_paths": '["a.txt"]', "right_paths": '["a.txt"]'}, [
+        ("left_files", "a.txt", b"context\nold\nend"),
+        ("right_files", "a.txt", b"context\nnew\nend"),
+    ])
+    assert (diff["additions"], diff["deletions"]) == (1, 1), diff
+    assert [line["text"] for line in diff["lines"] if line["kind"] in ("delete", "add")] == ["old", "new"], diff
+    normalized = upload_request(base, "diff", {
+        "left_paths": '["a.txt"]', "right_paths": '["a.txt"]',
+        "sort_lines": "true", "ignore_whitespace": "true", "ignore_start": "1", "ignore_end": "1",
+    }, [("left_files", "a.txt", b"Xa bY\nXcdY"), ("right_files", "a.txt", b"QcdR\nQabR")])
+    assert normalized["identical"] and not normalized["lines"], normalized
+    one_side = upload_request(base, "diff", {"left_paths": '[]', "right_paths": '["new.txt"]'}, [
+        ("right_files", "new.txt", b"added"),
+    ])
+    assert one_side["additions"] == 1 and not one_side["old_exists"], one_side
+    repeated = upload_request(base, "diff", {"left_paths": '["repeated.txt"]', "right_paths": '["repeated.txt"]'}, [
+        ("left_files", "repeated.txt", b"common line\n" * 10000),
+        ("right_files", "repeated.txt", b"changed first\n" + b"common line\n" * 9998 + b"changed last\n"),
+    ])
+    assert (repeated["additions"], repeated["deletions"]) == (2, 2)
+    assert len(repeated["lines"]) <= 16
+    many_edits = ["common line"] * 10000
+    for i in range(129):
+        many_edits[i * 9999 // 128] = f"edit {i}"
+    repeated_fallback = upload_request(base, "diff", {"left_paths": '["repeated.txt"]', "right_paths": '["repeated.txt"]'}, [
+        ("left_files", "repeated.txt", b"common line\n" * 10000),
+        ("right_files", "repeated.txt", "\n".join(many_edits).encode()),
+    ])
+    assert (repeated_fallback["additions"], repeated_fallback["deletions"]) == (129, 129)
+    print("HTTP smoke: health, tool screen, assets, comparison options and unified file diffs passed.")
     if args.large_files:
         prefix = b"a" * (10 * 1024 * 1024 + 1)
         compare_request(base, {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [
             ("left_files", "large.txt", prefix + b"x"),
             ("right_files", "large.txt", prefix + b"y"),
         ], {"total": 1, "same": 0, "different": 1, "left_only": 0, "right_only": 0, "error": 0})
+        large_diff = upload_request(base, "diff", {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [
+            ("left_files", "large.txt", prefix + b"\nold"),
+            ("right_files", "large.txt", prefix + b"\nnew"),
+        ])
+        assert [line["text"] for line in large_diff["lines"] if line["kind"] in ("delete", "add")] == ["old", "new"]
         content = b"a" * (9 * 1024 * 1024)
         paths = [f"file{i}.txt" for i in range(3)]
         compare_request(base, {"left_paths": json.dumps(paths), "right_paths": json.dumps(paths)}, [
             (side + "_files", path, content) for side in ("left", "right") for path in paths
         ], {"total": 3, "same": 3, "different": 0, "left_only": 0, "right_only": 0, "error": 0})
-        print("Large-file smoke: compared bytes past 10 MiB and a 54 MiB upload request.")
+        print("Large-file smoke: comparison and diff past 10 MiB and a 54 MiB upload request.")
 
 
 if __name__ == "__main__":

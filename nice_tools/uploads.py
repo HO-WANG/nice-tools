@@ -58,13 +58,13 @@ def parse_paths(form: FormData, name: str, count: int) -> list[str]:
     return paths
 
 
-async def read_uploads(form: FormData) -> tuple[dict[str, bytes], dict[str, bytes], CompareOptions]:
+async def read_uploads(form: FormData, *, allow_one_side: bool = False) -> tuple[dict[str, bytes], dict[str, bytes], CompareOptions]:
     expected = {"left_files", "right_files", "left_paths", "right_paths", "sort_lines", "ignore_whitespace", "ignore_start", "ignore_end"}
     if any(key not in expected for key in form):
         raise HTTPException(400, "알 수 없는 업로드 항목이 있습니다.")
     left = form.getlist("left_files")
     right = form.getlist("right_files")
-    if not left or not right:
+    if (not left and not right) or (not allow_one_side and (not left or not right)):
         raise HTTPException(400, "파일이 있는 폴더 두 개를 선택해 주세요.")
     if len(left) + len(right) > MAX_FILES:
         raise HTTPException(400, "파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.")
