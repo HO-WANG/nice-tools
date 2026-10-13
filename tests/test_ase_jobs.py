@@ -10,7 +10,7 @@ def manager_for(tmp_path, transfer="success"):
 
     script = tmp_path / "worker.py"
     script.write_text('''import sys,json,time
-p=json.load(sys.stdin)
+p=json.load(sys.stdin.buffer)
 op=p['operation']
 if op=='databases': r={'databases':[{'id':1,'name':'db'}]}
 elif op=='pick': r={'cancelled':False,'path':p['suggested_name']}

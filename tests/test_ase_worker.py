@@ -128,17 +128,20 @@ def test_input_verification_rejects_replaced_file_even_when_stat_and_hash_match(
     replacement.write_bytes(b"1\n")
     stat = path.stat()
     os.utime(replacement, ns=(stat.st_atime_ns, stat.st_mtime_ns))
-    digest = hashlib.sha256()
-    class ReplacingDigest:
-        def update(self, chunk):
-            digest.update(chunk)
-            if replacement.exists():
-                os.replace(replacement, path)
-        def hexdigest(self):
-            return digest.hexdigest()
-    monkeypatch.setattr(worker.hashlib, "sha256", ReplacingDigest)
+    original_stat = Path.stat
+    replaced = False
+    def replace_before_current_stat(actual_path, *args, **kwargs):
+        nonlocal replaced
+        if actual_path == path and not replaced:
+            # _check_input closes its read handle before this path stat. Windows
+            # forbids replacing an ordinary Python file while it remains open.
+            os.replace(replacement, path)
+            replaced = True
+        return original_stat(actual_path, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", replace_before_current_stat)
     with pytest.raises(ValueError, match="changed"):
         worker._check_input(path, payload["fingerprint"])
+    assert replaced
 
 
 @pytest.mark.parametrize("native_error", [False, True])
