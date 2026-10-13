@@ -4,8 +4,6 @@ const $ = (id) => document.getElementById(id);
 const fileInputs = { left: $("left-folder"), right: $("right-folder") };
 const optionInputs = [$("sort-lines"), $("ignore-whitespace"), $("ignore-start"), $("ignore-end")];
 const maxFiles = 1000;
-const maxFileBytes = 10 * 1024 * 1024;
-const maxPayloadBytes = 50 * 1024 * 1024;
 const labels = { same: "동일", different: "차이", left_only: "왼쪽만", right_only: "오른쪽만", error: "읽기 오류" };
 const descriptions = { same: "옵션 적용 후 내용이 같습니다", different: "옵션 적용 후 내용이 다릅니다", left_only: "왼쪽 폴더에만 있습니다", right_only: "오른쪽 폴더에만 있습니다" };
 let results = [];
@@ -55,11 +53,7 @@ function buildForm() {
   if (!left.length || !right.length) throw new Error("파일이 있는 폴더 두 개를 선택해 주세요.");
   const all = [...left, ...right];
   if (all.length > maxFiles) throw new Error("파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.");
-  const large = all.find((file) => file.size > maxFileBytes);
-  if (large) throw new Error(`개별 파일은 10 MiB 이내여야 합니다: ${large.name}`);
   const form = new FormData();
-  let overhead = 0;
-  const encoder = new TextEncoder();
   for (const [side, files] of [["left", left], ["right", right]]) {
     const paths = files.map((file) => {
       const parts = file.webkitRelativePath.split("/");
@@ -67,15 +61,10 @@ function buildForm() {
       return parts.slice(1).join("/");
     });
     const encodedPaths = JSON.stringify(paths);
-    overhead += encoder.encode(encodedPaths).length;
     form.append(`${side}_paths`, encodedPaths);
     for (const file of files) {
       form.append(`${side}_files`, file, file.name);
-      overhead += encoder.encode(file.name).length + 512;
     }
-  }
-  if (all.reduce((sum, file) => sum + file.size, 0) + overhead + 4096 > maxPayloadBytes) {
-    throw new Error("업로드 요청은 두 폴더 합계 50 MiB 이내여야 합니다. 파일 크기를 줄여 주세요.");
   }
   for (const [name, id] of [["ignore_start", "ignore-start"], ["ignore_end", "ignore-end"]]) {
     const input = $(id);

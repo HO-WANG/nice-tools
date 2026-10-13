@@ -7,7 +7,7 @@ from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 
 from .comparison import CompareOptions
-from .limits import MAX_FILE_BYTES, MAX_FILES
+from .limits import MAX_FILES
 
 
 def single_field(form: FormData, name: str, default: str | None = None) -> str:
@@ -82,11 +82,6 @@ async def read_uploads(form: FormData) -> tuple[dict[str, bytes], dict[str, byte
     for paths, files in ((left_paths, left), (right_paths, right)):
         contents = {}
         for path, file in zip(paths, files, strict=True):
-            if file.size is not None and file.size > MAX_FILE_BYTES:
-                raise HTTPException(413, f"개별 파일은 10 MiB 이내여야 합니다: {path}")
-            content = await file.read(MAX_FILE_BYTES + 1)
-            if len(content) > MAX_FILE_BYTES:
-                raise HTTPException(413, f"개별 파일은 10 MiB 이내여야 합니다: {path}")
-            contents[path] = content
+            contents[path] = await file.read()
         collections.append(contents)
     return collections[0], collections[1], options

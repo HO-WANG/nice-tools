@@ -14,6 +14,10 @@
 
 Use the existing isolated cloud checkout. Do not create a Git worktree unless the user explicitly asks.
 
+## File comparison
+
+The user requires no fixed byte-size cap for individual files or complete upload requests. Compare complete contents, including differences beyond the former 10 MiB limit. Keep large-file and large-request regression checks in source tests and executable verification. Actual capacity depends on the PC's memory and temporary storage.
+
 ## Validation
 
 Run the source suite with the project's virtualenv: `.venv/bin/python -m pytest -q` on Linux or `.venv\Scripts\python -m pytest -q` on Windows. Windows CI must run source tests, build the single EXE and verify the executable before uploading it as the distribution artifact.

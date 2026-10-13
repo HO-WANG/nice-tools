@@ -16,8 +16,8 @@ def main():
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="nice-tools-browser-") as directory:
         root = Path(directory)
-        left, right, oversized = root / "before", root / "after", root / "too-large"
-        for folder in (left, right, oversized):
+        left, right, large, too_many = root / "before", root / "after", root / "large-files", root / "many-files"
+        for folder in (left, right, large, too_many):
             folder.mkdir()
         for folder in (left, right):
             (folder / "sub").mkdir()
@@ -27,7 +27,9 @@ def main():
         (right / "changed.txt").write_text("Qc dR\nQabR", encoding="utf-8")
         (left / "left-only.txt").write_text("left", encoding="utf-8")
         (right / "right-only.txt").write_text("right", encoding="utf-8")
-        (oversized / "large.txt").write_bytes(b"a" * (10 * 1024 * 1024 + 1))
+        (large / "large.txt").write_bytes(b"a" * (10 * 1024 * 1024 + 1))
+        for i in range(1000):
+            (too_many / f"file{i}.txt").write_bytes(b"a")
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(executable_path=args.chromium, headless=True)
             page = browser.new_page(viewport={"width": 1440, "height": 1000})
@@ -59,9 +61,18 @@ def main():
             expect(page.locator("#sidebar-toggle")).to_have_attribute("aria-expanded", "false")
             page.locator("#sidebar-toggle").click()
             expect(page.locator("#sidebar-toggle")).to_have_attribute("aria-expanded", "true")
-            page.locator("#left-folder").set_input_files(str(oversized))
+            (right / "large.txt").write_bytes((large / "large.txt").read_bytes())
+            page.locator("#left-folder").set_input_files(str(large))
+            page.locator("#right-folder").set_input_files(str(right))
             page.locator("#compare-button").click()
-            expect(page.locator("#feedback")).to_contain_text("10 MiB")
+            expect(page.locator("#result-content")).to_be_visible(timeout=20000)
+            expect(page.locator('[data-stat="same"]')).to_have_text("1")
+            expect(page.locator('[data-stat="right_only"]')).to_have_text("4")
+            (right / "large.txt").unlink()
+            page.locator("#right-folder").set_input_files(str(right))
+            page.locator("#left-folder").set_input_files(str(too_many))
+            page.locator("#compare-button").click()
+            expect(page.locator("#feedback")).to_contain_text("1,000")
             page.locator("#left-folder").set_input_files(str(left))
             page.locator("#compare-button").click()
             expect(page.locator("#result-content")).to_be_visible()
@@ -74,7 +85,7 @@ def main():
             assert not errors, errors
             assert all(urlsplit(url).netloc == urlsplit(args.url).netloc for url in requests), requests
             browser.close()
-    print("Browser smoke: folder selection, 4 options, results, filter, sidebar, retry, filename escaping, mobile and offline assets passed.")
+    print("Browser smoke: folder selection, 4 options, large files, results, filter, sidebar, retry, filename escaping, mobile and offline assets passed.")
 
 
 if __name__ == "__main__":

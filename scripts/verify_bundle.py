@@ -72,7 +72,7 @@ def verify(path: Path, allow_non_windows: bool = False):
                 lines.append(line)
                 match = re.search(r"http://127\.0\.0\.1:\d+", line)
                 if match:
-                    smoke_main(["--url", match.group()])
+                    smoke_main(["--url", match.group(), "--large-files"])
                     break
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")

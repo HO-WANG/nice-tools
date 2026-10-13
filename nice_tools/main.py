@@ -9,11 +9,10 @@ from starlette.responses import FileResponse
 from starlette.staticfiles import StaticFiles
 
 from .comparison import compare_directories
-from .limits import BodyLimitMiddleware, MAX_FILES
+from .limits import MAX_FILES
 from .uploads import read_uploads
 
 app = FastAPI(title="nice-tools", docs_url=None, redoc_url=None, openapi_url=None)
-app.add_middleware(BodyLimitMiddleware)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

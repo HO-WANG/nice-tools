@@ -94,23 +94,47 @@ def test_too_many_files(client):
     assert response.status_code == 400
 
 
-def test_large_file_rejected(client):
-    assert client.post("/api/compare", data=form_data(), files=pair(b"a" * (10 * 1024 * 1024 + 1))).status_code == 413
+def test_large_files_are_compared_through_their_last_byte(client):
+    prefix = b"a" * (10 * 1024 * 1024 + 1)
+    response = client.post("/api/compare", data=form_data(), files=pair(prefix + b"x", prefix + b"y"))
+    assert response.status_code == 200
+    assert response.json()["summary"]["different"] == 1
     assert client.get("/health").status_code == 200
 
 
-def test_declared_oversized_body_rejected(client):
-    response = client.post("/api/compare", content=b"", headers={"Content-Length": str(50 * 1024 * 1024 + 1)})
-    assert response.status_code == 413
+def large_form():
+    content = b"a" * (9 * 1024 * 1024)
+    paths = [f"file{i}.txt" for i in range(3)]
+    files = [(side + "_files", (path, content, "text/plain")) for side in ("left", "right") for path in paths]
+    return form_data(left_paths=paths, right_paths=paths), files
 
 
-def test_streaming_oversized_body_rejected(api):
-    from nice_tools.limits import BodyLimitMiddleware
-    prefix = b'--boundary\r\nContent-Disposition: form-data; name="left_files"; filename="a"\r\n\r\n'
-    with TestClient(BodyLimitMiddleware(api.app, max_bytes=1024)) as client:
-        response = client.post("/api/compare", content=iter([prefix, b"a" * 900, b"a" * 900]), headers={"Content-Type": "multipart/form-data; boundary=boundary"})
-        assert response.status_code == 413
-        assert client.get("/health").json() == {"status": "ok"}
+def test_request_larger_than_50_mib_is_compared(client):
+    data, files = large_form()
+    response = client.post("/api/compare", data=data, files=files)
+    assert response.status_code == 200
+    assert response.json()["summary"]["same"] == 3
+    assert response.json()["summary"]["total"] == 3
+
+
+def test_large_stream_without_content_length_is_compared(client):
+    data, files = large_form()
+    boundary = "large-file-stream-boundary"
+
+    def stream():
+        for name, value in data.items():
+            yield f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+        for name, (filename, content, content_type) in files:
+            yield f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"; filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'.encode()
+            yield content
+            yield b"\r\n"
+        yield f"--{boundary}--\r\n".encode()
+
+    response = client.post("/api/compare", content=stream(), headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    assert "content-length" not in response.request.headers
+    assert response.status_code == 200
+    assert response.json()["summary"]["same"] == 3
+    assert client.get("/health").json() == {"status": "ok"}
 
 
 def test_binary_is_per_file_error(client):
