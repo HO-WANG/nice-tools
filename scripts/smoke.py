@@ -5,10 +5,10 @@ import json
 import urllib.request
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     base = args.url.rstrip("/")
     with urllib.request.urlopen(f"{base}/health", timeout=10) as response:
         assert json.load(response) == {"status": "ok"}
