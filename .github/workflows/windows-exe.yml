@@ -27,7 +27,17 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run source tests
-        run: python -m pytest -q
+        shell: pwsh
+        run: |
+          $TestOutput = & python -m pytest -q 2>&1 | Tee-Object -FilePath source-tests.log
+          $TestExit = $LASTEXITCODE
+          $TestOutput | ForEach-Object { Write-Host $_ }
+          if ($TestExit -ne 0) {
+            $Diagnostic = ($TestOutput | Select-Object -Last 100) -join "`n"
+            $Diagnostic = $Diagnostic.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Host "::error::Windows source tests failed: $Diagnostic"
+            exit $TestExit
+          }
       - name: Verify Java Jasypt interoperability
         shell: pwsh
         run: python scripts/check_jasypt_java.py --java "$env:JAVA_HOME_17_X64\bin\java.exe"
