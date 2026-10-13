@@ -7,6 +7,8 @@ Python, 필요한 라이브러리와 HTML·CSS·JavaScript 화면을 EXE에 포�
 
 첫 도구는 **디렉토리 텍스트 비교**입니다. 사용자 PC의 폴더 두 개를
 브라우저에서 선택하고, 같은 하위 상대 경로의 파일을 비교합니다.
+두 번째 도구는 **Jasypt 암호화**입니다. 왼쪽 메뉴에서 선택해 문자열을
+암호화·복호화하며, Java Jasypt와 호환되는 설정을 지원합니다.
 
 ## 사용자 실행 방법
 
@@ -98,6 +100,34 @@ UTF-8로 해석할 수 없거나 NUL 문자가 포함된 파일은 읽기 오류
 파일과 비교 기록을 영구 저장하지 않습니다.
 상세 보기를 열 때 선택한 파일만 같은 PC의 앱으로 다시 보내며, 요청 후 임시 업로드를 정리합니다.
 
+## Jasypt 암호화
+
+왼쪽 메뉴의 **Jasypt 암호화**를 선택합니다. 알고리즘·비밀번호와 기존 서비스의
+설정을 입력하고, **Encrypt** 또는 **Decrypt**를 실행합니다.
+결과를 복사하거나 **결과를 입력으로** 눌러 반대 작업에 사용할 수 있습니다.
+**모두 지우기**는 입력·비밀번호·결과와 설정을 초기화합니다.
+
+| 입력 | 지원 값 / 대응하는 Jasypt 설정 |
+| --- | --- |
+| 알고리즘 | `PBEWITHHMACSHA512ANDAES_256` (기본), `PBEWithMD5AndDES` |
+| 비밀번호 | `password`: ASCII 영문·숫자·기호·스페이스. Java SunJCE와 동일한 문자 조건을 사용합니다. |
+| 키 생성 반복 횟수 | `keyObtentionIterations`: 기본 1,000, 입력 범위 1~1,000,000 |
+| Salt 생성기 | `org.jasypt.salt.RandomSaltGenerator` (기본), `org.jasypt.salt.ZeroSaltGenerator` |
+| IV 생성기 | `org.jasypt.iv.RandomIvGenerator` (AES 기본), `org.jasypt.iv.NoIvGenerator` (MD5/DES 기본) |
+| 암호문 형식 | `stringOutputType`: `base64` (기본), `hexadecimal` |
+
+AES에는 RandomIvGenerator가 필요합니다. 알고리즘을 바꾸면 IV 기본값도 변경됩니다.
+SunJCE / Java Jasypt 1.9.3의 두 알고리즘과 salt·IV 포맷을 지원하며,
+다른 알고리즘·provider·사용자 정의 생성기는 지원 범위에 포함하지 않습니다.
+원문은 UTF-8로 처리하므로 한글·이모지·공백·줄바꿈과 빈 문자열을 그대로 처리합니다.
+랜덤 salt 또는 IV를 사용하면 같은 원문도 암호문이 달라집니다.
+
+**ENC(...)로 감싸기**를 선택하면 Spring 설정에 사용할 형태로 암호문을 출력합니다.
+복호화는 감싸진 값과 순수 암호문 모두 받습니다. 복호화 시 비밀번호·알고리즘·반복 횟수·
+salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 합니다.
+입력·비밀번호·결과를 파일·로그·브라우저 저장소에 저장하지 않고 같은 PC 안에서 처리합니다.
+사용자 PC에는 Java를 설치할 필요가 없습니다.
+
 ## 테스트와 실행 확인
 
 ```bash
@@ -121,10 +151,23 @@ Chromium 또는 Chrome이 설치되어 있으면 실제 폴더 선택과 화면 
 
 ```bash
 .venv/bin/python tests/browser_smoke.py --chromium /usr/bin/chromium
+.venv/bin/python tests/browser_jasypt.py --chromium /usr/bin/chromium
 ```
 
 다른 서버/포트에는 `--url`을 사용합니다. Chrome 실행 파일이 다른 위치에 있으면
 `--chromium`에 해당 경로를 지정합니다. 화면 캡처는 선택적으로 `--screenshot 경로.png`를 지정합니다.
+
+Jasypt 기준 암호문은 실제 Java Jasypt 1.9.3으로 만든 12개 설정 조합입니다.
+Java가 없는 개발 환경에서도 기준 암호문 테스트를 실행할 수 있습니다.
+양방향 호환을 다시 검사하려면 **개발 환경에만** Java 17 이상 JDK를 준비하고 실행합니다.
+
+```bash
+.venv/bin/python scripts/check_jasypt_java.py
+```
+
+검사용 JAR을 Maven에서 내려받고 고정된 SHA256을 확인합니다.
+기존 JAR이 있으면 `--jar 경로`로 지정할 수 있습니다. Windows CI도 이 검사를 실행합니다.
+검사용 JAR·JDK는 배포 EXE에 포함하거나 사용자 PC에 요구하지 않습니다.
 
 ## Windows EXE 만들기 (개발자용)
 
@@ -152,11 +195,13 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 `scripts/verify_bundle.py`는 파일 하나만 있는 별도 폴더(공백·한글 경로)에서 EXE를 실행하고
 화면/정적 파일, 실제 비교 API와 파일별 diff API를 검사합니다. 큰 파일의 끝부분 차이와 diff, 54 MiB
 업로드 요청도 검증하며 Windows x64 PE 헤더를 확인합니다.
+Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개도 실제 EXE에서 검사합니다.
 
 ## 구조와 도구 추가
 
 - `nice_tools/comparison.py`: 텍스트 정규화와 디렉토리 비교
 - `nice_tools/diff.py`: 선택한 파일의 unified diff, 줄 번호와 주변 문맥
+- `nice_tools/jasypt.py`: Java Jasypt 호환 문자열 암호화·복호화
 - `nice_tools/uploads.py`: 업로드·경로·옵션 검증
 - `nice_tools/limits.py`: 비교할 파일 개수 정책
 - `nice_tools/main.py`: 정적 화면, 상태 확인, 비교·diff API

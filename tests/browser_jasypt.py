@@ -1,0 +1,99 @@
+"""실제 브라우저에서 두 도구 메뉴와 Jasypt 입력·결과 흐름 확인."""
+import argparse
+from urllib.parse import urlsplit
+from playwright.sync_api import expect, sync_playwright
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--url', default='http://127.0.0.1:8000')
+    parser.add_argument('--chromium', default='/usr/bin/chromium')
+    parser.add_argument('--screenshot')
+    args = parser.parse_args()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(executable_path=args.chromium, headless=True)
+        context = browser.new_context(viewport={'width':1440,'height':1000}, permissions=['clipboard-read','clipboard-write'])
+        page = context.new_page()
+        errors, requests = [], []
+        page.on('pageerror', lambda err: errors.append(str(err)))
+        page.on('request', lambda req: requests.append(req.url))
+        page.goto(args.url, wait_until='networkidle')
+        page.get_by_role('link', name='Jasypt 암호화', exact=True).click(timeout=5000)
+        expect(page.locator('#directory-tool')).to_be_hidden()
+        expect(page.get_by_role('heading', name='Jasypt 암호화', exact=True)).to_be_visible()
+        expect(page.locator('#current-tool')).to_have_text('Jasypt 암호화')
+        text = ' 한글🙂\n<script>alert(1)</script>\t trailing '
+        page.locator('#jasypt-password').fill('test-password!')
+        expect(page.locator('#jasypt-password')).to_have_attribute('type','password')
+        page.locator('#jasypt-show-password').click()
+        expect(page.locator('#jasypt-password')).to_have_attribute('type','text')
+        page.locator('#jasypt-show-password').click()
+        page.locator('#jasypt-input').fill(text)
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-result')).to_be_visible()
+        encrypted = page.locator('#jasypt-output').input_value()
+        assert encrypted.startswith('ENC(')
+        assert 'test-password!' not in encrypted
+        page.locator('#jasypt-copy').click()
+        expect(page.locator('#jasypt-feedback')).to_contain_text('복사')
+        assert page.evaluate('navigator.clipboard.readText()') == encrypted
+        page.locator('#jasypt-use-result').click()
+        expect(page.locator('#jasypt-decrypt')).to_be_checked()
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-output')).to_have_value(text)
+        assert page.locator('#jasypt-result script').count()==0
+        page.locator('#jasypt-password').fill('wrong-password')
+        expect(page.locator('#jasypt-result')).to_be_hidden()
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-feedback')).to_contain_text('복호화할 수 없습니다')
+        page.locator('#jasypt-password').fill('test-password!')
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-output')).to_have_value(text)
+        page.locator('#jasypt-clear').click()
+        expect(page.locator('#jasypt-password')).to_have_value('')
+        expect(page.locator('#jasypt-result')).to_be_hidden()
+        page.locator('#jasypt-algorithm').select_option('PBEWithMD5AndDES')
+        expect(page.locator('#jasypt-iv')).to_have_value('none')
+        page.locator('#jasypt-password').fill('test-password')
+        page.locator('#jasypt-output-type').select_option('hexadecimal')
+        page.locator('#jasypt-salt').select_option('zero')
+        page.locator('#jasypt-wrap').uncheck()
+        page.locator('#jasypt-input').fill('legacy text')
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-result')).to_be_visible()
+        assert all(c in '0123456789ABCDEF' for c in page.locator('#jasypt-output').input_value())
+        page.locator('#jasypt-use-result').click()
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-output')).to_have_value('legacy text')
+        page.locator('#jasypt-clear').click()
+        page.locator('#jasypt-password').fill('test-password')
+        page.locator('#jasypt-input').fill('working')
+        delayed=[]
+        page.route('**/api/jasypt', lambda route:delayed.append(route), times=1)
+        page.locator('#jasypt-submit').click()
+        expect(page.locator('#jasypt-submit')).to_be_disabled()
+        page.locator('#jasypt-clear').click()
+        assert delayed
+        delayed[0].fulfill(status=200,json={'result':'stale-result'})
+        expect(page.locator('#jasypt-result')).to_be_hidden()
+        expect(page.locator('#jasypt-submit')).to_be_enabled()
+        assert page.evaluate('localStorage.length')==0
+        page.get_by_role('link',name='디렉토리 비교',exact=True).click()
+        expect(page.locator('#directory-tool')).to_be_visible()
+        expect(page.locator('#jasypt-tool')).to_be_hidden()
+        page.go_back()
+        expect(page.locator('#jasypt-tool')).to_be_visible()
+        page.reload()
+        expect(page.locator('#jasypt-tool')).to_be_visible()
+        if args.screenshot:page.screenshot(path=args.screenshot,full_page=True)
+        for width in (390,768,1440):
+            page.set_viewport_size({'width':width,'height':844})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
+        expect(page.locator('#sidebar-toggle')).to_be_visible()
+        assert not errors,errors
+        assert all(urlsplit(url).netloc==urlsplit(args.url).netloc for url in requests),requests
+        browser.close()
+    print('Jasypt browser: navigation, AES/DES round trips, settings, clipboard, password visibility, errors, reset/cancellation, mobile and local assets passed.')
+
+
+if __name__=='__main__':main()

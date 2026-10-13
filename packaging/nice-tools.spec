@@ -8,7 +8,7 @@ analysis = Analysis(
     [str(root / "desktop_entry.py")],
     pathex=[str(root)],
     binaries=[],
-    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + copy_metadata("rapidfuzz"),
+    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + copy_metadata("rapidfuzz") + copy_metadata("pycryptodome"),
     hiddenimports=[
         "uvicorn.logging",
         "uvicorn.loops.asyncio",

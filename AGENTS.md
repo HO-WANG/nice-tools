@@ -20,4 +20,6 @@ The user requires no fixed byte-size cap for individual files or complete upload
 
 ## Validation
 
+Jasypt changes must pass the real Java Jasypt 1.9.3 bidirectional check (`scripts/check_jasypt_java.py`), not just Python round trips. Keep the pinned Java reference fixtures and executable checks for both AES and MD5/DES settings. Java is for developer validation only; user PCs still need only the single EXE and a browser. Never persist passwords/plaintext in logs or browser storage, and keep Jasypt API responses `Cache-Control: no-store` with sanitized validation errors.
+
 Run the source suite with the project's virtualenv: `.venv/bin/python -m pytest -q` on Linux or `.venv\Scripts\python -m pytest -q` on Windows. Windows CI must run source tests, build the single EXE and verify the executable before uploading it as the distribution artifact.

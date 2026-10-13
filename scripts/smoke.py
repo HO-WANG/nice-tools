@@ -3,6 +3,26 @@
 import argparse
 import json
 import urllib.request
+from pathlib import Path
+
+
+def jasypt_checks(base):
+    reference = Path(__file__).resolve().parents[1] / 'tests/fixtures/jasypt.json'
+    cases = json.loads(reference.read_text(encoding='utf-8'))['cases']
+
+    def call(config):
+        request = urllib.request.Request(f'{base}/api/jasypt', data=json.dumps(config).encode(), headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            assert response.headers['Cache-Control'] == 'no-store'
+            return json.load(response)['result']
+
+    for case in cases:
+        config = {key: value for key, value in case.items() if key not in ('text', 'ciphertext')}
+        assert call(config | {'operation': 'decrypt', 'text': case['ciphertext']}) == case['text']
+        encrypted = call(config | {'operation': 'encrypt', 'text': case['text'], 'wrap_enc': True})
+        assert encrypted.startswith('ENC(')
+        assert call(config | {'operation': 'decrypt', 'text': encrypted}) == case['text']
+    print('Jasypt HTTP smoke: Java reference ciphertexts and AES/DES round trips in 12 configurations passed.')
 
 
 def upload_request(base, route, fields, files):
@@ -35,8 +55,8 @@ def main(argv=None):
         assert json.load(response) == {"status": "ok"}
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
         page = response.read()
-        assert b'id="left-folder"' in page and b'id="diff-panel"' in page
-    for asset in ("styles.css", "app.js"):
+        assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page
+    for asset in ("styles.css", "app.js", "tools.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
     result = compare_request(base, {
@@ -81,6 +101,7 @@ def main(argv=None):
     ])
     assert (repeated_fallback["additions"], repeated_fallback["deletions"]) == (129, 129)
     print("HTTP smoke: health, tool screen, assets, comparison options and unified file diffs passed.")
+    jasypt_checks(base)
     if args.large_files:
         prefix = b"a" * (10 * 1024 * 1024 + 1)
         compare_request(base, {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [

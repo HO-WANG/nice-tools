@@ -5,13 +5,14 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.staticfiles import StaticFiles
 
 from .comparison import compare_directories
 from .diff import file_diff
 from .limits import MAX_FILES
 from .uploads import read_uploads
+from .jasypt import transform
 
 app = FastAPI(title="nice-tools", docs_url=None, redoc_url=None, openapi_url=None)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -54,3 +55,19 @@ async def diff(request: Request):
             return await run_in_threadpool(file_diff, path, left.get(path), right.get(path), options)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+
+
+@app.post("/api/jasypt")
+async def jasypt(request: Request):
+    headers = {"Cache-Control": "no-store"}
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "application/json":
+        return JSONResponse({"detail": "JSON 형식으로 입력을 보내세요."}, status_code=400, headers=headers)
+    try:
+        payload = await request.json()
+    except (ValueError, RecursionError):
+        return JSONResponse({"detail": "JSON 입력을 읽을 수 없습니다."}, status_code=400, headers=headers)
+    try:
+        result = await run_in_threadpool(transform, payload)
+        return JSONResponse({"result": result}, headers=headers)
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400, headers=headers)

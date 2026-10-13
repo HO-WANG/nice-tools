@@ -1,0 +1,127 @@
+{
+  "jasypt_version": "1.9.3",
+  "jar_sha256": "f481fbb8dd8ce754bfde7552af4fcbe8c5e303d53663bb3d8ce9d4338e0e55aa",
+  "provider": "SunJCE / OpenJDK 21",
+  "cases": [
+    {
+      "algorithm": "PBEWITHHMACSHA512ANDAES_256",
+      "salt_generator": "random",
+      "iv_generator": "random",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "한글🙂\n left \t tail ",
+      "ciphertext": "tCppHdgo6zrX0R/7xwM8MJYQiwICxWvO+4gpRiSvw9tReZx4uXCFEt9HF2OtcFwJYelrt+rxl+hhl50Zqx4kuw=="
+    },
+    {
+      "algorithm": "PBEWITHHMACSHA512ANDAES_256",
+      "salt_generator": "random",
+      "iv_generator": "random",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": "",
+      "ciphertext": "DAA3A787B483DD15AFEA35F664EA7E85E3B638A4D92455AF06F392EE6B5E81D41A5BD885CB3E4178622A4C2335E939E7"
+    },
+    {
+      "algorithm": "PBEWITHHMACSHA512ANDAES_256",
+      "salt_generator": "zero",
+      "iv_generator": "random",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "aaaaaaaaaaaaaaaa",
+      "ciphertext": "XPb32wX1bl4Z33rb9PyR/sTnWtjQ98JEMMRXAAeCPZST1p2BE6uUE9M/Txe34TbX"
+    },
+    {
+      "algorithm": "PBEWITHHMACSHA512ANDAES_256",
+      "salt_generator": "zero",
+      "iv_generator": "random",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": " spring.config.password ",
+      "ciphertext": "42B1D899CE07EB13FFE0611E11B472CDA5A90BB0121748192F3CCAB48F704CEF388A67880802F95EBBFE1928840D78C1"
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "random",
+      "iv_generator": "none",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "한글🙂\n left \t tail ",
+      "ciphertext": "y9ZQg7q8qAzmTL9q1Dx6sazm98wUzE0U+dX3w6bbCT74JrsJhFbKfw=="
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "random",
+      "iv_generator": "none",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": "",
+      "ciphertext": "7B3056E4A876706F57A94ED07AD3F45D"
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "random",
+      "iv_generator": "random",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "aaaaaaaaaaaaaaaa",
+      "ciphertext": "rmtH49TE6o/sUEXVQ6xVGqWU0JrfvvXYZFZIrRK35ueOdBVnXp2SQg=="
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "random",
+      "iv_generator": "random",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": " spring.config.password ",
+      "ciphertext": "67338A2CA66F7BCD2C93D70751FA6296805E5E0D21614983B5013EC29D44A0F97FD8A205DD92F917436D2A6B2CF9EFCA"
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "zero",
+      "iv_generator": "none",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "한글🙂\n left \t tail ",
+      "ciphertext": "A523Yr4gc7hfRPO9p+x3HGJoFLN7a5zS4HfgNHStqNI="
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "zero",
+      "iv_generator": "none",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": "",
+      "ciphertext": "873DFE2B8EFC91B6"
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "zero",
+      "iv_generator": "random",
+      "output_type": "base64",
+      "iterations": 1000,
+      "password": "test-password! 42",
+      "text": "aaaaaaaaaaaaaaaa",
+      "ciphertext": "TDxzJl76X4pxZiuKkZy+4rvvlDl2tcSs5Oah59FBLBQ="
+    },
+    {
+      "algorithm": "PBEWithMD5AndDES",
+      "salt_generator": "zero",
+      "iv_generator": "random",
+      "output_type": "hexadecimal",
+      "iterations": 2301,
+      "password": "test-password! 42",
+      "text": " spring.config.password ",
+      "ciphertext": "59F5A28B491A525A8240C8B66BF49C62743466DACF9CA6395C91AC43752D2CB2C1B191CE353A1531"
+    }
+  ]
+}

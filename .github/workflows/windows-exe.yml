@@ -26,6 +26,8 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Run source tests
         run: python -m pytest -q
+      - name: Verify Java Jasypt interoperability
+        run: python scripts/check_jasypt_java.py
       - name: Build and verify the single executable
         shell: pwsh
         run: ./scripts/build_windows.ps1
