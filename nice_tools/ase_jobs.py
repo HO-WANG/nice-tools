@@ -201,6 +201,11 @@ class AseManager:
             raise ValueError("테이블은 IN/OUT, 뷰는 OUT만 가능합니다.")
         if options["direction"] == "out" and target_fingerprint(selected["path"]) != selected["target_fingerprint"]:
             raise ValueError("대상 파일이 변경되었습니다. 파일을 다시 선택하세요.")
+        with self.lock:
+            self._session(token)
+            session["preview_version"] = session.get("preview_version", 0) + 1
+            preview_version = session["preview_version"]
+            session["reviews"].clear()
         payload = {"operation": "preview", "connection": session["connection"], "object": object_value,
                    "path": selected["path"], "options": options}
         result = self._invoke(payload, token, timeout=None)
@@ -212,6 +217,8 @@ class AseManager:
             self._session(token)
             if session["files"].get(file_token) != selected:
                 raise ValueError("파일 선택이 변경되었습니다. 다시 확인하세요.")
+            if session["preview_version"] != preview_version:
+                raise ValueError("새로운 확인 요청이 있습니다. 이전 확인 결과를 사용하지 않습니다.")
             session["reviews"].clear()
             session["reviews"][review] = payload
         public = {key: value for key, value in result.items() if key not in ("fingerprint", "out_target_fingerprint")}

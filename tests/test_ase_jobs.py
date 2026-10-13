@@ -1,6 +1,7 @@
 import json
 import sys
 import time
+import threading
 
 import pytest
 
@@ -15,6 +16,11 @@ op=p['operation']
 if op=='databases': r={'databases':[{'id':1,'name':'db'}]}
 elif op=='pick': r={'cancelled':False,'path':p['suggested_name']}
 elif op=='preview':
+ if p['options']['batch_size']==1111:
+  from pathlib import Path
+  Path(__file__).with_name('preview-started').touch()
+  deadline=time.monotonic()+5
+  while not Path(__file__).with_name('preview-release').exists() and time.monotonic()<deadline: time.sleep(.01)
  r={'object':p['object'],'columns':[{'position':1,'name':'x','type_id':56,'type_name':'int','length':4,'precision':10,'scale':0,'nullable':False,'identity':False}],'path':p['path'],'warnings':[]}
 elif op=='transfer':
  if 'stage_path' in p:
@@ -111,3 +117,35 @@ def test_shutdown_finishes_transfer_cleanup(tmp_path):
         time.sleep(0.02)
     manager.close()
     assert not list(tmp_path.glob(".nice-tools-*.bcp"))
+
+
+def test_late_preview_cannot_invalidate_newer_review(tmp_path):
+    manager = manager_for(tmp_path)
+    try:
+        session = manager.connect({"host":"localhost","user":"u","password":"pw"})["session"]
+        selected = manager.pick_file(session, "out", str(tmp_path / "out.txt"))
+        obj = {"database":"db","owner":"dbo","owner_id":1,"id":10,"name":"t","kind":"U"}
+        old_result = []
+
+        def old_preview():
+            try:
+                old_result.append(manager.preview(session, obj, selected["file"], {"direction":"out","batch_size":1111}))
+            except ValueError as exc:
+                old_result.append(exc)
+
+        thread = threading.Thread(target=old_preview)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "preview-started").exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert (tmp_path / "preview-started").exists()
+        newer = manager.preview(session, obj, selected["file"], {"direction":"out","batch_size":2222})
+        (tmp_path / "preview-release").touch()
+        thread.join(timeout=5)
+        assert len(old_result) == 1
+        assert isinstance(old_result[0], ValueError)
+        job = manager.start(session, newer["review"])["job"]
+        assert finished(manager, session, job)["state"] == "succeeded"
+    finally:
+        (tmp_path / "preview-release").touch()
+        manager.close()
