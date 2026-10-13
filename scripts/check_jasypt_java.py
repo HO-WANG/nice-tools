@@ -4,6 +4,7 @@ import argparse
 import base64
 import hashlib
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,10 @@ def main():
     args = parser.parse_args()
     if not shutil.which(args.java):
         raise RuntimeError('A Java 17+ JDK is required for this developer-only interoperability check.')
+    version = subprocess.run([args.java, '-version'], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=10)
+    major = re.search(r'\bversion "(?:1\.)?(\d+)', version.stdout + version.stderr)
+    if version.returncode or major is None or int(major[1]) < 17:
+        raise RuntimeError('This developer-only check requires Java 17+ JDK; use --java to select it instead of the system Java.')
     with tempfile.TemporaryDirectory(prefix='nice-tools-jasypt-') as directory:
         jar = args.jar
         if jar is None:

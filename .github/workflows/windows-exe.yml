@@ -27,7 +27,8 @@ jobs:
       - name: Run source tests
         run: python -m pytest -q
       - name: Verify Java Jasypt interoperability
-        run: python scripts/check_jasypt_java.py
+        shell: pwsh
+        run: python scripts/check_jasypt_java.py --java "$env:JAVA_HOME_17_X64\bin\java.exe"
       - name: Build and verify the single executable
         shell: pwsh
         run: ./scripts/build_windows.ps1
