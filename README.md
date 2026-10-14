@@ -147,6 +147,7 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
 
 1. PC에 **64비트 SAP ASE ODBC 드라이버**가 설치되어 있는지 확인합니다. 파일 전송에는 SAP `bcp.exe`도 준비합니다.
    왼쪽 **ASE / BCP** 메뉴에서 **직접 입력**을 선택하고 호스트, 포트(기본 5000), 사용자와 DB 비밀번호로 연결합니다.
+   SAP `sql.ini`가 있으면 **sql.ini 파일 선택**으로 파일을 지정하고 서버를 선택하여 주소·포트를 채울 수 있습니다.
    기존 ODBC 설정을 사용하려면 선택 사항인 **DSN** 목록에서 등록된 SAP ASE DSN을 선택합니다.
    성공한 접속 정보를 암호화해 자동 저장합니다. 이미 저장된 서버는 선택 후 **연결**을 누릅니다.
    접속 정보 암호화·복호화는 앱의 고정 키 `nice1234!!`를 사용하며 키 입력창은 없습니다.
@@ -269,9 +270,25 @@ BCP는 `PATH`, 이어서 `SYBASE`·`SYBASE_OCS`에서 찾습니다. 직접 지�
 명시한 경로가 잘못되면 다른 실행 파일로 대체하지 않습니다. 기존 `isql_path`는 읽어도 사용하지 않습니다.
 설정 후 **설정 파일 다시 읽기**를 누릅니다.
 
+SAP Open Client의 `sql.ini`는 DB에 접속하기 전에도 읽거나 **sql.ini 선택**으로 지정할 수 있습니다.
+파일을 선택해 정상적으로 읽으면 경로를 `[sap_client] sql_ini_path`에 저장하여 다음 실행에 사용합니다.
+선택 취소 시 이전 설정을 유지하며, 경로 저장에 실패하면 읽은 목록을 유지하고 저장 실패를 안내합니다.
+명시한 경로를 사용할 수 없으면 다른 파일로 대체하지 않습니다. 경로를 지정하지 않았을 때는
+`%SYBASE%\ini\sql.ini`, EXE와 같은 폴더의 `sql.ini`(소스 실행은 저장소 루트), BCP 설치 경로에서 추정한
+알려진 SDK의 `ini\sql.ini` 순서로 찾습니다. 폴더를 재귀 검색하지 않습니다.
+
+서버 선택은 **주소와 포트만 채우며 자동 접속하지 않습니다**. `sql.ini` 서버 이름과 Windows ODBC DSN은 별도 목록입니다.
+서버 이름을 `DSN` 값으로 변환하지 않습니다. DSN이 필요하면 사용자가 등록된 Windows DSN을 따로 선택합니다.
+지원하는 항목은 `query=NLWNSCK,호스트,숫자포트` 한 줄이며 `master`는 주소 선택에 사용하지 않습니다.
+여러 `query` 줄, 추가 SSL 인자, 이름 있는 파이프 등은 목록에 선택 불가로 표시하고 값을 추측하지 않습니다.
+UTF-8(BOM 포함)과 CP949 파일을 엄격히 읽으며 파일 내용이나 비밀번호를 로그에 출력하지 않습니다.
+이 파일은 PC에 있는 사용자 데이터이며 배포 ZIP에 넣지 않습니다.
+
 ```ini
 [sap_client]
 bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
+# Optional: remembered by the sql.ini file picker.
+# sql_ini_path = C:\SAP\ini\sql.ini
 
 [odbc]
 driver = Adaptive Server Enterprise
@@ -402,6 +419,8 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개 및 MD5/DES 기본값도 실제 EXE에서 검사합니다.
 ASE는 실제 EXE에서 `pyodbc` 5.3.0의 네이티브 확장과 드라이버·사용자/시스템 DSN 목록 조회, 미등록 드라이버·DSN의 오류,
 고정 키 프로필의 해석·복호화와 연결 실패 시 미저장, 격리 worker의 스키마 실패 시 기존 OUT 파일 보존을 확인합니다.
+외부 개발용 `sql.ini`로 실제 실행 파일 위치의 자동 탐색·명시 경로·UTF-8/CP949 읽기와 지원 불가 서버 항목도 검사합니다.
+별칭이 ODBC DSN으로 변환되지 않고 파일 읽기가 DB 연결을 시작하지 않는 동작은 API·소스/브라우저 검사로 확인합니다.
 Windows native 소스 검사는 개발용 BCP PE 클라이언트로 콘솔 비밀번호 입력과 프로세스 제어를 확인합니다.
 성공한 ODBC 조회·프로필 저장·IN/OUT과 취소 제어는 소스 mock 검사로 확인하며
 실제 SAP 드라이버·ASE 서버에서의 전송 성공을 뜻하지 않습니다.
@@ -413,6 +432,7 @@ Windows native 소스 검사는 개발용 BCP PE 클라이언트로 콘솔 비�
 - `nice_tools/diff.py`: 선택한 파일의 unified diff, 줄 번호와 주변 문맥
 - `nice_tools/jasypt.py`: Java Jasypt 호환 문자열 암호화·복호화
 - `nice_tools/ase_odbc.py`: pyodbc 연결·카탈로그와 연결 재사용
+- `nice_tools/ase_sqlini.py`: SAP sql.ini 탐색·인코딩·서버 주소 검증
 - `nice_tools/ase_cli.py`: 스키마 재검증과 설치된 SAP 문자형 bcp 호출
 - `nice_tools/ase_clients.py`, `ase_process.py`: 클라이언트 탐색·콘솔 프롬프트·프로세스 취소
 - `nice_tools/ase_files.py`: 스트리밍 파일 검사와 미리보기

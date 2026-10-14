@@ -579,3 +579,145 @@ def test_bad_api_dsn_cannot_start_driver_or_echo_secret(tmp_path, monkeypatch, d
     response = asyncio.run(ase_api.operation(ConnectRequest(data), 'connect'))
     assert response.status_code == 400 and not calls
     assert 'private-dsn' not in response.body.decode() and 'db-secret' not in response.body.decode()
+
+
+@pytest.fixture
+def sql_ini_boundary(monkeypatch, tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    calls = []
+    state = {'catalog': {'path': None, 'found': False, 'entries': [], 'detail': 'sql.ini를 찾지 못했습니다.'},
+             'pick': {'cancelled': True}}
+    def status(selected=None):
+        calls.append(('status', selected))
+        return dict(state['catalog'])
+    def pick():
+        calls.append(('pick',))
+        return dict(state['pick'])
+    monkeypatch.setitem(sys.modules, 'nice_tools.ase_sqlini', SimpleNamespace(sql_ini_status=status))
+    monkeypatch.setattr(ase_api.manager, 'pick_sql_ini', pick, raising=False)
+    return state, calls, path
+
+
+def test_sql_ini_get_missing_file_is_read_only_local_and_no_store(sql_ini_boundary):
+    state, calls, path = sql_ini_boundary
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.get('/api/ase/sql-ini')
+        assert response.status_code == 200 and response.json() == state['catalog']
+        assert response.headers['cache-control'] == 'no-store'
+        for headers in ({'Origin': 'https://foreign.example'}, {'Host': 'foreign.example:8000'}):
+            forbidden = client.get('/api/ase/sql-ini', headers=headers)
+            assert forbidden.status_code == 403 and forbidden.headers['cache-control'] == 'no-store'
+    assert calls == [('status', None)] and not path.exists()
+
+
+def test_sql_ini_picker_cancel_does_not_read_or_save(sql_ini_boundary):
+    state, calls, path = sql_ini_boundary
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase'})
+    assert response.status_code == 200 and response.json() == {'cancelled': True}
+    assert response.headers['cache-control'] == 'no-store'
+    assert calls == [('pick',)] and not path.exists()
+
+
+def test_picked_sql_ini_persists_path_only_even_if_entries_are_unsupported(sql_ini_boundary, tmp_path):
+    from nice_tools import ase_profiles
+    state, calls, path = sql_ini_boundary
+    selected = str(tmp_path / 'sql.ini')
+    state['pick'] = {'cancelled': False, 'path': selected}
+    state['catalog'] = {'path': selected, 'found': True, 'entries': [{'id': 'unsupported-id', 'name': 'ASE_ALIAS', 'available': False, 'detail': '지원하지 않는 프로토콜입니다.'}], 'detail': ''}
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase'})
+    assert response.status_code == 200
+    result = response.json()
+    assert result['saved'] is True and result['cancelled'] is False
+    assert result['entries'] == state['catalog']['entries']
+    assert ase_profiles.public_profiles()['clients']['sql_ini_path'] == selected
+    assert 'ASE_ALIAS' not in path.read_text()
+    assert calls == [('pick',), ('status', selected)]
+
+
+def test_invalid_picked_sql_ini_does_not_persist_path(sql_ini_boundary, tmp_path):
+    state, calls, path = sql_ini_boundary
+    selected = str(tmp_path / 'bad.ini')
+    state['pick'] = {'cancelled': False, 'path': selected}
+    state['catalog'] = {'path': selected, 'found': False, 'entries': [], 'detail': 'sql.ini를 읽지 못했습니다.'}
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase'})
+    assert response.status_code == 200
+    assert response.json()['saved'] is False and response.json()['found'] is False
+    assert not path.exists()
+
+
+def test_read_success_with_bad_profile_config_keeps_catalog_and_warns_without_overwrite(sql_ini_boundary, tmp_path):
+    state, calls, path = sql_ini_boundary
+    original = b'[bad]\npassword=private-existing-secret\n'
+    path.write_bytes(original)
+    selected = str(tmp_path / 'sql.ini')
+    state['pick'] = {'cancelled': False, 'path': selected}
+    state['catalog'] = {'path': selected, 'found': True, 'entries': [{'id': 'ok', 'name': 'ASE_ALIAS', 'host': 'ase-host', 'port': 5000, 'available': True, 'detail': ''}], 'detail': ''}
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase'})
+    assert response.status_code == 200
+    result = response.json()
+    assert result['found'] and result['entries'] == state['catalog']['entries']
+    assert result['saved'] is False and result['save_warning']
+    assert path.read_bytes() == original and 'private-existing-secret' not in response.text
+
+
+@pytest.mark.parametrize('payload', [{'path': 'private-local-path'}, {'file_text': 'private-file-content'}, {'password': 'private-password'}, []])
+def test_sql_ini_picker_rejects_browser_supplied_paths_and_contents(sql_ini_boundary, payload):
+    state, calls, path = sql_ini_boundary
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/pick-sql-ini', json=payload, headers={'X-Nice-Tools': 'ase'})
+    assert response.status_code == 400 and response.headers['cache-control'] == 'no-store'
+    assert not calls and not path.exists()
+    assert 'private-' not in response.text
+
+
+def test_sql_ini_picker_requires_local_origin_header_and_json(sql_ini_boundary):
+    state, calls, path = sql_ini_boundary
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        no_header = client.post('/api/ase/pick-sql-ini', json={})
+        assert no_header.status_code == 403
+        foreign = client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase', 'Origin': 'https://foreign.example'})
+        assert foreign.status_code == 403
+        form = client.post('/api/ase/pick-sql-ini', data={'path': 'private-local-path'}, headers={'X-Nice-Tools': 'ase'})
+        assert form.status_code == 400
+    assert not calls and not path.exists()
+
+
+@pytest.mark.parametrize('disconnect_stage', ['after-picker', 'after-read'])
+def test_disconnected_picker_request_does_not_persist_late_selection(sql_ini_boundary, tmp_path, disconnect_stage):
+    from nice_tools import ase_api
+    state, calls, path = sql_ini_boundary
+    selected = str(tmp_path / 'sql.ini')
+    state['pick'] = {'cancelled': False, 'path': selected}
+    state['catalog'] = {'path': selected, 'found': True, 'entries': [{'id': 'ok', 'name': 'ASE_ALIAS', 'host': 'ase-host', 'port': 5000, 'available': True, 'detail': ''}], 'detail': ''}
+    request = ConnectRequest({})
+    checked = []
+    async def disconnected():
+        checked.append(True)
+        return disconnect_stage == 'after-picker' or len(checked) == 2
+    request.is_disconnected = disconnected
+    response = asyncio.run(ase_api.operation(request, 'pick-sql-ini'))
+    assert response.status_code == 400
+    assert not path.exists()
+    assert calls == ([('pick',)] if disconnect_stage == 'after-picker' else [('pick',), ('status', selected)])
+
+
+def test_sql_ini_read_exceptions_never_echo_contents_or_private_errors(sql_ini_boundary, monkeypatch, tmp_path):
+    import sys
+    state, calls, path = sql_ini_boundary
+    state['pick'] = {'cancelled': False, 'path': str(tmp_path / 'sql.ini')}
+    def fail(selected=None):
+        raise ValueError('private-file-line-password=private-secret')
+    monkeypatch.setattr(sys.modules['nice_tools.ase_sqlini'], 'sql_ini_status', fail)
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        for response in (client.get('/api/ase/sql-ini'), client.post('/api/ase/pick-sql-ini', json={}, headers={'X-Nice-Tools': 'ase'})):
+            assert response.status_code == 400
+            assert 'private-' not in response.text and response.headers['cache-control'] == 'no-store'
+    assert not path.exists()

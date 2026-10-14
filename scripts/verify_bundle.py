@@ -95,11 +95,14 @@ def worker_request(executable, payload, directory, expect_error=False):
     return results[0]
 
 
-def odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn):
+def odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn, sql_path):
     """Load real frozen pyodbc; never simulate catalog success without ASE."""
     connection = {"host": "fixture.internal", "port": 5000, "user": "smoke", "password": password}
     status = worker_request(executable, {"operation": "status", "connection": connection}, directory)
     data_source_checks(status["odbc"])
+    assert status['sql_ini']['found'] is True and Path(status['sql_ini']['path']).resolve() == sql_path.resolve(), "Frozen worker did not read the remembered external sql.ini"
+    assert any(entry['name'] == '개발서버' and entry['available'] is True for entry in status['sql_ini']['entries'])
+    assert all('dsn' not in entry for entry in status['sql_ini']['entries']), "Frozen worker mapped a server alias to an ODBC DSN"
     if require_odbc:
         assert status["odbc"]["module_available"] is True, "Frozen worker could not import native pyodbc"
         assert status["odbc"]["version"] == "5.3.0", "Frozen worker did not load pinned native pyodbc"

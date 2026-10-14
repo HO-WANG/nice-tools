@@ -8,6 +8,7 @@
     columns: [], columnsLoaded: false, file: null, path: "", review: null,
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
     profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "", dataSources: [], dataSourcesDetail: "",
+    sqlIniEntries: [], sqlIniPath: null, sqlIniId: "", sqlIniDetail: "", sqlIniError: false, sqlIniLoading: "", sqlIniGeneration: 0, sqlIniController: null, sqlIniInitialized: false,
   };
   const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password", "ase-dsn"];
   const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity"];
@@ -17,6 +18,7 @@
   const locked = () => active() || ["connect", "start", "disconnect", "cancel"].includes(state.busy);
   const profileLocked = () => active() || ["start", "disconnect", "cancel"].includes(state.busy);
   const selectedProfile = () => state.profiles.find((profile) => profile.id === state.profileId);
+  const sqlIniLocked = () => Boolean(state.session) || Boolean(state.busy) || active() || Boolean(state.sqlIniLoading);
   const transferable = () => state.bcpAvailable && state.columnsLoaded && state.object && (state.object.kind === "U" || (state.object.kind === "V" && direction() === "out"));
   const stale = () => new DOMException("요청이 변경되었습니다.", "AbortError");
 
@@ -94,6 +96,84 @@
     get("ase-client-paths").hidden = !get("ase-client-paths").textContent;
   }
 
+  function clearSqlIniSelection() {
+    state.sqlIniId = "";
+    get("ase-sql-ini").value = "";
+  }
+
+  function invalidateSqlIniRead() {
+    state.sqlIniGeneration += 1;
+    state.sqlIniController?.abort();
+    state.sqlIniController = null;
+    state.sqlIniLoading = "";
+  }
+
+  function applySqlIniCatalog(data) {
+    if (!(data.path === null || typeof data.path === "string") || typeof data.found !== "boolean" || !Array.isArray(data.entries) || !data.entries.every((entry) => entry &&
+      typeof entry.id === "string" && entry.id && typeof entry.name === "string" && entry.name && typeof entry.available === "boolean" && typeof entry.detail === "string" &&
+      (!entry.available || (typeof entry.host === "string" && entry.host && Number.isInteger(entry.port) && entry.port >= 1 && entry.port <= 65535)))) throw new Error("sql.ini 서버 목록을 확인할 수 없습니다.");
+    const sameFile = state.sqlIniPath === data.path;
+    state.sqlIniPath = data.path;
+    state.sqlIniEntries = data.entries.map(({ id, name, available, detail, host, port }) => ({ id, name, available, detail, ...(available ? { host, port } : {}) }));
+    const selected = state.sqlIniEntries.find((entry) => entry.id === state.sqlIniId && entry.available && entry.host === get("ase-host").value.trim() && entry.port === Number(get("ase-port").value));
+    if (!sameFile || !selected) state.sqlIniId = "";
+    setChoices("ase-sql-ini", [], "서버 주소 직접 입력", "id");
+    for (const entry of state.sqlIniEntries) {
+      const option = document.createElement("option");
+      option.value = entry.id;
+      const host = entry.host?.includes(":") ? `[${entry.host}]` : entry.host;
+      option.textContent = entry.available ? `${entry.name} · ${host}:${entry.port}` : `${entry.name} · ${entry.detail || "지원하지 않는 서버 항목"}`;
+      option.disabled = !entry.available;
+      get("ase-sql-ini").append(option);
+    }
+    get("ase-sql-ini").value = state.sqlIniId;
+    state.sqlIniDetail = typeof data.detail === "string" ? data.detail : "";
+    state.sqlIniError = data.saved === false && (!data.found || !data.entries.length);
+    if (data.saved === false && data.found && data.entries.length) {
+      state.sqlIniDetail = `파일은 읽었지만 경로를 저장하지 못했습니다. ${typeof data.save_warning === "string" ? data.save_warning : "설정 파일의 쓰기 권한을 확인하세요."}`;
+      state.sqlIniError = true;
+    }
+  }
+
+  async function loadSqlIni(pick = false) {
+    if (sqlIniLocked()) return;
+    const profile = selectedProfile();
+    const controller = new AbortController();
+    state.sqlIniController = controller;
+    const sqlGeneration = ++state.sqlIniGeneration;
+    const generation = state.generation;
+    const current = () => sqlGeneration === state.sqlIniGeneration && generation === state.generation && !controller.signal.aborted && !state.session;
+    state.sqlIniLoading = pick ? "picker" : "read";
+    render();
+    try {
+      const response = await fetch(`/api/ase/${pick ? "pick-sql-ini" : "sql-ini"}`, {
+        method: pick ? "POST" : "GET", headers: { "Content-Type": "application/json", "X-Nice-Tools": "ase", "Cache-Control": "no-store" },
+        cache: "no-store", credentials: "same-origin", signal: controller.signal, ...(pick ? { body: JSON.stringify({}) } : {}),
+      });
+      const data = await response.json();
+      if (!current()) throw stale();
+      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "sql.ini를 읽을 수 없습니다.");
+      if (!data || typeof data !== "object") throw new Error("sql.ini 응답을 확인할 수 없습니다.");
+      if (pick && data.cancelled === true) return;
+      applySqlIniCatalog(data);
+      if (pick && data.saved === true) {
+        await loadProfiles({ preferredId: profile?.id || "", preferredProfile: profile || null, preserveManual: !profile });
+        if (!current()) throw stale();
+      }
+    } catch (error) {
+      if (current() && error.name !== "AbortError") {
+        state.sqlIniDetail = error instanceof SyntaxError || error instanceof TypeError ? "sql.ini 응답을 받지 못했습니다. 다시 읽기를 누르세요." : error.message;
+        state.sqlIniError = true;
+      }
+    } finally {
+      if (sqlGeneration === state.sqlIniGeneration) {
+        state.sqlIniLoading = "";
+        state.sqlIniController = null;
+        render();
+      }
+    }
+  }
+
   async function api(endpoint, payload, generation = state.generation) {
     const controller = new AbortController();
     // A completed connect may create a server session even after the UI changes.
@@ -136,6 +216,7 @@
   }
 
   function nextGeneration() {
+    invalidateSqlIniRead();
     state.generation += 1;
     for (const controller of state.controllers) controller.abort();
     state.controllers.clear();
@@ -246,18 +327,20 @@
     state.profileLoading = false;
   }
 
-  function applyProfile(id, { preserveConnection = false } = {}) {
+  function applyProfile(id, { preserveConnection = false, preservePassword = false } = {}) {
     const wasProfile = Boolean(state.profileId);
     state.profileId = state.profiles.some((profile) => profile.id === id) ? id : "";
     const profile = selectedProfile();
     get("ase-profile").value = state.profileId;
-    clearSecrets();
+    if (!preservePassword) clearSecrets();
     if (profile) {
+      clearSqlIniSelection();
       get("ase-host").value = profile.host;
       get("ase-port").value = String(profile.port);
       get("ase-user").value = profile.user;
       setDsnChoices(profile.dsn || "");
     } else if (wasProfile && !preserveConnection) {
+      clearSqlIniSelection();
       get("ase-host").value = "";
       get("ase-port").value = "5000";
       get("ase-user").value = "";
@@ -274,7 +357,7 @@
     if (session) await perform("disconnect", (generation) => api("disconnect", { session }, generation));
   }
 
-  async function loadProfiles({ preferredId = "", preserveSession = false } = {}) {
+  async function loadProfiles({ preferredId = "", preferredProfile = null, preserveManual = false, preserveSession = false } = {}) {
     state.profileController?.abort();
     const controller = new AbortController();
     state.profileController = controller;
@@ -307,9 +390,11 @@
         profileId = preferred || (matches.length === 1 ? matches[0].id : "");
       } else {
         const preferred = [preferredId, state.profileId, data.last_profile_id].find((id) => state.profiles.some((profile) => profile.id === id));
-        profileId = preferred || state.profiles[0]?.id || "";
+        const matches = preferredProfile ? state.profiles.filter((profile) => profile.host === preferredProfile.host && profile.port === preferredProfile.port && profile.user === preferredProfile.user && (profile.dsn || "") === (preferredProfile.dsn || "")) : [];
+        const matched = matches.find((profile) => profile.name === preferredProfile?.name) || (matches.length === 1 ? matches[0] : null);
+        profileId = preserveManual ? "" : preferredProfile ? matched?.id || "" : preferred || state.profiles[0]?.id || "";
       }
-      applyProfile(profileId, { preserveConnection: preserveSession });
+      applyProfile(profileId, { preserveConnection: preserveSession || preserveManual || Boolean(preferredProfile && !profileId), preservePassword: preserveManual });
       showClientPaths(data.clients, true);
       showOdbcDriver(data.odbc, true);
       get("ase-profile-path").textContent = typeof data.path === "string" ? `설정 파일: ${data.path}` : "";
@@ -381,19 +466,20 @@
   function render() {
     const isLocked = locked();
     const canTransfer = transferable();
-    for (const id of connectionIds) get(id).disabled = Boolean(state.session) || Boolean(state.busy);
+    const pickingSqlIni = state.sqlIniLoading === "picker";
+    for (const id of connectionIds) get(id).disabled = Boolean(state.session) || Boolean(state.busy) || pickingSqlIni;
     const profile = selectedProfile();
-    get("ase-dsn").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
+    get("ase-dsn").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy) || pickingSqlIni;
     showDsnHelp();
     for (const id of ["ase-host", "ase-port", "ase-user"]) get(id).readOnly = Boolean(profile);
     get("ase-password").required = false;
-    get("ase-password").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
+    get("ase-password").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy) || pickingSqlIni;
     get("ase-password-field").hidden = Boolean(profile);
     get("ase-password-field").parentElement.classList.toggle("has-saved-profile", Boolean(profile));
-    get("ase-profile").disabled = profileLocked();
-    get("ase-profile-reload").disabled = profileLocked();
+    get("ase-profile").disabled = profileLocked() || pickingSqlIni;
+    get("ase-profile-reload").disabled = profileLocked() || pickingSqlIni;
     get("ase-profile-reload").textContent = state.profileLoading ? "설정 파일 읽는 중…" : "설정 파일 다시 읽기";
-    get("ase-connect").disabled = !state.available || Boolean(state.session) || Boolean(state.busy);
+    get("ase-connect").disabled = !state.available || Boolean(state.session) || Boolean(state.busy) || pickingSqlIni;
     get("ase-connect").textContent = state.busy === "connect" ? "연결 중…" : state.session ? "연결됨" : "연결";
     get("ase-disconnect").disabled = !state.session || state.busy === "disconnect";
     get("ase-database").disabled = !state.session || isLocked;
@@ -427,6 +513,16 @@
     get("ase-browser").setAttribute("aria-busy", String(["owners", "objects", "columns"].includes(state.busy)));
     get("ase-job").setAttribute("aria-busy", String(active()));
     get("ase-connect-form").setAttribute("aria-busy", String(state.busy === "connect"));
+    get("ase-sql-ini").disabled = sqlIniLocked() || Boolean(profile);
+    get("ase-pick-sql-ini").disabled = sqlIniLocked();
+    get("ase-sql-ini-reload").disabled = sqlIniLocked();
+    get("ase-pick-sql-ini").textContent = pickingSqlIni ? "선택 창 열림…" : "sql.ini 선택";
+    get("ase-sql-ini-reload").textContent = state.sqlIniLoading === "read" ? "읽는 중…" : "다시 읽기";
+    const sqlIniNote = "sql.ini의 서버를 선택하면 호스트·포트만 채웁니다. ODBC DSN과 계정은 현재 선택을 사용합니다.";
+    get("ase-sql-ini-help").textContent = state.sqlIniLoading ? (pickingSqlIni ? "Windows 파일 선택 창에서 sql.ini를 선택하세요." : "sql.ini를 읽는 중입니다.") : `${state.sqlIniDetail || "sql.ini 파일을 선택하거나 다시 읽기를 누르세요."} ${sqlIniNote}`;
+    get("ase-sql-ini-help").dataset.tone = state.sqlIniError ? "error" : "info";
+    get("ase-sql-ini-path").textContent = state.sqlIniPath ? `sql.ini: ${state.sqlIniPath}` : "";
+    get("ase-sql-ini-path").hidden = !state.sqlIniPath;
     renderObjects();
     renderColumns();
   }
@@ -449,7 +545,7 @@
 
   get("ase-connect-form").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (state.session || state.busy || !state.available || !event.currentTarget.reportValidity()) return;
+    if (state.session || state.busy || state.sqlIniLoading === "picker" || !state.available || !event.currentTarget.reportValidity()) return;
     const profile = selectedProfile();
     const dsn = get("ase-dsn").value;
     const payload = profile ? { profile_id: profile.id } : {
@@ -487,14 +583,36 @@
   });
 
   for (const id of connectionIds) get(id).addEventListener("input", () => {
-    if (state.session || state.busy || profileLocked()) return;
+    if (state.session || state.busy || state.sqlIniLoading === "picker" || profileLocked()) return;
     invalidateProfileRead();
+    if (["ase-host", "ase-port"].includes(id)) clearSqlIniSelection();
     if (id !== "ase-password") clearSecrets();
     reset("connection");
   });
 
+  get("ase-sql-ini").addEventListener("change", () => {
+    const id = get("ase-sql-ini").value;
+    const entry = state.sqlIniEntries.find((item) => item.id === id && item.available);
+    if (sqlIniLocked() || selectedProfile() || (id && !entry)) {
+      get("ase-sql-ini").value = state.sqlIniId;
+      return;
+    }
+    invalidateProfileRead();
+    reset("connection");
+    state.sqlIniId = entry?.id || "";
+    get("ase-sql-ini").value = state.sqlIniId;
+    if (entry) {
+      get("ase-host").value = entry.host;
+      get("ase-port").value = String(entry.port);
+    }
+    clearSecrets();
+    render();
+  });
+  get("ase-pick-sql-ini").addEventListener("click", () => loadSqlIni(true));
+  get("ase-sql-ini-reload").addEventListener("click", () => loadSqlIni());
+
   get("ase-profile").addEventListener("change", async () => {
-    if (profileLocked()) {
+    if (profileLocked() || state.sqlIniLoading === "picker") {
       get("ase-profile").value = state.profileId;
       return;
     }
@@ -505,7 +623,7 @@
   });
 
   get("ase-profile-reload").addEventListener("click", async () => {
-    if (profileLocked()) return;
+    if (profileLocked() || state.sqlIniLoading === "picker") return;
     invalidateProfileRead();
     await clearConnection();
     await loadProfiles();
@@ -838,4 +956,12 @@
   render();
   checkRuntime();
   loadProfiles();
+  function openSqlIniCatalog() {
+    if (location.hash === "#ase-tool" && !state.sqlIniInitialized) {
+      state.sqlIniInitialized = true;
+      loadSqlIni();
+    }
+  }
+  window.addEventListener("hashchange", openSqlIniCatalog);
+  openSqlIniCatalog();
 })();

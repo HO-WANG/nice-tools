@@ -294,6 +294,29 @@ class AseManager:
         self._session(token)
         return result
 
+    def pick_sql_ini(self):
+        """Own a local configuration dialog before an ASE session exists."""
+        with self.lock:
+            if self.closed:
+                raise ValueError("파일 선택 요청이 취소되었습니다.")
+        result = self._invoke({"operation": "pick-sql-ini"}, timeout=None)
+        with self.lock:
+            if self.closed:
+                raise ValueError("파일 선택 요청이 취소되었습니다.")
+        if result.get("cancelled"):
+            return {"cancelled": True}
+        raw_path = result.get("path")
+        if (not isinstance(raw_path, str) or not raw_path or len(raw_path) >= 32768
+                or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in raw_path)):
+            raise ValueError("선택한 sql.ini 파일 경로를 사용할 수 없습니다.")
+        try:
+            path = Path(raw_path)
+            if not path.is_absolute() or not path.is_file():
+                raise ValueError
+            return {"cancelled": False, "path": str(path.resolve())}
+        except (OSError, RuntimeError, ValueError):
+            raise ValueError("선택한 sql.ini 파일 경로를 사용할 수 없습니다.") from None
+
     def pick_file(self, token, direction, suggested_name=None):
         session = self._session(token)
         if direction not in ("in", "out"):

@@ -205,6 +205,8 @@ def execute(payload: dict, emit: Callable | None = None, register=None, catalog=
         return _module("ase_cli").client_status()
     if operation == "pick":
         return _module("ase_picker").pick_file(payload.get("direction"), payload.get("suggested_name"))
+    if operation == "pick-sql-ini":
+        return _module("ase_picker").pick_sql_ini()
     if operation == "preview":
         return _preview(payload, emit, catalog=catalog)
     if operation == "transfer":

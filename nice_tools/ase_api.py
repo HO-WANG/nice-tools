@@ -12,6 +12,7 @@ from .ase_jobs import manager, object_data
 
 router = APIRouter(prefix="/api/ase")
 HEADERS = {"Cache-Control": "no-store"}
+SQL_INI_ERROR = "sql.ini를 읽지 못했습니다. 선택한 파일의 위치·권한과 형식을 확인하세요."
 
 
 _SESSION_CLEANUPS = set()
@@ -120,6 +121,20 @@ async def profiles(request: Request):
         return JSONResponse({"detail": "연결 설정 파일을 읽지 못했습니다."}, status_code=400, headers=HEADERS)
 
 
+@router.get("/sql-ini")
+async def sql_ini(request: Request):
+    try:
+        local_request(request, mutation=False)
+        from .ase_sqlini import sql_ini_status
+
+        result = await run_in_threadpool(sql_ini_status)
+        return JSONResponse(result, headers=HEADERS)
+    except PermissionError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=403, headers=HEADERS)
+    except (ValueError, OSError, TypeError, RuntimeError):
+        return JSONResponse({"detail": SQL_INI_ERROR}, status_code=400, headers=HEADERS)
+
+
 @router.post("/{operation}")
 async def operation(request: Request, operation: str):
     try:
@@ -162,6 +177,34 @@ async def operation(request: Request, operation: str):
             except (asyncio.CancelledError, ValueError):
                 await asyncio.shield(_schedule_disconnect(result["session"]))
                 raise
+        elif operation == "pick-sql-ini":
+            if data:
+                raise ValueError("sql.ini는 도구의 파일 선택 창에서 선택하세요.")
+            from .ase_profiles import save_sql_ini_path, SQL_INI_SAVE_ERROR
+            from .ase_sqlini import sql_ini_status
+
+            try:
+                picked = await run_in_threadpool(manager.pick_sql_ini)
+                if await request.is_disconnected():
+                    raise ValueError(SQL_INI_ERROR)
+                if picked.get("cancelled"):
+                    result = {"cancelled": True}
+                else:
+                    selected = picked.get("path")
+                    if not isinstance(selected, str) or not selected:
+                        raise ValueError(SQL_INI_ERROR)
+                    catalog = await run_in_threadpool(sql_ini_status, selected)
+                    if await request.is_disconnected():
+                        raise ValueError(SQL_INI_ERROR)
+                    result = {"cancelled": False, **catalog, "saved": False}
+                    if catalog.get("found") is True and catalog.get("entries"):
+                        try:
+                            saved = await run_in_threadpool(save_sql_ini_path, catalog.get("path", selected))
+                            result.update(saved)
+                        except (ValueError, OSError):
+                            result["save_warning"] = SQL_INI_SAVE_ERROR
+            except (ValueError, OSError, TypeError, RuntimeError):
+                raise ValueError(SQL_INI_ERROR) from None
         elif operation in ("owners", "objects"):
             database = data.get("database")
             if not isinstance(database, str) or not database or "\x00" in database or len(database) > 255:

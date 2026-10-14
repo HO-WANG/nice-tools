@@ -44,6 +44,31 @@ def data_source_checks(odbc):
     return sources
 
 
+def sql_ini_checks(base, expected_path=None, supported_name=None, unsupported=(), *secrets):
+    result = json_request(base, '/api/ase/sql-ini')
+    assert set(result) == {'path', 'found', 'entries', 'detail'}, 'Unexpected sql.ini discovery fields'
+    assert isinstance(result['found'], bool) and isinstance(result['entries'], list)
+    assert isinstance(result['detail'], str)
+    rendered = json.dumps(result, ensure_ascii=False)
+    assert not any(secret in rendered for secret in secrets), 'sql.ini metadata exposed raw file or password material'
+    if expected_path is not None:
+        assert Path(result['path']).resolve() == expected_path.resolve(), 'sql.ini lookup ignored its selected path'
+        assert result['found'] is True, 'The owned sql.ini fixture could not be read'
+    for entry in result['entries']:
+        assert {'id', 'name', 'available', 'detail'} <= set(entry)
+        assert set(entry) <= {'id', 'name', 'host', 'port', 'available', 'detail'}, 'An alias was treated as an ODBC DSN or exposed raw settings'
+        assert isinstance(entry['id'], str) and entry['id'] and isinstance(entry['name'], str)
+        assert isinstance(entry['available'], bool) and isinstance(entry['detail'], str)
+    if supported_name is not None:
+        supported = next(entry for entry in result['entries'] if entry['name'] == supported_name)
+        assert supported['available'] is True and supported['host'] == '127.0.0.1' and supported['port'] == 5000
+        assert 'dsn' not in supported, 'A SAP sql.ini server alias was synthesized into an ODBC DSN'
+    for name in unsupported:
+        entry = next(entry for entry in result['entries'] if entry['name'] == name)
+        assert entry['available'] is False and entry['detail'] and 'host' not in entry and 'port' not in entry, 'Unsupported endpoint was guessed'
+    return result
+
+
 def ase_checks(base):
     with urllib.request.urlopen(f"{base}/api/ase/status", timeout=30) as response:
         assert response.headers["Cache-Control"] == "no-store"
@@ -59,6 +84,7 @@ def ase_checks(base):
     assert isinstance(status.get("available"), bool), status
     assert "FreeTDS" not in str(status), "Obsolete native driver remains in client status"
     data_source_checks(status["odbc"])
+    sql_ini_checks(base)
     print("ASE HTTP smoke: ODBC/SAP BCP discovery and optional-owner session validation passed.")
 
 
@@ -99,6 +125,7 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
     assert Path(missing['path']).resolve() == location, 'Configuration must be beside the original executable'
     assert missing['exists'] is False and missing['profiles'] == []
     assert not location.exists(), 'Refusing to replace an existing ASE configuration'
+    initial_sql = sql_ini_checks(base)
     fixed_key = 'nice1234!!'
     password = 'fixture-db-password-never-log!42'
     incompatible_key = 'fixture-incompatible-legacy-key!43'
@@ -108,11 +135,28 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
     bad_cipher = json_request(base, '/api/jasypt', {
         'operation': 'encrypt', 'text': password, 'password': incompatible_key, 'wrap_enc': True,
     })['result']
-    client_section = ''
+    sql_folder = directory / '외부 SAP 설정'
+    assert not sql_folder.exists(), 'Refusing to replace an existing sql.ini fixture folder'
+    sql_folder.mkdir()
+    sql_path = sql_folder / 'sql.ini'
+    automatic_sql_path = directory / 'sql.ini'
+    sql_text = ('# fixture-db-password-never-log!42\n'
+                '[개발서버]\nmaster=NLWNSCK,master-ignored.example,7777\nquery=NLWNSCK,127.0.0.1,5000\n\n'
+                '[MULTI_QUERY]\nquery=NLWNSCK,127.0.0.1,5001\nquery=NLWNSCK,127.0.0.1,5002\n\n'
+                '[EXTRA_SSL]\nquery=NLWNSCK,127.0.0.1,5003,ssl\n\n'
+                '[NAMED_PIPE]\nquery=NLMSNMP,127.0.0.1,5004\n\n'
+                '[MASTER_ONLY]\nmaster=NLWNSCK,127.0.0.1,5005\n')
+    sql_path.write_bytes(sql_text.encode('cp949'))
+    automatic_created = False
+    if initial_sql['found'] is False and not automatic_sql_path.exists():
+        automatic_sql_path.write_bytes(sql_text.encode('utf-8-sig'))
+        automatic_created = True
+    client_section = f'[sap_client]\nsql_ini_path = {sql_path}\n'
     if clients is not None:
         clients = clients.resolve(strict=True)
         assert (clients / 'bcp.exe').is_file(), 'Missing external developer BCP console fixture'
-        client_section = f'[sap_client]\nbcp_path = {clients / "bcp.exe"}\n\n'
+        client_section += f'bcp_path = {clients / "bcp.exe"}\n'
+    client_section += '\n'
     invalid_driver = 'NiceToolsFixtureMissingDriver-65046'
     existing_sources = data_source_checks(json_request(base, '/api/ase/status')['odbc'])
     invalid_dsn = 'NiceToolsMissingDSN-' + hashlib.sha256(str(directory).encode()).hexdigest()[:8]
@@ -126,9 +170,15 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
               f'user = smoke\npassword = {encrypted}\ndatabase = fixture_db\ndsn = {invalid_dsn}\n')
     created = False
     try:
+        unsupported = ('MULTI_QUERY', 'EXTRA_SSL', 'NAMED_PIPE', 'MASTER_ONLY')
+        if automatic_created:
+            sql_ini_checks(base, automatic_sql_path, '개발서버', unsupported, password, 'master-ignored.example')
         with location.open('x', encoding='utf-8', newline='\n') as output:
             created = True
             output.write(config)
+        selected_sql = sql_ini_checks(base, sql_path, '개발서버', unsupported, password, 'master-ignored.example')
+        rejected_pick = json_request(base, '/api/ase/pick-sql-ini', {'unexpected': password}, 400)
+        sanitized_error(rejected_pick, password)
         profiles = json_request(base, '/api/ase/profiles')
         assert Path(profiles['path']).resolve() == location and profiles['exists'] is True
         rendered = json.dumps(profiles, ensure_ascii=False)
@@ -142,6 +192,7 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         assert set(dsn_profile) == {'id', 'name', 'host', 'port', 'user', 'database', 'dsn'}
         assert dsn_profile['name'] == '패키지 검사 DSN' and dsn_profile['dsn'] == invalid_dsn
         status = json_request(base, '/api/ase/status')
+        assert status['sql_ini'] == selected_sql, 'Combined status disagreed with independent sql.ini discovery'
         odbc = status['odbc']
         assert isinstance(odbc['drivers'], list) and odbc['available'] is False
         data_source_checks(odbc)
@@ -156,15 +207,22 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
                               'user': 'other', 'password': password}, 400)
         assert 'ODBC' in sanitized_error(manual, password), 'Manual login did not reach native ODBC validation'
+        alias = next(entry for entry in selected_sql['entries'] if entry['name'] == '개발서버')
+        alias_failure = json_request(base, '/api/ase/connect', {'host': alias['host'], 'port': alias['port'],
+                                     'user': 'other', 'password': password}, 400)
+        assert sanitized_error(alias_failure, password) == manual['detail'], 'A sql.ini host/port alias changed the ODBC connection mode'
         dsn_refused = json_request(base, '/api/ase/connect', {'profile_id': dsn_profile['id']}, 400)
         assert 'DSN' in sanitized_error(dsn_refused, password, fixed_key, encrypted, encrypted[4:-1]), 'Saved DSN did not reach native DSN validation'
         dsn_manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
                                   'user': 'other', 'password': password, 'dsn': invalid_dsn}, 400)
         assert 'DSN' in sanitized_error(dsn_manual, password), 'Manual DSN did not reach native DSN validation'
         assert location.read_text(encoding='utf-8-sig') == config, 'A failed login persisted a new profile'
+        sql_path.write_bytes(sql_text.encode('utf-8-sig'))
+        sql_ini_checks(base, sql_path, '개발서버', unsupported, password, 'master-ignored.example')
+        sql_path.write_bytes(sql_text.encode('cp949'))
         if executable is not None:
             from verify_bundle import odbc_worker_checks
-            odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn)
+            odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn, sql_path)
         # A legacy ciphertext encrypted with another key must fail before ODBC.
         location.write_text(config.replace(encrypted, bad_cipher), encoding='utf-8')
         stale = next(item for item in json_request(base, '/api/ase/profiles')['profiles'] if item['name'] == '패키지 검사 서버')
@@ -173,8 +231,12 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
     finally:
         if created:
             location.unlink()
+        if automatic_created:
+            automatic_sql_path.unlink()
+        sql_path.unlink()
+        sql_folder.rmdir()
     target = 'actual Windows EXE' if require_odbc else 'development process'
-    print(f'ASE {target} smoke: fixed-key profiles, real pyodbc driver/DSN discovery and invalid-driver/DSN errors, failed-login nonpersistence and incompatible-ciphertext handling passed; no live ASE login tested.')
+    print(f'ASE {target} smoke: UTF-8/CP949 sql.ini discovery and unsupported aliases, fixed-key profiles, real pyodbc driver/DSN discovery and sanitized failures, failed-login nonpersistence passed; no live ASE login tested.')
 
 
 def encoding_checks(base):

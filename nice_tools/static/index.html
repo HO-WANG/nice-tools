@@ -137,6 +137,13 @@
             <p id="ase-profile-help" class="ase-note" role="status" aria-live="polite">설정 파일을 확인하는 중입니다.</p>
             <p id="ase-profile-path" class="ase-note ase-profile-detail" hidden></p>
             <p id="ase-profile-jasypt" class="ase-note ase-profile-detail" hidden></p>
+            <div class="ase-sql-ini-controls">
+              <div class="field"><label for="ase-sql-ini">sql.ini 서버</label><select id="ase-sql-ini" aria-describedby="ase-sql-ini-help ase-sql-ini-path"><option value="">서버 주소 직접 입력</option></select></div>
+              <button id="ase-pick-sql-ini" class="secondary-button" type="button">sql.ini 선택</button>
+              <button id="ase-sql-ini-reload" class="secondary-button" type="button">다시 읽기</button>
+            </div>
+            <p id="ase-sql-ini-help" class="ase-note" role="status" aria-live="polite">sql.ini의 서버를 선택하면 호스트·포트만 채웁니다. ODBC DSN과 계정은 현재 선택을 사용합니다.</p>
+            <p id="ase-sql-ini-path" class="ase-note ase-profile-detail" hidden></p>
             <div class="ase-dsn-controls">
               <div class="field"><label for="ase-dsn">ODBC DSN (선택)</label><select id="ase-dsn" aria-describedby="ase-dsn-help"><option value="">직접 연결 (DSN 없음)</option></select></div>
               <p id="ase-dsn-help" class="ase-dsn-help" role="status" aria-live="polite">DSN의 문자셋·기본 DB·보안 설정을 사용하며, 서버·포트·계정은 입력값으로 접속합니다.</p>

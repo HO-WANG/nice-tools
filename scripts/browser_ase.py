@@ -20,6 +20,7 @@ FIXED_PROFILE_KEY = "nice1234!!"
 PROFILE_PATH = r"C:\nice-tools\ase-connections.txt"
 CLIENT_PATHS = {"bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
 ODBC = {"driver": "Adaptive Server Enterprise", "drivers": ["Adaptive Server Enterprise"]}
+SQL_INI_PATH = r"C:\SAP\ini\sql.ini"
 PROFILES = [
     {"id": "main", "name": "운영 ASE", "host": "ase.saved.internal", "port": 5001, "user": "saved_user", "database": "db1"},
     {"id": "hostile", "name": '<img src=x onerror="window.__aseXss=true">', "host": "ase.backup.internal", "port": 5002, "user": "backup_user", "database": "missing_db"},
@@ -88,6 +89,13 @@ class ASEMock:
     data_sources: list | None = None
     data_sources_detail: str = ""
     expected_dsn: str = ""
+    sql_ini_catalog: dict = field(default_factory=lambda: {"path": None, "found": False, "entries": [], "detail": "sql.ini를 찾을 수 없습니다. 파일을 선택하세요."})
+    fail_sql_ini: bool = False
+    delay_sql_ini: bool = False
+    pending_sql_ini: list = field(default_factory=list)
+    cancel_sql_ini: bool = False
+    sql_ini_saved: bool = True
+    sql_profile_rotation: bool = False
 
     def timed(self, payload):
         return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
@@ -140,9 +148,29 @@ class ASEMock:
                     self.fail_profiles = False
                     return self.respond(route, {"detail": HOSTILE_ERROR}, status=400)
                 return self.respond(route, self.profile_response())
+            if endpoint == "sql-ini":
+                assert request.method == "GET"
+                if self.delay_sql_ini:
+                    self.delay_sql_ini = False
+                    self.pending_sql_ini.append((route, self.sql_ini_catalog.copy()))
+                    return
+                if self.fail_sql_ini:
+                    self.fail_sql_ini = False
+                    return self.respond(route, {"detail": HOSTILE_ERROR}, status=400)
+                return self.respond(route, self.sql_ini_catalog)
             assert request.method == "POST", f"Unexpected {request.method} for {endpoint}"
             assert headers.get("content-type", "").startswith("application/json"), "ASE uses JSON, not uploads"
             assert isinstance(payload, dict)
+            if endpoint == "pick-sql-ini":
+                assert payload == {}, "sql.ini picker must not receive a user-supplied path or session"
+                if self.cancel_sql_ini:
+                    self.cancel_sql_ini = False
+                    return self.respond(route, {"cancelled": True})
+                if self.sql_profile_rotation:
+                    self.profiles = [{**profile, "id": "sql-" + profile["id"]} for profile in self.profiles]
+                    if self.last_profile_id:
+                        self.last_profile_id = "sql-" + self.last_profile_id
+                return self.respond(route, {"cancelled": False, **self.sql_ini_catalog, "saved": self.sql_ini_saved, **({"save_warning": HOSTILE_ERROR} if not self.sql_ini_saved else {})})
             if endpoint == "connect":
                 if self.fail_connect:
                     self.fail_connect = False
@@ -506,6 +534,11 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     assert mock.pending_starts
     expect(page.locator("#ase-profile")).to_be_disabled()
     expect(page.locator("#ase-profile-reload")).to_be_disabled()
+    for control in ("#ase-sql-ini", "#ase-pick-sql-ini", "#ase-sql-ini-reload"):
+        expect(page.locator(control)).to_be_disabled()
+    sql_calls = len(mock.endpoint_calls("pick-sql-ini"))
+    page.locator("#ase-pick-sql-ini").dispatch_event("click")
+    assert len(mock.endpoint_calls("pick-sql-ini")) == sql_calls
     profile_calls = len(mock.endpoint_calls("profiles"))
     page.locator("#ase-profile-reload").dispatch_event("click")
     page.locator("#ase-profile").dispatch_event("change")
@@ -1183,6 +1216,145 @@ def validate_dsn_case(page, url):
     assert not mock.violations, mock.violations
 
 
+def sql_ini_fixture():
+    return {"path": SQL_INI_PATH, "found": True, "entries": [
+        {"id": "sql-test", "name": "TEST_ASE_ALIAS", "host": "ase.example.internal", "port": 5000, "available": True, "detail": ""},
+        {"id": "sql-disabled", "name": HOSTILE, "available": False, "detail": HOSTILE_ERROR},
+    ], "detail": "sql.ini에서 서버를 읽었습니다."}
+
+
+def validate_sql_ini(page, url):
+    """SQL.ini aliases supply addresses without changing ODBC DSN/account or logging in."""
+    mock = ASEMock(sql_ini_catalog=sql_ini_fixture(), data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}], expected_dsn="TEST_ASE_DSN", auto_save=True)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script("window.__aseXss = false;")
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-sql-ini option[value='sql-test']")).to_contain_text("TEST_ASE_ALIAS · ase.example.internal:5000")
+    expect(page.locator("#ase-sql-ini option[value='sql-disabled']")).to_be_disabled()
+    expect(page.locator("#ase-sql-ini option[value='sql-disabled']")).to_contain_text(HOSTILE_ERROR)
+    expect(page.locator("#ase-sql-ini-path")).to_contain_text(SQL_INI_PATH)
+    assert not mock.endpoint_calls("connect") and not mock.endpoint_calls("objects")
+    page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-sql-ini").select_option("sql-test")
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    expect(page.locator("#ase-port")).to_have_value("5000")
+    expect(page.locator("#ase-user")).to_have_value("tester")
+    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
+    expect(page.locator("#ase-password")).to_have_value("")
+    mock.cancel_sql_ini = True
+    page.locator("#ase-pick-sql-ini").click()
+    expect(page.locator("#ase-sql-ini")).to_have_value("sql-test")
+    expect(page.locator("#ase-sql-ini-path")).to_contain_text(SQL_INI_PATH)
+    mock.fail_sql_ini = True
+    page.locator("#ase-sql-ini-reload").click()
+    expect(page.locator("#ase-sql-ini-help")).to_contain_text(HOSTILE_ERROR)
+    assert not page.locator("#ase-sql-ini-help script, #ase-sql-ini option img").count()
+    page.locator("#ase-host").fill("manual.changed.internal")
+    expect(page.locator("#ase-sql-ini")).to_have_value("")
+    page.locator("#ase-sql-ini").select_option("sql-test")
+    page.locator("#ase-port").fill("5001")
+    expect(page.locator("#ase-sql-ini")).to_have_value("")
+    page.locator("#ase-sql-ini").select_option("sql-test")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-pick-sql-ini").click()
+    expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
+    expect(page.locator("#ase-password")).to_have_value(PASSWORD)
+    expect(page.locator("#ase-profile")).to_have_value("")
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
+    mock.sql_ini_saved = False
+    page.locator("#ase-pick-sql-ini").click()
+    expect(page.locator("#ase-sql-ini-help")).to_contain_text(HOSTILE_ERROR)
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    expect(page.locator("#ase-user")).to_have_value("tester")
+    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
+    assert not mock.endpoint_calls("connect") and not mock.endpoint_calls("objects")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    expect(page.locator("#ase-sql-ini")).to_be_disabled()
+    expect(page.locator("#ase-pick-sql-ini")).to_be_disabled()
+    expect(page.locator("#ase-sql-ini-reload")).to_be_disabled()
+    assert mock.endpoint_calls("connect")[-1]["payload"]["dsn"] == "TEST_ASE_DSN"
+    for width in (390, 768, 1440):
+        page.set_viewport_size({"width": width, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"SQL.ini controls overflow at {width}px"
+    assert page.evaluate("window.__aseXss") is False
+    assert not mock.violations, mock.violations
+    assert not errors, errors
+
+
+def validate_sql_ini_races(page, url):
+    """A late file read cannot overwrite editing; saved-file IDs remain bound to the selected profile."""
+    profile = {**PROFILES[1], "dsn": "TEST_ASE_DSN"}
+    mock = ASEMock(profiles=[PROFILES[0], profile], profiles_exist=True, last_profile_id="hostile", sql_ini_catalog=sql_ini_fixture(), sql_profile_rotation=True)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-profile")).to_have_value("hostile")
+    expect(page.locator("#ase-sql-ini")).to_be_disabled()
+    expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
+    page.locator("#ase-pick-sql-ini").click()
+    expect(page.locator("#ase-profile")).to_have_value("sql-hostile")
+    expect(page.locator("#ase-host")).to_have_value(profile["host"])
+    expect(page.locator("#ase-port")).to_have_value(str(profile["port"]))
+    expect(page.locator("#ase-user")).to_have_value(profile["user"])
+    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
+    assert not mock.endpoint_calls("connect")
+    page.locator("#ase-profile").select_option("")
+    mock.delay_sql_ini = True
+    page.locator("#ase-sql-ini-reload").click()
+    page.wait_for_timeout(30)
+    assert mock.pending_sql_ini
+    page.locator("#ase-host").fill("new.manual.internal")
+    route, response = mock.pending_sql_ini.pop()
+    mock.respond(route, {**response, "path": r"C:\stale\sql.ini"})
+    page.wait_for_timeout(100)
+    expect(page.locator("#ase-host")).to_have_value("new.manual.internal")
+    expect(page.locator("#ase-sql-ini-path")).not_to_contain_text(r"C:\stale\sql.ini")
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    mock.delay_sql_ini = True
+    page.locator("#ase-sql-ini-reload").click()
+    page.wait_for_timeout(30)
+    assert mock.pending_sql_ini
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    route, response = mock.pending_sql_ini.pop()
+    mock.respond(route, {**response, "path": r"C:\after-login\sql.ini"})
+    page.wait_for_timeout(100)
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    expect(page.locator("#ase-sql-ini-path")).not_to_contain_text(r"C:\after-login\sql.ini")
+    assert not mock.violations, mock.violations
+
+
+def validate_sql_ini_invalid_picker(page, url):
+    """A failed/empty picked file shows its read error rather than claiming successful reading."""
+    mock = ASEMock(sql_ini_catalog=sql_ini_fixture())
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-sql-ini option[value='sql-test']")).to_have_count(1)
+    for found, detail in ((False, "sql.ini의 서버 주소 형식을 읽을 수 없습니다."), (True, "sql.ini에 사용할 서버 항목이 없습니다.")):
+        mock.sql_ini_catalog = {"path": r"C:\selected\sql.ini", "found": found, "entries": [], "detail": detail}
+        mock.sql_ini_saved = False
+        page.locator("#ase-pick-sql-ini").click()
+        expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
+        expect(page.locator("#ase-sql-ini-help")).to_contain_text(detail)
+        expect(page.locator("#ase-sql-ini-help")).to_have_attribute("data-tone", "error")
+        assert "파일은 읽었지만" not in page.locator("#ase-sql-ini-help").inner_text()
+        expect(page.locator("#ase-sql-ini option")).to_have_count(1)
+    assert not mock.endpoint_calls("connect")
+    assert not mock.violations, mock.violations
+
+
 def validate_removed_owner(page, url):
     """A full owner refresh must invalidate a now-missing selected owner's review."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
@@ -1228,11 +1400,14 @@ def main():
         validate_saved_profile_race(context.new_page(), args.url, different_dsn=True)
         validate_dsns(context.new_page(), args.url)
         validate_dsn_case(context.new_page(), args.url)
+        validate_sql_ini(context.new_page(), args.url)
+        validate_sql_ini_races(context.new_page(), args.url)
+        validate_sql_ini_invalid_picker(context.new_page(), args.url)
         validate_legacy_profile(context.new_page(), args.url)
         validate_driver_status(context.new_page(), args.url)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: registered DSNs, saved spelling and unavailable choices, DSN discovery/driver diagnostics and session identity, explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP ODBC driver/BCP paths and persistent-connection timings, saved connections, fixed-key profiles, job locks, OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: SQL.ini aliases/native picking, path warnings/cancellation, profile-ID rotation and stale response guards; registered DSNs and diagnostics; explicit Search/IME, owners, filters, connection/session guards, saved profiles, job locks, OUT statistics, native file tokens, safe text, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

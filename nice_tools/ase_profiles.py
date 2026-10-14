@@ -24,8 +24,9 @@ MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROFILES = 100
 JASYPT_FIELDS = ("algorithm", "iterations", "salt_generator", "iv_generator", "output_type")
 RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences", "odbc"}
-CLIENT_FIELDS = {"isql_path", "bcp_path"}
+CLIENT_FIELDS = {"isql_path", "bcp_path", "sql_ini_path"}
 SAVE_ERROR = "접속은 성공했지만 연결 정보를 저장하지 못했습니다. 설정 파일의 형식·권한과 변경 여부를 확인하세요."
+SQL_INI_SAVE_ERROR = "sql.ini를 읽었지만 파일 경로를 저장하지 못했습니다. 연결 설정 파일의 형식·권한과 변경 여부를 확인하세요."
 _SAVE_LOCK = threading.RLock()
 PROFILE_FIELDS = {"host", "port", "user", "password", "database", "dsn"}
 REQUIRED_FIELDS = {"host", "port", "user", "password"}
@@ -74,6 +75,16 @@ def _settings(values: dict) -> dict:
     return {key: config[key] for key in JASYPT_FIELDS}
 
 
+def _sql_ini_path(value: str) -> str:
+    if (not isinstance(value, str) or not value.strip()
+            or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in value)):
+        raise ValueError(CONFIG_ERROR)
+    value = value.strip()
+    if not Path(value).is_absolute():
+        raise ValueError(CONFIG_ERROR)
+    return value
+
+
 def _client_settings(values: dict) -> dict:
     if set(values) - CLIENT_FIELDS:
         raise ValueError(CONFIG_ERROR)
@@ -81,6 +92,10 @@ def _client_settings(values: dict) -> dict:
     for key, value in values.items():
         if key == "isql_path":
             # Legacy metadata is retained on disk but no longer selects a tool.
+            continue
+        if key == "sql_ini_path":
+            if value.strip():
+                result[key] = _sql_ini_path(value)
             continue
         value = value.strip()
         if not value:
@@ -398,3 +413,13 @@ def remember_connection(profile_id: str, path: Path | None = None) -> dict:
         text = _update_section(document["text"], "preferences", {"last_profile": profile["name"]})
         _write_document(document, text)
         return _saved_result(profile["name"], path)
+
+
+def save_sql_ini_path(sql_ini_path: str, path: Path | None = None) -> dict:
+    """Remember only a successfully read, explicitly picked file's location."""
+    selected = _sql_ini_path(sql_ini_path)
+    with _SAVE_LOCK:
+        document = _load(path)
+        text = _update_section(document["text"], "sap_client", {"sql_ini_path": selected})
+        _write_document(document, text)
+    return {"saved": True}

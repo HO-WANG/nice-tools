@@ -66,6 +66,15 @@ def test_picker_does_not_load_native_library(worker, monkeypatch):
     assert worker.execute({"operation": "pick", "direction": "out", "suggested_name": "导出.bcp"})["path"] == "C:\\资料\\导出.bcp"
 
 
+def test_sql_ini_picker_worker_needs_no_database_connection(worker, monkeypatch):
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", None)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_odbc", None)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_picker", SimpleNamespace(
+        pick_sql_ini=lambda: {"cancelled": False, "path": "C:\\SAP\\ini\\sql.ini"},
+    ))
+    assert worker.execute({"operation": "pick-sql-ini"}) == {"cancelled": False, "path": "C:\\SAP\\ini\\sql.ini"}
+
+
 def test_input_preview_uses_fresh_object_metadata(worker, monkeypatch, tmp_path):
     path = tmp_path / "资料.bcp"
     path.write_text("1\n", encoding="utf-8")

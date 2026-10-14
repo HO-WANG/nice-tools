@@ -16,6 +16,7 @@ analysis = Analysis(
         "nice_tools.ase_worker",
         "nice_tools.ase_cli",
         "nice_tools.ase_odbc",
+        "nice_tools.ase_sqlini",
         "pyodbc",
         "nice_tools.ase_clients",
         "nice_tools.ase_process",

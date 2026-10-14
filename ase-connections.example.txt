@@ -9,6 +9,9 @@
 
 [sap_client]
 bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
+# Optional absolute literal path; the pre-connect file picker remembers it here.
+# sql_ini_path = C:\SAP\ini\sql.ini
+# sql.ini server aliases fill host/port only; they are not Windows ODBC DSNs.
 
 # Optional: exact SAP ASE driver name from the Windows 64-bit ODBC administrator.
 # Remove this section to select a registered SAP ASE driver automatically.
