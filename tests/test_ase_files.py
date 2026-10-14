@@ -177,10 +177,11 @@ def test_character_capacity_uses_selected_encoding_bytes(ase_files, tmp_path):
         inspect(ase_files, tmp_path, "가\n".encode("utf-8"), columns)
 
 
-def test_trailing_spaces_have_freetds_warning(ase_files, tmp_path):
-    result = inspect(ase_files, tmp_path, b"value \n")
+def test_trailing_spaces_are_preserved_in_preview_and_fingerprint(ase_files, tmp_path):
+    data = b"value \n"
+    result = inspect(ase_files, tmp_path, data)
     assert result["sample"] == [["value "]]
-    assert any("FreeTDS" in warning for warning in result["warnings"])
+    assert result["fingerprint"]["sha256"] == hashlib.sha256(data).hexdigest()
 
 
 def test_identity_is_present_but_not_validated_unless_retained(ase_files, tmp_path):

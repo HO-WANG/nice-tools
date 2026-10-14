@@ -4,6 +4,10 @@
 .ase-profile-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 12px; }
 .ase-profile-controls > button { min-height: 36px; }
 .ase-profile-detail { overflow-wrap: anywhere; }
+.ase-client-paths { margin: -4px 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
+.ase-master-key-field { padding: 0 20px 16px; }
+.ase-master-key-field input { max-width: 420px; }
+.ase-master-key-field p { margin: 6px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
 #ase-profile-help[data-tone="error"] { color: #a52a2a; }
 .ase-connection-grid { display: grid; grid-template-columns: minmax(160px,2fr) 90px minmax(110px,1fr) minmax(130px,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 20px; }
 .ase-browser-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)) 110px minmax(120px,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 16px; }
@@ -62,7 +66,7 @@
 @media (max-width: 760px) {
   .ase-connection-grid, .ase-profile-controls, .ase-browser-controls, .ase-options-grid { grid-template-columns: minmax(0,1fr); padding-inline: 14px; }
   .ase-profile-controls > button { justify-self: start; }
-  .ase-note, .ase-instructions, .ase-file-row, .ase-job-status { padding-inline: 14px; }
+  .ase-note, .ase-instructions, .ase-file-row, .ase-job-status, .ase-master-key-field { padding-inline: 14px; }
   .ase-warning, .ase-review-warnings { margin-inline: 14px; }
   .ase-out-statistics { grid-template-columns: repeat(2,minmax(0,1fr)); padding-inline: 14px; gap: 12px; }
   .ase-review-details { grid-template-columns: 78px minmax(0,1fr); padding-inline: 14px; gap: 8px; }

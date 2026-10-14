@@ -1,7 +1,8 @@
 """Isolated ASE operations with a single-request newline JSON protocol.
 
-Credentials arrive only over stdin. Native imports happen inside the worker so
-the browser server never loads DB-Library or owns an ASE connection.
+Credentials arrive over stdin for isolated file transfers. Catalog and preview
+operations can run in the application thread while SAP clients remain child
+processes registered for cancellation.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from typing import Callable
 
 MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 HASH_CHUNK_BYTES = 1024 * 1024
-NATIVE_OPERATIONS = {"databases", "owners", "objects", "columns"}
+CATALOG_OPERATIONS = {"databases", "owners", "objects", "columns"}
 
 
 def _module(name: str):
@@ -103,7 +104,7 @@ def _last_windows_error():
 
 @contextlib.contextmanager
 def _input_guard(path: Path):
-    """Prevent Windows writes/deletes from verification through native import.
+    """Prevent Windows writes/deletes from verification through SAP BCP import.
 
     Source development on other platforms does not promise a filesystem lock.
     The shipped application is Windows-only.
@@ -131,12 +132,12 @@ def _input_guard(path: Path):
         library.CloseHandle(handle)
 
 
-def _preview(payload: dict, emit: Callable) -> dict:
+def _preview(payload: dict, emit: Callable, register=None) -> dict:
     direction = _direction(payload)
     path = _path(payload.get("path"))
     files = _module("ase_files")
     options = files.parse_options(payload.get("options", {}))
-    metadata = _module("ase_native").run_operation({**payload, "operation": "columns"}, emit)
+    metadata = _module("ase_cli").run_operation({**payload, "operation": "columns"}, emit, register=register)
     if not isinstance(metadata, dict) or not isinstance(metadata.get("columns"), list):
         raise ValueError("ASE did not return valid object metadata.")
     result = {**metadata, "path": str(path), "warnings": []}
@@ -147,7 +148,7 @@ def _preview(payload: dict, emit: Callable) -> dict:
     return result
 
 
-def _output_transfer(payload: dict, emit: Callable) -> dict:
+def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
     target = _path(payload.get("path"))
     expected = payload.get("out_target_fingerprint")
     _check_target(target, expected)
@@ -175,7 +176,7 @@ def _output_transfer(payload: dict, emit: Callable) -> dict:
             os.close(descriptor)
             stage = Path(filename)
         request = {**payload, "path": str(stage)}
-        result = _module("ase_native").run_operation(request, emit)
+        result = _module("ase_cli").run_operation(request, emit, register=register)
         if not isinstance(result, dict):
             raise ValueError("ASE did not return a valid transfer result.")
         _check_target(target, expected)
@@ -194,29 +195,29 @@ def _output_transfer(payload: dict, emit: Callable) -> dict:
                 stage.unlink(missing_ok=True)
 
 
-def execute(payload: dict, emit: Callable | None = None) -> dict:
-    """Execute one operation; native errors propagate for protocol sanitization."""
+def execute(payload: dict, emit: Callable | None = None, register=None) -> dict:
+    """Execute one operation; SAP errors propagate for protocol sanitization."""
     if not isinstance(payload, dict):
         raise ValueError("Worker request must be a JSON object.")
     emit = emit or (lambda data: None)
     operation = payload.get("operation")
     if operation == "status":
-        return _module("ase_native").native_status()
+        return _module("ase_cli").client_status()
     if operation == "pick":
         return _module("ase_picker").pick_file(payload.get("direction"), payload.get("suggested_name"))
     if operation == "preview":
-        return _preview(payload, emit)
+        return _preview(payload, emit, register=register)
     if operation == "transfer":
         direction = _direction(payload)
         payload = {**payload, "options": {**payload["options"], "direction": direction}}
         if direction == "out":
-            return _output_transfer(payload, emit)
+            return _output_transfer(payload, emit, register=register)
         path = _path(payload.get("path"))
         with _input_guard(path):
             _check_input(path, payload.get("fingerprint"))
-            return _module("ase_native").run_operation(payload, emit)
-    if operation in NATIVE_OPERATIONS:
-        return _module("ase_native").run_operation(payload, emit)
+            return _module("ase_cli").run_operation(payload, emit, register=register)
+    if operation in CATALOG_OPERATIONS:
+        return _module("ase_cli").run_operation(payload, emit, register=register)
     raise ValueError("Unknown ASE worker operation.")
 
 

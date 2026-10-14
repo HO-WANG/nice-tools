@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import contextlib
 import copy
 import ipaddress
 import json
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import signal
 import subprocess
 import sys
 import tempfile
@@ -83,6 +85,8 @@ class AseManager:
         self.lock = threading.RLock()
         self.sessions = {}
         self.processes = {}
+        self.worker_jobs = {}
+        self.closed = False
 
     @staticmethod
     def _redact(text, connection):
@@ -102,22 +106,110 @@ class AseManager:
             session["touched"] = time.monotonic()
             return session
 
+    def _register_client(self, token=None):
+        """Register a SAP process until its runner invokes the returned cleanup."""
+        def register(process):
+            with self.lock:
+                if self.closed or (token is not None and token not in self.sessions):
+                    process.kill()
+                    raise ValueError("접속 요청이 취소되었습니다.")
+                self.processes[process] = token
+            def cleanup():
+                with self.lock:
+                    self.processes.pop(process, None)
+            return cleanup
+        return register
+
+    def _terminate(self, process):
+        """Kill the owned process tree, including children of a finished worker."""
+        with self.lock:
+            worker = process in self.worker_jobs
+            guard = self.worker_jobs.get(process)
+        if worker and guard is not None:
+            guard.terminate()
+        elif worker and os.name != "nt":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+        elif process.poll() is None:
+            process.kill()
+
+    def _release_worker(self, process):
+        try:
+            self._terminate(process)
+            process.wait()
+        finally:
+            with self.lock:
+                self.processes.pop(process, None)
+                guard = self.worker_jobs.pop(process, None)
+            if guard is not None:
+                guard.close()
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+
     def _spawn(self, payload, session=None):
         process = subprocess.Popen(
             self.worker_command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, encoding="utf-8",
-            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+            creationflags=(subprocess.CREATE_NO_WINDOW | 0x4) if os.name == "nt" else 0,
+            start_new_session=os.name != "nt",
         )
+        guard = None
+        try:
+            if os.name == "nt":
+                from .ase_process import WindowsJob, resume_process
+                guard = WindowsJob()
+                # Suspend before the one-file bootstrapper can create Python's
+                # child process. Assignment covers every later worker/CLI child.
+                guard.assign(process.pid)
+                resume_process(process.pid)
+            with self.lock:
+                self.worker_jobs[process] = guard
+                if self.closed or (session is not None and session not in self.sessions):
+                    self._terminate(process)
+                    raise ValueError("접속 요청이 취소되었습니다.")
+                self.processes[process] = session
+            return process
+        except Exception:
+            if guard is not None:
+                guard.close()
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            for pipe in (process.stdin, process.stdout, process.stderr):
+                if pipe is not None:
+                    pipe.close()
+            with self.lock:
+                self.worker_jobs.pop(process, None)
+                self.processes.pop(process, None)
+            raise
+
+    def _invoke_direct(self, payload, session=None):
+        """Run SAP CLI operations without booting another one-file executable."""
+        from . import ase_cli
+        from .ase_worker import execute
+        started_at = time.monotonic()
         with self.lock:
-            self.processes[process] = session
-        return process
+            if self.closed:
+                raise ValueError("접속 요청이 취소되었습니다.")
+        try:
+            register = self._register_client(session)
+            if payload["operation"] == "preview":
+                result = execute(payload, register=register)
+            else:
+                result = ase_cli.run_operation(payload, register=register)
+            if not isinstance(result, dict):
+                raise ValueError("SAP 클라이언트의 응답을 읽지 못했습니다.")
+            if isinstance(result.get("timings"), dict):
+                result["timings"] = {**result["timings"], "total_seconds": max(0.0, time.monotonic() - started_at)}
+            return result
+        except (ValueError, OSError) as error:
+            raise ValueError(self._redact(error, payload.get("connection", {}))) from None
 
     def _invoke(self, payload, session=None, timeout=90):
-        started_at = time.monotonic() if payload.get("operation") in ("databases", "owners", "objects", "columns") else None
         process = self._spawn(payload, session)
         try:
             output, _ = process.communicate(json.dumps(payload, ensure_ascii=False), timeout=timeout)
-            elapsed = max(0.0, time.monotonic() - started_at) if started_at is not None else None
             result = None
             error = None
             for line in output.splitlines():
@@ -128,29 +220,26 @@ class AseManager:
                     error = event.get("detail", "ASE 작업을 완료하지 못했습니다.")
             if process.returncode != 0 or error or not isinstance(result, dict):
                 raise ValueError(self._redact(error or "ASE 작업을 완료하지 못했습니다.", payload.get("connection", {})))
-            if elapsed is not None and isinstance(result.get("timings"), dict):
-                result["timings"] = {**result["timings"], "total_seconds": elapsed}
             return result
         except subprocess.TimeoutExpired:
-            process.kill()
+            self._terminate(process)
             process.communicate()
             raise ValueError("ASE 응답 시간이 초과되었습니다.") from None
         except (OSError, json.JSONDecodeError):
             raise ValueError("ASE 작업 프로세스의 응답을 읽지 못했습니다.") from None
         finally:
-            if process.poll() is None:
-                process.kill()
-                process.wait()
-            with self.lock:
-                self.processes.pop(process, None)
+            self._release_worker(process)
 
     def status(self):
-        return {**self._invoke({"operation": "status"}, timeout=30), "platform": sys.platform}
+        from .ase_cli import client_status
+        return {**client_status(), "platform": sys.platform}
 
     def connect(self, payload):
         connection = connection_data(payload)
-        result = self._invoke({"operation": "databases", "connection": connection})
+        result = self._invoke_direct({"operation": "databases", "connection": connection})
         with self.lock:
+            if self.closed:
+                raise ValueError("접속 요청이 취소되었습니다.")
             # Expire idle sessions; active transfers keep their owning session.
             now = time.monotonic()
             expired = [token for token, item in self.sessions.items()
@@ -168,7 +257,7 @@ class AseManager:
 
     def catalog(self, token, operation, **parameters):
         session = self._session(token)
-        result = self._invoke({"operation": operation, "connection": session["connection"], **parameters}, token)
+        result = self._invoke_direct({"operation": operation, "connection": session["connection"], **parameters}, token)
         self._session(token)
         return result
 
@@ -216,7 +305,7 @@ class AseManager:
             session["reviews"].clear()
         payload = {"operation": "preview", "connection": session["connection"], "object": object_value,
                    "path": selected["path"], "options": options}
-        result = self._invoke(payload, token, timeout=None)
+        result = self._invoke_direct(payload, token)
         payload.update({"operation": "transfer", "columns": result["columns"],
                         "fingerprint": result.get("fingerprint"),
                         "out_target_fingerprint": selected["target_fingerprint"]})
@@ -277,7 +366,7 @@ class AseManager:
             with self.lock:
                 job["process"] = process
                 if job["cancelled"]:
-                    process.kill()
+                    self._terminate(process)
             process.stdin.write(json.dumps(payload, ensure_ascii=False))
             process.stdin.close()
             for line in process.stdout:
@@ -323,6 +412,17 @@ class AseManager:
                             "rows_per_second": rate if rate is None or math.isfinite(rate) else None,
                             "bytes_written": bytes_written,
                         }
+                        bcp_seconds = result.get("bcp_seconds")
+                        bcp_rate = result.get("bcp_rows_per_second")
+                        if (
+                            isinstance(bcp_seconds, (int, float)) and not isinstance(bcp_seconds, bool)
+                            and math.isfinite(bcp_seconds) and bcp_seconds >= 0
+                            and (bcp_rate is None or (
+                                isinstance(bcp_rate, (int, float)) and not isinstance(bcp_rate, bool)
+                                and math.isfinite(bcp_rate) and bcp_rate >= 0
+                            ))
+                        ):
+                            public_result["statistics"].update({"bcp_seconds": bcp_seconds, "bcp_rows_per_second": bcp_rate})
                     job.update({"state": "succeeded", "phase": "done", "message": "전송 완료", "rows": result.get("rows"),
                                 "result": public_result})
         except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -334,10 +434,7 @@ class AseManager:
                         job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
         finally:
             if process:
-                if process.poll() is None:
-                    process.kill()
-                    process.wait()
-                process.stdout.close()
+                self._release_worker(process)
             stage = payload.get("stage_path")
             if stage:
                 try:
@@ -374,8 +471,8 @@ class AseManager:
                 job["cancelled"] = True
                 job["message"] = "취소 중"
                 process = job["process"]
-                if process and process.poll() is None:
-                    process.kill()
+                if process:
+                    self._terminate(process)
         return self.job(token, job_token)
 
     def disconnect(self, token):
@@ -385,13 +482,14 @@ class AseManager:
                 if job["state"] == "running":
                     job["cancelled"] = True
             for process, owner in list(self.processes.items()):
-                if owner == token and process.poll() is None:
-                    process.kill()
+                if owner == token:
+                    self._terminate(process)
             self.sessions.pop(token, None)
         return {"ok": True}
 
     def close(self):
         with self.lock:
+            self.closed = True
             threads = []
             for session in self.sessions.values():
                 for job in session["jobs"].values():
@@ -401,8 +499,7 @@ class AseManager:
                         job["cancelled"] = True
             processes = list(self.processes)
             for process in processes:
-                if process.poll() is None:
-                    process.kill()
+                self._terminate(process)
             self.sessions.clear()
         for process in processes:
             try:

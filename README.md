@@ -10,7 +10,8 @@ Python, 필요한 라이브러리와 HTML·CSS·JavaScript 화면을 EXE에 포�
 두 번째 도구는 **Jasypt 암호화**입니다. 왼쪽 메뉴에서 선택해 문자열을
 암호화·복호화하며, Java Jasypt와 호환되는 설정을 지원합니다.
 세 번째 도구는 **ASE / BCP**입니다. Sybase ASE의 오브젝트를 탐색하고,
-PC의 문자형 파일로 BCP IN / OUT을 실행합니다. 필요한 DB 클라이언트도 EXE 안에 포함합니다.
+PC의 문자형 파일로 BCP IN / OUT을 실행합니다. **PC에 설치된 SAP Open Client의
+`isql.exe`와 `bcp.exe`를 사용합니다.** SAP 클라이언트는 배포 EXE에 포함하지 않습니다.
 
 ## 사용자 실행 방법
 
@@ -19,7 +20,8 @@ PC의 문자형 파일로 BCP IN / OUT을 실행합니다. 필요한 DB 클라�
 3. Chrome 또는 Edge의 왼쪽 메뉴에서 사용할 도구를 선택합니다.
 4. 종료하려면 실행창에서 `Ctrl+C`를 누릅니다. 브라우저 탭만 닫으면 앱은 계속 실행됩니다.
 
-사용자 PC에 Python이나 라이브러리를 설치할 필요가 없습니다.
+사용자 PC에 Python이나 Python 라이브러리를 설치할 필요가 없습니다.
+ASE / BCP에는 PC에 설치된 SAP Open Client가 필요하며, Windows 10 버전 1809 이상을 사용합니다.
 앱은 `127.0.0.1`의 빈 포트를 자동으로 선택합니다.
 브라우저가 자동으로 열리지 않으면 실행창에 표시된 주소를 Chrome/Edge에 입력합니다.
 선택한 파일의 전송과 비교는 같은 PC 안에서 처리합니다.
@@ -141,8 +143,10 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
 
 ## ASE / BCP
 
-1. 왼쪽 **ASE / BCP** 메뉴에서 설정 파일의 서버를 선택하고 **Jasypt 복호화 키**를 입력해 연결합니다.
-   설정 파일이 없으면 **직접 입력**을 선택해 호스트, 포트(기본 5000), 사용자와 DB 비밀번호로 연결할 수 있습니다.
+1. PC의 SAP Open Client에 `isql.exe`와 `bcp.exe`가 설치되어 있는지 확인합니다.
+   왼쪽 **ASE / BCP** 메뉴에서 **직접 입력**을 선택하고 호스트, 포트(기본 5000), 사용자,
+   DB 비밀번호와 **저장용 Jasypt 키**를 입력해 연결합니다. 연결에 성공하면 암호화된 접속 정보를 자동 저장합니다.
+   이미 저장된 서버는 목록에서 선택하고 **Jasypt 복호화 키**만 입력합니다.
 2. 데이터베이스를 선택합니다. 소유자는 기본 **전체 소유자**이며 선택하지 않아도 됩니다.
    특정 소유자가 필요하면 소유자 목록을 열어 선택합니다.
    객체 이름과 종류를 지정한 뒤 **검색** 버튼 또는 Enter로 서버에서 조회합니다.
@@ -161,11 +165,12 @@ OUT이 완료되면 **내보낸 행 수·전체 소요 시간·초당 평균 행
 빈 결과는 0행으로 표시하며 측정 시간이 0이면 처리 속도를 `측정 불가`로 표시합니다.
 실패하거나 취소한 작업에는 완료 통계를 표시하지 않습니다.
 
-서버 연결과 메타데이터 조회의 시간 정보에는 전체 시간, 서버 로그인, 세션 설정,
-실제 조회와 준비 시간을 구분해 표시합니다. 현재 탐색 요청마다 별도 worker와 실제 ASE 연결을
-생성하므로 로그인 비용이 반복됩니다. 이 값으로 EXE 실행 준비, 서버 로그인과 조회 중 어느 구간이
-느린지 확인할 수 있습니다. 첫 화면의 연결 상태는 접속 정보를 유지하는 상태이며 열린 DB 연결의 재사용을 뜻하지 않습니다.
-사용자 PC에서 관측한 지연의 원인은 그 PC의 시간 정보와 서버 상태를 함께 확인해야 합니다.
+DB 조회는 앱에서 PC의 `isql.exe`를 직접 실행하며, 기존의 EXE worker 재실행·압축 해제 비용을 없앴습니다.
+각 조회는 isql의 새 접속으로 실행되며 열린 DB 연결을 재사용하지 않습니다.
+시간 정보는 **전체·CLI 실행·앱 준비**를 표시합니다. CLI 실행 시간에는 프로세스 시작, 로그인과 조회가
+포함되므로 이 값을 순수 SQL 실행 시간으로 해석하지 마세요. PC와 서버 환경에 따라 성능이 달라집니다.
+BCP는 PC의 `bcp.exe`가 직접 전송하며, 전송 프로세스는 취소·파일 보존을 위해 격리된 worker가 관리합니다.
+OUT 통계에는 전체 작업 시간과 별도로 **bcp 실행 시간·bcp 기준 행/초**를 표시합니다.
 
 테이블은 IN/OUT, 뷰는 OUT을 지원합니다. 프로시저는 탐색만 가능합니다.
 **IN은 기존 데이터에 행을 추가합니다. 삭제·TRUNCATE를 실행하지 않습니다.**
@@ -193,41 +198,56 @@ IN을 실행하는 동안 입력 파일은 Windows에서 읽기 전용 공유로
 알 수 없는 사전 검사에서 파일 인코딩의 바이트 길이를 보수적으로 사용합니다.
 UTF-8 파일을 CP949 서버의 좁은 문자 컬럼에 넣으면 실제로 들어갈 값도 사전 검사에서
 거절될 수 있으므로, 이 경우 서버 문자셋에 맞는 파일 인코딩을 사용하세요.
-FreeTDS는 문자 값의 끝 공백을 제거할 수 있어 해당 값이 있으면 확인 화면에 알립니다.
 첫 버전 IN은 binary/varbinary/image/timestamp와 알 수 없는 자료형을 포함한 테이블을 거절합니다.
 계산·자동 생성·암호화 컬럼의 IN은 지원 범위에 포함하지 않습니다.
 
-EXE에는 FreeTDS 1.5.19, GNU libiconv와 OpenSSL을 포함하며 TDS 5.0으로 ASE에 접속합니다.
-SAP 클라이언트, ODBC 드라이버, 별도 `bcp.exe` 설치는 필요 없습니다.
-설정 파일에는 접속 정보와 암호화된 DB 비밀번호를 보관합니다. 복호화 키와 평문 DB 비밀번호는
-실행 중 메모리에서만 사용하며 명령행·파일·로그·브라우저 저장소에 남기지 않습니다.
+DB 조회는 SAP `isql.exe`, 문자형 IN/OUT은 SAP `bcp.exe`를 사용합니다.
+ODBC, FreeTDS DLL 또는 Java/jConnect는 필요하지 않습니다. 설치된 SAP 클라이언트가 사용하는
+네트워크 설정·런타임 DLL은 사용자 PC의 기존 설치 환경을 따릅니다.
+접속 호스트와 포트로 임시 `sql.ini`를 생성하므로 기존 서버 별칭을 등록할 필요가 없습니다.
 데이터가 이동하는 범위는 **사용자 PC와 입력한 ASE 서버 사이**입니다.
 서버 네트워크 접근과 계정의 조회/BCP 권한, DB의 bulk-copy 설정은 기존 사내 설정을 사용합니다.
 
-현재 포함된 연결 방식은 FreeTDS입니다. jConnect는 Java JDBC 드라이버이므로 별도의 Java 런타임과
-JAR 통합, BCP 파일 처리 구현·검증을 추가하면 지원할 수 있으며 현재 EXE에는 포함되어 있지 않습니다.
+DB 비밀번호는 명령행의 `-P`, 환경 변수 또는 임시 파일로 전달하지 않습니다.
+앱이 소유한 Windows 콘솔(ConPTY)의 `Password:` 프롬프트에 직접 입력합니다.
+SQL·접속 주소만 임시 파일에 기록하며 작업 후 삭제합니다. 오류는 비밀번호를 가리고 출력합니다.
+카탈로그는 UTF-8(`-J utf8`)과 영어 메시지(`-z us_english`)로 읽습니다. 설치된 클라이언트에서
+해당 문자셋과 언어를 지원해야 합니다. BCP는 선택한 파일 인코딩에 맞춰 `-J`를 지정합니다.
+서버가 이름이나 데이터를 선택한 문자셋으로 변환할 수 있는지도 확인하세요.
+현재 BCP 대상은 일반 식별자 이름을 지원하며 공백·점·따옴표 등의 특별한 인용이 필요한 이름은 거절합니다.
+문자형 파일의 구분자 해석, NULL·빈 문자열, 날짜·LOB·IDENTITY 처리는 설치된 SAP 클라이언트와 서버 버전에
+따라 검증해야 합니다. native 파일과 format 파일은 지원하지 않습니다.
 
-소스·브라우저 검사와 Windows DLL/EXE 실행 검증은 실제 ASE 왕복 테스트를 대신하지 않습니다.
-현재 개발 환경에 ASE 서버가 없어 실제 서버의 문자셋, IDENTITY, LOB와 날짜 데이터를
-IN/OUT하여 검증하지 못했습니다. 운영 데이터에 사용하기 전에 사내 ASE의 테스트 테이블에서
-같은 설정으로 OUT → IN과 행 수·내용을 확인하세요.
+Windows 소스·EXE 검사는 **개발용 가짜 콘솔 클라이언트**로 프롬프트 입력, 조회 연동,
+암호화 저장과 파일 전송 제어를 확인합니다. 이 파일은 배포하지 않으며 실제 SAP/ASE 호환 검증을 대신하지 않습니다.
+현재 개발 환경에 ASE 서버와 SAP 클라이언트가 없어 실제 서버의 문자셋, IDENTITY, LOB와 날짜 데이터를
+IN/OUT하여 검증하지 못했습니다. 운영 데이터에 사용하기 전에 사내 테스트 테이블에서
+설치된 클라이언트로 OUT → IN과 행 수·내용을 확인하세요.
 
 ### ASE 연결 설정 파일
 
-실행 파일과 **같은 폴더**에 `ase-connections.txt`를 UTF-8로 저장합니다. UTF-8 BOM도 허용합니다.
-실행한 작업 폴더나 EXE의 임시 압축 해제 폴더에서 찾지 않습니다.
-소스로 실행할 때는 저장소 루트의 파일을 읽습니다.
-배포 ZIP에는 EXE 한 개를 유지하며 이 설정 파일은 사용자가 자신의 서버 정보로 만듭니다.
-저장소의 [`ase-connections.example.txt`](ase-connections.example.txt)를 복사해 시작할 수 있습니다.
+설정 파일은 **EXE와 같은 폴더**의 `ase-connections.txt`입니다. UTF-8 또는 UTF-8 BOM을 사용합니다.
+실행 작업 폴더나 EXE의 임시 압축 해제 폴더에서 찾지 않으며, 소스 실행은 저장소 루트를 사용합니다.
+배포 ZIP에는 EXE 한 개를 유지하고 이 파일은 PC에서 처음 접속 성공 시 만들어집니다.
 
-1. **Jasypt 암호화** 도구에서 DB 비밀번호를 원문으로 넣고, 별도로 정한 복호화 키를 비밀번호에 입력합니다.
-2. 기본 `PBEWithMD5AndDES`, 반복 1,000회, random salt, NoIvGenerator, base64 설정을 사용하고
-   **ENC(...)로 감싸기**를 선택하여 Encrypt합니다.
-3. 결과를 아래 `password` 값에 붙여 넣습니다. 복호화 키와 평문 DB 비밀번호는 파일에 쓰지 않습니다.
-4. **ASE / BCP → 설정 파일 다시 읽기**를 누르고 서버를 선택합니다.
-   **Jasypt 복호화 키**에 암호화할 때 사용한 키를 입력하여 연결합니다. 연결 성공 후 입력창의 키를 지웁니다.
+1. **직접 입력**에서 새 접속 정보, DB 비밀번호와 별도로 정한 **저장용 Jasypt 키**를 입력합니다.
+2. 접속에 성공하면 서버 정보와 `ENC(...)`로 암호화한 DB 비밀번호를 파일에 기록합니다.
+   접속 실패 시 새 정보를 저장하지 않습니다. 파일을 쓸 수 없으면 연결은 유지하고 저장 실패를 안내합니다.
+3. 다음 실행에는 마지막으로 성공한 서버가 선택됩니다. 같은 **Jasypt 복호화 키**를 입력하여 연결합니다.
+   앱 실행만으로 DB에 자동 접속하지 않으며 키를 저장하지 않습니다.
+4. 다른 서버는 **직접 입력**으로 연결합니다. 기존의 다른 서버와 클라이언트 설정은 유지합니다.
+   같은 호스트·포트·사용자의 비밀번호를 바꾸면 기존 연결 설정을 갱신합니다.
+
+SAP 실행 파일은 `PATH`, 이어서 `SYBASE`·`SYBASE_OCS` 설치 경로에서 찾습니다.
+찾지 못하거나 원하는 설치를 지정하려면 아래 `[sap_client]` 구역을 설정하고 **설정 파일 다시 읽기**를 누릅니다.
+각 경로는 실제 `isql.exe`·`bcp.exe`의 절대 경로여야 합니다. 경로에 공백이 있어도 따옴표를 넣지 않습니다.
+명시한 경로가 잘못되면 다른 실행 파일로 자동 대체하지 않습니다.
 
 ```ini
+[sap_client]
+isql_path = C:\SAP\OCS-16_0\bin\isql.exe
+bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
+
 [jasypt]
 algorithm = PBEWithMD5AndDES
 iterations = 1000
@@ -241,20 +261,28 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 database = appdb
+
+[preferences]
+last_profile = 개발 ASE
 ```
 
-`PASTE_JASYPT_RESULT_HERE`는 예시 자리 표시자입니다. 실제 Encrypt 결과의 `ENC(...)` 전체로 교체하세요.
-서버마다 새 `[서버 이름]` 구역을 추가하며 `host`, `port`, `user`, `password`는 필수입니다.
-`database`는 선택 사항으로 연결 후 처음 선택할 DB를 지정합니다.
-`[jasypt]` 설정은 파일의 모든 서버 비밀번호에 공통 적용되며 암호화할 때의 설정과 같아야 합니다.
-이 구역을 생략하면 위 MD5/DES 기본값을 사용합니다. AES 암호문에는
-`algorithm = PBEWITHHMACSHA512ANDAES_256`과 `iv_generator = random`을 지정합니다.
-지원하는 값은 salt `random`/`zero`, IV `none`/`random`, 암호문 형식 `base64`/`hexadecimal`입니다.
+수동으로 서버를 추가할 때는 저장소의 [`ase-connections.example.txt`](ase-connections.example.txt)를 참고합니다.
+Jasypt 도구에서 DB 비밀번호를 원문, 복호화 키를 비밀번호로 넣고 기본 MD5/DES 설정으로 Encrypt하여
+나온 `ENC(...)` 전체를 `password`에 붙여 넣습니다. 평문 DB 비밀번호나 복호화 키는 파일에 쓰지 않습니다.
+`PASTE_JASYPT_RESULT_HERE`는 자리 표시자이며 실제 암호문으로 교체해야 합니다.
+서버 구역에는 `host`, `port`, `user`, `password`가 필수이고 `database`는 선택 사항입니다.
+`[preferences] last_profile`은 마지막 성공한 서버 구역 이름이며 앱이 갱신합니다.
+
+`[jasypt]` 설정은 모든 서버 비밀번호에 공통 적용됩니다. 생략하면 MD5/DES, 반복 1,000회,
+random salt, NoIvGenerator, base64를 사용합니다. 기존 AES 설정은
+`algorithm = PBEWITHHMACSHA512ANDAES_256`, `iv_generator = random`으로 계속 사용할 수 있습니다.
+자동 저장도 파일에 지정한 암호화 설정을 따릅니다. 지원 값은 salt `random`/`zero`, IV `none`/`random`,
+암호문 형식 `base64`/`hexadecimal`입니다. 암호화 설정을 바꾸면 기존 암호문도 같은 설정으로 다시 암호화해야 합니다.
 
 주석은 별도 줄에서 `#` 또는 `;`로 시작합니다. 값 뒤에 주석을 붙이지 마세요.
 중복 항목, `[DEFAULT]`, 알 수 없는 항목과 평문 `password`는 거절합니다.
-파일이 없거나 읽기에 실패하면 직접 입력으로 연결할 수 있습니다. 파일을 수정한 뒤에는 목록을 다시 읽으세요.
-설정 파일의 호스트·계정·DB 이름은 평문이므로 파일 접근 권한은 사용자 PC에서 관리합니다.
+파일 변경은 다시 읽기로 반영합니다. 잘못된 기존 파일을 새 접속 저장으로 덮어쓰지 않습니다.
+호스트·계정·DB 이름과 실행 파일 경로는 평문이므로 파일 접근 권한은 사용자 PC에서 관리합니다.
 
 ## 테스트와 실행 확인
 
@@ -300,21 +328,27 @@ Java가 없는 개발 환경에서도 기준 암호문 테스트를 실행할 �
 
 ## Windows EXE 만들기 (개발자용)
 
-Windows x64 빌드 PC에 Python 3.12, Visual Studio 2022의 C++ 빌드 도구와 Windows SDK,
-CMake, Git, Perl을 준비한 뒤 저장소 루트에서 실행합니다. Git for Windows의 Perl도 사용할 수 있습니다.
-이 도구들은 빌드 개발자에게만 필요합니다.
+Windows x64 빌드 PC에 Python 3.12를 준비한 뒤 저장소 루트에서 실행합니다.
 
 ```powershell
 powershell -NoProfile -File scripts\build_windows.ps1
 ```
 
-빌드 도구는 `.venv-build`에 설치합니다. 빌드와 실제 실행 검증이 통과하면
-`dist\nice-tools.exe`가 만들어집니다. 배포 폴더에는 이 파일 하나만 있어야 합니다.
+빌드 도구는 `.venv-build`에 설치하며 빌드와 실제 실행 검증이 통과하면 `dist\nice-tools.exe`가 만들어집니다.
+배포 폴더에는 이 파일 하나만 있어야 합니다. FreeTDS와 다른 DB 라이브러리를 빌드하거나 포함하지 않습니다.
 PowerShell 실행 정책은 사내 정책을 따릅니다.
-빌드 중 고정된 vcpkg revision과 FreeTDS·libiconv·OpenSSL 소스를 내려받고 체크섬을 검사합니다.
-ASE DLL·필요한 CRT와 라이선스·원본 소스·패치를 EXE에 포함합니다.
-FreeTDS에는 Unicode 경로, 바이너리 파일 열기, 날짜 소수 6자리, 오버플로 검사와
-전송 실패 전파 패치를 적용합니다. `build/ase-native`와 vcpkg 바이너리 캐시는 개발용 중간 산출물입니다.
+
+Windows CI는 VS 2022 C++ 도구로 개발 전용 `isql.exe`·`bcp.exe` 콘솔 fixtures를 먼저 컴파일하고,
+소스 검사와 실제 단일 EXE의 외부 프로세스 호출을 검증합니다. 이 C++ 도구는 앱 빌드에 필요하지 않습니다.
+같은 개발용 검사를 실행하려면 VS 2022 C++ 도구와 Windows SDK를 준비하여 다음을 실행합니다.
+
+```powershell
+.\scripts\build_sap_test_clients.ps1
+$env:NICE_TOOLS_SAP_TEST_CLIENTS = (Resolve-Path build\sap-test-clients).Path
+.\scripts\build_windows.ps1 -SapTestClients $env:NICE_TOOLS_SAP_TEST_CLIENTS
+```
+
+검사 클라이언트는 `build\sap-test-clients`에만 생성하며 배포 EXE나 ZIP에는 넣지 않습니다.
 
 실행기 개발은 다음 명령으로 확인할 수 있습니다.
 
@@ -332,9 +366,11 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 업로드 요청도 검증하며 Windows x64 PE 헤더를 확인합니다.
 서로 다른 인코딩의 동일 텍스트와 10 MiB 이후 CP949 한글 diff를 확인합니다.
 Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개 및 MD5/DES 기본값도 실제 EXE에서 검사합니다.
-ASE는 EXE의 실제 worker에서 모든 네이티브 함수의 로드와 접속 거절 오류·비밀번호 비노출을 검사합니다.
-격리 폴더에 만든 암호화 설정 파일의 위치, 키 오류와 복호화 후 네이티브 접속 시도도 확인하고 파일을 지웁니다.
-Windows 소스 검사에는 입력 파일의 읽기 공유 잠금도 포함됩니다. ASE 전송 성공은 서버가 있어야 검증할 수 있습니다.
+ASE는 설치된 클라이언트가 없는 상태의 안내와 설정 파일 위치·잘못된 복호화 키를 검사합니다.
+Windows CI에서는 개발용 외부 PE 클라이언트로 실제 콘솔 비밀번호 입력, 카탈로그 조회, 성공한 접속의
+암호화 자동 저장과 저장된 프로필 재연결을 확인합니다. 실제 frozen worker의 파일 사전 검사,
+IN/OUT, 통계, 실패·취소 시 기존 파일 보존과 입력 파일의 Windows 읽기 공유 잠금도 검사합니다.
+가짜 클라이언트 검사는 실제 SAP 서버에 데이터를 전송했다는 증거가 아닙니다.
 
 ## 구조와 도구 추가
 
@@ -342,12 +378,13 @@ Windows 소스 검사에는 입력 파일의 읽기 공유 잠금도 포함됩�
 - `nice_tools/text_encoding.py`: 전체 파일을 엄격히 해석하는 인코딩 자동 감지
 - `nice_tools/diff.py`: 선택한 파일의 unified diff, 줄 번호와 주변 문맥
 - `nice_tools/jasypt.py`: Java Jasypt 호환 문자열 암호화·복호화
-- `nice_tools/ase_native.py`: FreeTDS DB-Library 연결·카탈로그·문자형 BCP
+- `nice_tools/ase_cli.py`: 설치된 SAP isql 카탈로그·문자형 bcp 호출
+- `nice_tools/ase_clients.py`, `ase_process.py`: 클라이언트 탐색·콘솔 프롬프트·프로세스 취소
 - `nice_tools/ase_files.py`: 스트리밍 파일 검사와 미리보기
 - `nice_tools/ase_worker.py`, `ase_picker.py`: 격리 프로세스와 Windows 파일 선택
 - `nice_tools/ase_api.py`, `ase_jobs.py`: 로컬 API, 메모리 접속·확인·취소 작업
-- `nice_tools/ase_profiles.py`: EXE 옆의 암호화된 ASE 연결 설정 읽기
-- `scripts/build_ase_native.ps1`: 네이티브 라이브러리 빌드·체크섬·배포 자료
+- `nice_tools/ase_profiles.py`: EXE 옆의 암호화된 연결 설정 읽기·자동 저장
+- `scripts/build_sap_test_clients.ps1`: 배포하지 않는 Windows 콘솔 검사용 클라이언트 빌드
 - `nice_tools/uploads.py`: 업로드·경로·옵션 검증
 - `nice_tools/limits.py`: 비교할 파일 개수 정책
 - `nice_tools/main.py`: 정적 화면, 상태 확인, 비교·diff API

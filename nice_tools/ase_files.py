@@ -1,4 +1,4 @@
-"""Streaming validation of FreeTDS character-mode BCP files.
+"""Streaming validation of SAP character-mode BCP files.
 
 Character BCP has no CSV quoting: each column has its own terminator. The
 first columns use the field terminator and only the last uses the row
@@ -319,8 +319,6 @@ class _Field:
                     self.fail("문자 값의 바이트 길이가 열의 길이를 초과합니다.")
             if self.kind in _NUMBER_TYPES:
                 _validate_number(self.numeric, self.kind, self.column, self.fail)
-        if self.kind in _TEXT_TYPES and self.last_char == " ":
-            self.warnings.add("FreeTDS는 문자 값의 끝 공백을 제거할 수 있습니다. 원본 공백을 확인하세요.")
         return self.preview + (_TRUNCATED if self.char_count > _PREVIEW_CHARS else "")
 
 

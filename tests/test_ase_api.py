@@ -167,7 +167,9 @@ class ConnectRequest:
 
 
 def connect_request(tmp_path, monkeypatch, profile, disconnected=False):
-    data = {"host": "localhost", "port": 5000, "user": "test", "password": "test-db-secret"}
+    data = {"host": "localhost", "port": 5000, "user": "test", "password": "test-db-secret", "master_password": "test-master-secret"}
+    from nice_tools import ase_profiles
+    monkeypatch.setattr(ase_profiles, "configuration_path", lambda: tmp_path / "ase-connections.txt")
     if profile:
         from nice_tools import ase_profiles, jasypt
 
@@ -332,4 +334,98 @@ def test_late_failed_connect_is_consumed_after_cancellation(tmp_path, monkeypatc
         await asyncio.sleep(0)
         assert not loop_errors
 
+    asyncio.run(scenario())
+
+
+def test_manual_connect_saves_only_successful_credentials_and_preselects_next_launch(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    calls = []
+    def connect(connection):
+        calls.append(connection)
+        assert not path.exists()
+        return {'session': 'test-session', 'databases': []}
+    monkeypatch.setattr(ase_api.manager, 'connect', connect)
+    data = {'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'test-db-secret', 'master_password': 'test-master-secret'}
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/connect', json=data, headers={'X-Nice-Tools': 'ase'})
+        assert response.status_code == 200
+        result = response.json()
+        assert result['saved'] is True
+        public = client.get('/api/ase/profiles').json()
+        assert public['last_profile_id'] == result['profile_id']
+        assert ase_profiles.decrypt_connection(result['profile_id'], data['master_password'])['connection']['password'] == data['password']
+    assert set(calls[0]) == {'host', 'port', 'user', 'password'}
+    assert data['password'] not in path.read_text() and data['master_password'] not in path.read_text()
+    assert data['password'] not in response.text and data['master_password'] not in response.text
+
+
+def test_manual_failed_login_does_not_write_connection_file(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    def fail(connection):
+        raise ValueError('접속 실패')
+    monkeypatch.setattr(ase_api.manager, 'connect', fail)
+    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'master_password': 'master-secret'})
+    response = asyncio.run(ase_api.operation(request, 'connect'))
+    assert response.status_code == 400
+    assert not path.exists()
+
+
+def test_manual_missing_master_key_prevents_connect_and_secret_write(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: tmp_path / 'ase-connections.txt')
+    calls = []
+    monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: calls.append(connection) or {'session': 'test'})
+    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret'})
+    response = asyncio.run(ase_api.operation(request, 'connect'))
+    assert response.status_code == 400
+    assert not calls
+    assert 'db-secret' not in response.body.decode()
+
+
+def test_successful_login_with_bad_config_keeps_session_and_warns_without_overwrite(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    original = b'[bad]\npassword=hidden-secret\n'
+    path.write_bytes(original)
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: {'session': 'connected-session', 'databases': []})
+    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'master_password': 'master-secret'})
+    response = asyncio.run(ase_api.operation(request, 'connect'))
+    assert response.status_code == 200
+    result = json.loads(response.body)
+    assert result['session'] == 'connected-session' and result['saved'] is False
+    assert result['save_warning']
+    assert path.read_bytes() == original
+    assert 'hidden-secret' not in response.body.decode()
+
+
+def test_cancelled_connect_during_save_cleans_live_session(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    request = connect_request(tmp_path, monkeypatch, False)
+    saving, release, cleaned = threading.Event(), threading.Event(), threading.Event()
+    sessions = {}
+    monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: sessions.setdefault('live', connection) and {'session': 'live', 'databases': []})
+    def disconnect(session):
+        sessions.pop(session)
+        cleaned.set()
+    def slow_save(prepared):
+        saving.set()
+        assert release.wait(3)
+        raise ValueError('save failed')
+    monkeypatch.setattr(ase_api.manager, 'disconnect', disconnect)
+    monkeypatch.setattr(ase_profiles, 'save_connection', slow_save)
+    async def scenario():
+        task = asyncio.create_task(ase_api.operation(request, 'connect'))
+        try:
+            assert await asyncio.to_thread(saving.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert cleaned.is_set() and not sessions
+        finally:
+            release.set()
     asyncio.run(scenario())

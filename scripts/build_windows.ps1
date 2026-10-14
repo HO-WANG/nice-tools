@@ -1,4 +1,4 @@
-param([string]$Python = "python")
+param([string]$Python = "python", [string]$SapTestClients = "")
 $ErrorActionPreference = "Stop"
 
 if ([System.Environment]::OSVersion.Platform -ne [System.PlatformID]::Win32NT) {
@@ -20,8 +20,6 @@ try {
     & $BuildPython -m pip check
     if ($LASTEXITCODE -ne 0) { throw "Build dependencies are inconsistent." }
 
-    & (Join-Path $PSScriptRoot "build_ase_native.ps1") -Python $BuildPython
-
     & $BuildPython -m PyInstaller --noconfirm --clean packaging/nice-tools.spec
     if ($LASTEXITCODE -ne 0) { throw "Executable build failed." }
 
@@ -29,7 +27,9 @@ try {
     if ($Files.Count -ne 1 -or $Files[0].Name -ne "nice-tools.exe" -or $Files[0].PSIsContainer) {
         throw "Distribution must contain exactly one file: nice-tools.exe."
     }
-    & $BuildPython scripts/verify_bundle.py dist/nice-tools.exe
+    $VerificationArgs = @("scripts/verify_bundle.py", "dist/nice-tools.exe")
+    if ($SapTestClients) { $VerificationArgs += @("--sap-test-clients", $SapTestClients) }
+    & $BuildPython @VerificationArgs
     if ($LASTEXITCODE -ne 0) { throw "Executable verification failed." }
     Write-Host "Verified distribution: dist/nice-tools.exe"
 } finally {

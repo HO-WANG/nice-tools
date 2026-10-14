@@ -18,6 +18,7 @@ SESSION = "session-1"
 PASSWORD = "browser-only-password-7!"
 MASTER_PASSWORD = "browser-only-master-key-9!"
 PROFILE_PATH = r"C:\nice-tools\ase-connections.txt"
+CLIENT_PATHS = {"isql_path": r"C:\SAP\OCS-16_0\bin\isql.exe", "bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
 PROFILES = [
     {"id": "main", "name": "운영 ASE", "host": "ase.saved.internal", "port": 5001, "user": "saved_user", "database": "db1"},
     {"id": "hostile", "name": '<img src=x onerror="window.__aseXss=true">', "host": "ase.backup.internal", "port": 5002, "user": "backup_user", "database": "missing_db"},
@@ -72,15 +73,21 @@ class ASEMock:
     job_directions: dict = field(default_factory=dict)
     completed_rows: int = 1_234_567
     completed_statistics: dict | None = field(default_factory=lambda: {"elapsed_seconds": 1.25, "rows_per_second": 987_653.6, "bytes_written": 5_242_880})
+    completed_bcp_statistics: dict | None = None
     terminal_state: str = "succeeded"
     owners_override: list | None = None
-    timings: dict | None = field(default_factory=lambda: {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75})
+    timings: dict | None = field(default_factory=lambda: {"client_seconds": 0.6, "total_seconds": 0.75})
+    last_profile_id: str = ""
+    auto_save: bool = False
+    fail_save: bool = False
+    fail_connect: bool = False
+    replace_profile_after_save: bool | str = False
 
     def timed(self, payload):
         return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
 
     def profile_response(self):
-        return {"path": PROFILE_PATH, "exists": self.profiles_exist, "profiles": self.profiles, "jasypt": JASYPT}
+        return {"path": PROFILE_PATH, "exists": self.profiles_exist, "profiles": self.profiles, "jasypt": JASYPT, "clients": CLIENT_PATHS, "last_profile_id": self.last_profile_id}
 
     def respond(self, route, payload, status=200):
         route.fulfill(status=status, json=payload, headers={"Cache-Control": "no-store"})
@@ -90,6 +97,8 @@ class ASEMock:
         result = {"rows": self.completed_rows, "path": FILE_PATH, "direction": direction} if state == "succeeded" else {}
         if state == "succeeded" and direction == "out" and self.completed_statistics is not None:
             result["statistics"] = self.completed_statistics
+        if state == "succeeded" and direction == "out" and self.completed_bcp_statistics is not None:
+            result.update(self.completed_bcp_statistics)
         return {
             "job": job, "state": state, "phase": "export", "message": f"mock job {state}",
             "rows": self.completed_rows if state == "succeeded" else 2,
@@ -112,7 +121,7 @@ class ASEMock:
             assert headers.get("x-nice-tools") == "ase", "ASE request is missing its browser-origin guard"
             if endpoint == "status":
                 assert request.method == "GET"
-                return self.respond(route, {"available": self.runtime_available, "version": "16.0", "detail": "ready" if self.runtime_available else "native unavailable", "platform": "win32"})
+                return self.respond(route, {"available": self.runtime_available, "backend": "SAP CLI", "detail": "ready" if self.runtime_available else "SAP isql.exe / bcp.exe를 찾을 수 없습니다.", "platform": "win32", **(CLIENT_PATHS if self.runtime_available else {})})
             if endpoint == "profiles":
                 assert request.method == "GET"
                 if self.delay_profiles:
@@ -127,17 +136,35 @@ class ASEMock:
             assert headers.get("content-type", "").startswith("application/json"), "ASE uses JSON, not uploads"
             assert isinstance(payload, dict)
             if endpoint == "connect":
+                if self.fail_connect:
+                    self.fail_connect = False
+                    return self.respond(route, {"detail": "서버에 연결하지 못했습니다."}, status=400)
                 response = self.timed({"session": SESSION, "databases": [{"id": 1, "name": "db1"}, {"id": 2, "name": "db2"}]})
                 if "profile_id" in payload:
                     assert set(payload) == {"profile_id", "master_password"}
                     assert payload["master_password"] == MASTER_PASSWORD
                     profile = next(profile for profile in self.profiles if profile["id"] == payload["profile_id"])
-                    response.update({"profile_name": profile["name"], "database": profile.get("database")})
+                    self.last_profile_id = profile["id"]
+                    response.update({"profile_id": profile["id"], "profile_name": profile["name"], "database": profile.get("database")})
                 else:
                     assert payload in [
-                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD},
-                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": ""},
+                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD, "master_password": MASTER_PASSWORD},
+                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": "", "master_password": MASTER_PASSWORD},
                     ]
+                    if self.fail_save:
+                        response.update({"saved": False, "save_warning": HOSTILE_ERROR})
+                    elif self.auto_save:
+                        saved = {"id": "saved-new", "name": "tester@ase.example.internal:5000", "host": payload["host"], "port": payload["port"], "user": payload["user"]}
+                        self.profiles = [profile for profile in self.profiles if profile["id"] != saved["id"]] + [saved]
+                        self.profiles_exist = True
+                        self.last_profile_id = saved["id"]
+                        response.update({"saved": True, "profile_id": saved["id"], "profile_name": saved["name"]})
+                        if self.replace_profile_after_save:
+                            # An external file edit invalidates whole-file profile IDs before GET.
+                            self.profiles = list(PROFILES)
+                            self.last_profile_id = "main"
+                            if self.replace_profile_after_save == "rotated":
+                                self.profiles.append({**saved, "id": "rotated-profile"})
                 if self.delay_connect:
                     self.delay_connect = False
                     response["session"] = f"late-session-{len(self.endpoint_calls('connect'))}"
@@ -293,6 +320,9 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#jasypt-tool")).to_be_hidden()
     expect(page.locator("#current-tool")).to_have_text(tool_title)
     expect(page.locator("#ase-password")).to_have_attribute("type", "password")
+    expect(page.locator("#ase-master-password")).to_have_attribute("type", "password")
+    expect(page.locator("#ase-client-paths")).to_contain_text(CLIENT_PATHS["isql_path"])
+    expect(page.locator("#ase-client-paths")).to_contain_text(CLIENT_PATHS["bcp_path"])
     assert len(mock.endpoint_calls("profiles")) == 1, "ASE must load saved profiles during initialization"
     expect(page.locator("#ase-profile")).to_have_value("")
     expect(page.locator("#ase-profile-help")).to_contain_text("EXE와 같은 폴더")
@@ -301,12 +331,15 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-password")).to_have_value("")
     expect(page.locator("#ase-catalog-timings")).to_be_visible()
     expect(page.locator("#ase-catalog-timings")).to_contain_text("서버 연결 · 총 0.75초")
-    expect(page.locator("#ase-catalog-timings")).to_contain_text("서버 로그인 0.25초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("CLI 실행 0.60초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("앱 준비 0.15초")
+    assert "로그인" not in page.locator("#ase-catalog-timings").inner_text()
     page.locator("#ase-database").select_option("db1")
     expect(page.locator("#ase-owner")).to_be_enabled()
     assert not mock.endpoint_calls("owners"), "DB selection must remain local until Search"
@@ -365,19 +398,19 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-object-body button")).to_have_count(4)
 
     # Missing and invalid timing payloads must not retain prior measurements.
-    for timings in (None, {"total_seconds": -1}, {"total_seconds": HOSTILE_SAMPLE}, {"total_seconds": 0.5, "login_seconds": "0.1"}, {"total_seconds": 1, "native_load_seconds": 1.7e308, "setup_seconds": 1.7e308}):
+    for timings in (None, {"total_seconds": -1}, {"total_seconds": HOSTILE_SAMPLE}, {"total_seconds": 0.5, "client_seconds": "0.1"}, {"total_seconds": 1, "client_seconds": -0.1}):
         mock.timings = timings
         select_table(page)
         expect(page.locator("#ase-catalog-timings")).to_be_hidden()
-    mock.timings = {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75}
+    mock.timings = {"client_seconds": 0.6, "total_seconds": 0.75}
     select_table(page)
     expect(page.locator("#ase-catalog-timings")).to_contain_text("컬럼 조회")
-    expect(page.locator("#ase-catalog-timings")).to_contain_text("조회 0.20초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("CLI 실행 0.60초")
     assert page.locator("#ase-catalog-timings svg").count() == 0
-    mock.timings = {"native_load_seconds": 0.02, "login_seconds": 0.05, "setup_seconds": 0.03, "query_seconds": 0.05, "total_seconds": 5.0}
+    mock.timings = {"client_seconds": 0.15, "total_seconds": 5.0}
     select_table(page)
-    expect(page.locator("#ase-catalog-timings")).to_contain_text("실행 준비 4.85초")
-    mock.timings = {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75}
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("앱 준비 4.85초")
+    mock.timings = {"client_seconds": 0.6, "total_seconds": 0.75}
 
     # User tables import/export, views export, and procedures remain browse-only.
     select_table(page)
@@ -484,6 +517,20 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-stat-bytes")).to_have_text("5 MiB")
     expect(page.locator("#ase-stat-bytes-exact")).to_have_text("5,242,880 바이트")
     expect(page.locator("#ase-out-statistics-note")).to_contain_text("작업 시작부터 파일 저장 완료까지")
+    expect(page.locator("#ase-bcp-statistics")).to_be_hidden()
+
+    # CLI duration and throughput are separate from total app overhead.
+    mock.completed_rows = 12
+    mock.completed_statistics = {"elapsed_seconds": 5, "rows_per_second": 2.4, "bytes_written": 100}
+    mock.completed_bcp_statistics = {"bcp_seconds": 2, "bcp_rows_per_second": 6}
+    pick_and_preview(page, mock)
+    page.locator("#ase-start").click()
+    expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
+    expect(page.locator("#ase-stat-elapsed")).to_have_text("5.00초")
+    expect(page.locator("#ase-stat-rate")).to_have_text("2.4행/초")
+    expect(page.locator("#ase-bcp-statistics")).to_contain_text("bcp.exe 실행 시간 2.00초")
+    expect(page.locator("#ase-bcp-statistics")).to_contain_text("bcp.exe 실행 속도 6행/초")
+    expect(page.locator("#ase-bcp-statistics")).to_contain_text("로그인 포함")
     for width in (390, 768, 1440):
         page.set_viewport_size({"width": width, "height": 844})
         assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"ASE statistics overflow at {width}px"
@@ -494,11 +541,21 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
         page.screenshot(path=mobile_screenshot, full_page=True)
     page.set_viewport_size({"width": 1440, "height": 1000})
 
+    for cli_statistics in ({"bcp_seconds": -1, "bcp_rows_per_second": 6}, {"bcp_seconds": 2, "bcp_rows_per_second": HOSTILE_SAMPLE}):
+        mock.completed_bcp_statistics = cli_statistics
+        pick_and_preview(page, mock)
+        page.locator("#ase-start").click()
+        expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
+        expect(page.locator("#ase-out-statistics")).to_be_visible()
+        expect(page.locator("#ase-bcp-statistics")).to_be_hidden()
+        assert not page.locator("#ase-bcp-statistics svg, #ase-bcp-statistics script").count()
+
     # A zero-row export is a valid success and does not reuse prior totals.
     page.locator("#ase-field-terminator").fill(";")
     expect(page.locator("#ase-out-statistics")).to_be_hidden()
     assert page.locator("#ase-stat-rows").text_content() == ""
     mock.completed_rows = 0
+    mock.completed_bcp_statistics = None
     mock.completed_statistics = {"elapsed_seconds": 0.5, "rows_per_second": 0, "bytes_written": 0}
     pick_and_preview(page, mock)
     page.locator("#ase-start").click()
@@ -509,6 +566,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-stat-elapsed")).to_have_text("0.50초")
     expect(page.locator("#ase-stat-rate")).to_have_text("0행/초")
     expect(page.locator("#ase-stat-bytes")).to_have_text("0 B")
+    expect(page.locator("#ase-bcp-statistics")).to_be_hidden()
 
     # An unmeasurably short duration must never display infinity or invented speed.
     mock.completed_statistics = {"elapsed_seconds": 0, "rows_per_second": None, "bytes_written": 0}
@@ -717,6 +775,7 @@ def validate_profiles(page, url):
     page.locator("#ase-password").fill(PASSWORD)
     page.locator("#ase-host").fill("ase.example.internal")
     expect(page.locator("#ase-password")).to_have_value("")
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     assert mock.endpoint_calls("connect")[-1]["payload"]["password"] == ""
@@ -734,7 +793,8 @@ def validate_profiles(page, url):
     expect(page.locator("#ase-connect")).to_be_enabled()
     assert page.locator("#ase-profile-help script, #ase-profile option img").count() == 0
     page.locator("#ase-profile-reload").click()
-    expect(page.locator("#ase-profile")).to_have_value("main")
+    expect(page.locator("#ase-profile")).to_have_value("hostile")
+    page.locator("#ase-profile").select_option("main")
 
     # Switching profiles while a reload is held must invalidate that response and key.
     mock.delay_profiles = True
@@ -842,7 +902,7 @@ def validate_profiles(page, url):
     page.reload(wait_until="networkidle")
     expect(page.locator("#ase-profile")).to_have_value("main")
     expect(page.locator("#ase-connect")).to_be_disabled()
-    expect(page.locator("#ase-runtime")).to_contain_text("native unavailable")
+    expect(page.locator("#ase-runtime")).to_contain_text("SAP isql.exe / bcp.exe를 찾을 수 없습니다.")
 
     # A delayed initial file read must not overwrite manual fields or a newly typed key.
     mock.runtime_available = True
@@ -862,6 +922,119 @@ def validate_profiles(page, url):
     assert not errors, errors
 
 
+def validate_saved_connections(page, url):
+    """Saving a successful manual login must preserve its session and next-launch choice."""
+    mock = ASEMock(profiles=list(PROFILES), profiles_exist=True, last_profile_id="hostile", auto_save=True)
+    errors, console = [], []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.on("console", lambda message: console.append(message.text))
+    page.add_init_script("""
+        window.__aseStorageWrites = [];
+        const originalSetItem = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          window.__aseStorageWrites.push({key, value});
+          return originalSetItem.call(this, key, value);
+        };
+    """)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-profile")).to_have_value("hostile")
+    expect(page.locator("#ase-master-key-field")).to_be_hidden()
+    page.locator("#ase-profile").select_option("")
+    expect(page.locator("#ase-master-key-field")).to_be_visible()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    assert not mock.endpoint_calls("connect"), "Manual connections must receive an encryption key before login"
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-profile")).to_have_value("saved-new")
+    expect(page.locator("#ase-database")).to_be_enabled()
+    expect(page.locator("#ase-password")).to_have_value("")
+    expect(page.locator("#ase-master-password")).to_have_value("")
+    expect(page.locator("#ase-feedback")).to_contain_text("저장")
+    assert not mock.endpoint_calls("disconnect"), "Refreshing saved profiles must preserve the newly opened session"
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    select_table(page)
+    assert not mock.violations, mock.violations
+    assert len(mock.endpoint_calls("connect")) == 1
+    assert len(mock.endpoint_calls("profiles")) == 2
+
+    page.locator("#ase-disconnect").click()
+    expect(page.locator("#ase-connect")).to_be_enabled()
+    page.reload(wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-profile")).to_have_value("saved-new")
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    page.locator("#ase-password").fill(MASTER_PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new", "master_password": MASTER_PASSWORD}
+    page.locator("#ase-disconnect").click()
+
+    # A file write error keeps the successful login usable and shows only safe text.
+    page.locator("#ase-profile").select_option("")
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
+    mock.fail_save = True
+    profiles_before = len(mock.endpoint_calls("profiles"))
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    expect(page.locator("#ase-feedback")).to_contain_text(HOSTILE_ERROR)
+    assert not page.locator("#ase-feedback script").count()
+    expect(page.locator("#ase-password")).to_have_value("")
+    expect(page.locator("#ase-master-password")).to_have_value("")
+    assert len(mock.endpoint_calls("profiles")) == profiles_before
+    page.locator("#ase-disconnect").click()
+
+    mock.fail_connect = True
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-feedback")).to_contain_text("서버에 연결하지 못했습니다.")
+    expect(page.locator("#ase-database")).to_be_disabled()
+    expect(page.locator("#ase-password")).to_have_value("")
+    expect(page.locator("#ase-master-password")).to_have_value("")
+    assert len(mock.endpoint_calls("profiles")) == profiles_before, "Failed login must not refresh or save a profile"
+    assert mock.last_profile_id == "saved-new"
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert page.evaluate("window.__aseStorageWrites") == []
+    assert all(PASSWORD not in message and MASTER_PASSWORD not in message for message in console)
+    assert not mock.violations, mock.violations
+    assert not errors, errors
+
+
+def validate_saved_profile_race(page, url, retain_profile=False):
+    """A changed file must not make a live connection appear to target another server."""
+    mock = ASEMock(auto_save=True, replace_profile_after_save="rotated" if retain_profile else True)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    expect(page.locator("#ase-profile")).to_have_value("rotated-profile" if retain_profile else "")
+    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
+    expect(page.locator("#ase-port")).to_have_value("5000")
+    expect(page.locator("#ase-user")).to_have_value("tester")
+    assert not mock.endpoint_calls("disconnect")
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    select_table(page)
+    assert not mock.violations, mock.violations
+
+
 def validate_removed_owner(page, url):
     """A full owner refresh must invalidate a now-missing selected owner's review."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
@@ -872,6 +1045,7 @@ def validate_removed_owner(page, url):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     page.locator("#ase-database").select_option("db1")
@@ -899,11 +1073,14 @@ def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=args.chromium, headless=True)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
-        validate(context.new_page(), ASEMock(), args.url, args.screenshot, args.mobile_screenshot)
+        validate(context.new_page(), ASEMock(auto_save=True), args.url, args.screenshot, args.mobile_screenshot)
         validate_profiles(context.new_page(), args.url)
+        validate_saved_connections(context.new_page(), args.url)
+        validate_saved_profile_race(context.new_page(), args.url)
+        validate_saved_profile_race(context.new_page(), args.url, retain_profile=True)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale search responses, catalog/residual timings, manual/profile/master-key contract, removed owner invalidation, job locks, OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP client paths and CLI/app timings, saved manual connections and last-profile selection, master-key lifetime, removed owner invalidation, job locks, total/CLI OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

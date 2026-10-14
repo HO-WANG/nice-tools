@@ -80,7 +80,7 @@ def test_empty_decrypted_database_password_is_valid(tmp_path):
 def test_missing_file_allows_manual_fallback_but_cannot_decrypt(tmp_path):
     path = tmp_path / "ase-connections.txt"
     assert loader().public_profiles(path) == {"path": str(path.resolve()), "exists": False,
-                                               "profiles": [], "jasypt": DEFAULTS}
+                                               "profiles": [], "jasypt": DEFAULTS, "clients": {}, "last_profile_id": None}
     with pytest.raises(ValueError):
         loader().decrypt_connection("old-id", MASTER, path)
 
@@ -246,3 +246,174 @@ def test_config_has_structural_bounds_and_invalid_utf8_is_sanitized(tmp_path):
     path.write_text("".join(f"[profile-{index}]\n{block}" for index in range(101)), encoding="utf-8")
     with pytest.raises(ValueError):
         loader().public_profiles(path)
+
+
+def test_global_client_settings_and_last_selection_do_not_become_profiles(tmp_path):
+    path = write_profile(tmp_path)
+    isql, bcp = str(tmp_path / 'isql.exe'), str(tmp_path / 'bcp.exe')
+    path.write_text(f'# retain comment\n[sap_client]\nisql_path={isql}\nbcp_path={bcp}\n\n[preferences]\nlast_profile=local\n\n' + path.read_text(), encoding='utf-8')
+    result = loader().public_profiles(path)
+    assert len(result['profiles']) == 1
+    assert result['clients'] == {'isql_path': isql, 'bcp_path': bcp}
+    assert result['last_profile_id'] == result['profiles'][0]['id']
+
+
+def test_successful_manual_connection_save_encrypts_and_remembers_choice(tmp_path):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    data = {'host': 'server', 'port': 5000, 'user': 'test', 'password': PLAINTEXT}
+    prepared = module.prepare_connection(data, MASTER, path)
+    assert not path.exists(), 'preparation must not save a failed/unattempted connection'
+    result = module.save_connection(prepared, path)
+    raw = path.read_text(encoding='utf-8')
+    assert result['saved'] is True
+    assert MASTER not in raw and PLAINTEXT not in raw and 'ENC(' in raw
+    public = module.public_profiles(path)
+    assert public['last_profile_id'] == result['profile_id']
+    assert module.decrypt_connection(result['profile_id'], MASTER, path)['connection'] == data
+
+
+def test_autosave_preserves_comments_other_profiles_client_paths_and_crypto(tmp_path):
+    settings = {'algorithm': jasypt.AES_ALGORITHM, 'iterations': 32, 'iv_generator': 'random'}
+    path = write_profile(tmp_path, settings=settings)
+    before = f'# permanent user comment\n[sap_client]\nisql_path={tmp_path / "isql.exe"}\nbcp_path={tmp_path / "bcp.exe"}\n\n' + path.read_text()
+    path.write_text(before, encoding='utf-8')
+    module = loader()
+    data = {'host': 'other-server', 'port': 5010, 'user': 'other', 'password': 'new-secret'}
+    saved = module.save_connection(module.prepare_connection(data, MASTER, path), path)
+    after = path.read_text()
+    assert after.startswith(before)
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 2
+    assert public['jasypt']['algorithm'] == jasypt.AES_ALGORITHM
+    assert module.decrypt_connection(saved['profile_id'], MASTER, path)['connection'] == data
+    assert module.decrypt_connection(public['profiles'][0]['id'], MASTER, path)['connection']['password'] == PLAINTEXT
+
+
+def test_autosave_reuses_identity_and_updates_password_without_duplicate(tmp_path):
+    module = loader()
+    path = write_profile(tmp_path)
+    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'new-password'}
+    saved = module.save_connection(module.prepare_connection(data, MASTER, path), path)
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 1
+    assert saved['profile_name'] == 'local'
+    assert module.decrypt_connection(saved['profile_id'], MASTER, path)['connection']['password'] == 'new-password'
+
+
+def test_malformed_existing_file_is_never_overwritten_on_save(tmp_path):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    original = b'[bad]\npassword=plaintext-existing-secret\n'
+    path.write_bytes(original)
+    prepared = module.prepare_connection({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    with pytest.raises(ValueError):
+        module.save_connection(prepared, path)
+    assert path.read_bytes() == original
+
+
+def test_crypto_changed_during_connect_is_not_overwritten(tmp_path):
+    module = loader()
+    path = write_profile(tmp_path)
+    prepared = module.prepare_connection({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    changed = '[jasypt]\niterations=31\n' + path.read_text()
+    path.write_text(changed)
+    with pytest.raises(ValueError):
+        module.save_connection(prepared, path)
+    assert path.read_text() == changed
+
+
+def test_saved_profile_success_remembers_and_returns_fresh_id(tmp_path):
+    module = loader()
+    path = write_profile(tmp_path)
+    old = selected(path)
+    saved = module.remember_connection(old, path)
+    assert saved['saved'] is True
+    assert saved['profile_id'] != old
+    public = module.public_profiles(path)
+    assert public['last_profile_id'] == saved['profile_id']
+    assert public['profiles'][0]['name'] == 'local'
+    assert module.decrypt_connection(saved['profile_id'], MASTER, path)['connection']['password'] == PLAINTEXT
+
+
+@pytest.mark.parametrize('contents', [
+    '[sap_client]\nisql_path=relative/isql.exe\n',
+    '[sap_client]\npassword=hidden-secret\n',
+    '[preferences]\nmaster_password=hidden-secret\n',
+    '[sap_client]\nisql_path=/opt/sap/bin/other.exe\n',
+])
+def test_bad_global_fields_cannot_execute_other_tools_or_store_secrets(tmp_path, contents):
+    path = tmp_path / 'ase-connections.txt'
+    path.write_text(contents)
+    with pytest.raises(ValueError) as exc:
+        loader().public_profiles(path)
+    assert 'hidden-secret' not in str(exc.value)
+
+
+@pytest.mark.parametrize('user', ['safe\npassword = injected-secret', 'safe\rusername'])
+def test_prepare_rejects_line_breaks_before_connect_or_writing_ini(tmp_path, user):
+    path = tmp_path / 'ase-connections.txt'
+    with pytest.raises(ValueError) as exc:
+        loader().prepare_connection({'host': 'localhost', 'port': 5000, 'user': user, 'password': 'db-secret'}, MASTER, path)
+    assert 'injected-secret' not in str(exc.value)
+    assert not path.exists()
+
+
+def test_atomic_save_replace_error_preserves_original_and_removes_temporary_files(tmp_path, monkeypatch):
+    module = loader()
+    path = write_profile(tmp_path)
+    before = path.read_bytes()
+    prepared = module.prepare_connection({'host': 'new-server', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    def fail_replace(source, target):
+        assert 'new-secret' not in Path(source).read_text()
+        raise OSError('private-error-secret')
+    monkeypatch.setattr(module.os, 'replace', fail_replace)
+    with pytest.raises(ValueError) as exc:
+        module.save_connection(prepared, path)
+    assert 'private-error-secret' not in str(exc.value)
+    assert path.read_bytes() == before
+    assert not list(tmp_path.glob('.ase-connections-*.tmp'))
+
+
+def test_atomic_save_refuses_external_edit_before_replace(tmp_path, monkeypatch):
+    module = loader()
+    path = write_profile(tmp_path)
+    prepared = module.prepare_connection({'host': 'new-server', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    before = path.read_bytes()
+    fsync = module.os.fsync
+    def edit_during_write(descriptor):
+        fsync(descriptor)
+        path.write_bytes(before + b'\n# external editor change\n')
+    monkeypatch.setattr(module.os, 'fsync', edit_during_write)
+    with pytest.raises(ValueError):
+        module.save_connection(prepared, path)
+    assert path.read_bytes() == before + b'\n# external editor change\n'
+    assert not list(tmp_path.glob('.ase-connections-*.tmp'))
+
+
+def test_merge_external_profile_added_while_login_is_running(tmp_path):
+    module = loader()
+    path = write_profile(tmp_path)
+    prepared = module.prepare_connection({'host': 'new-server', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    with path.open('a', encoding='utf-8') as stream:
+        stream.write('\n# added by editor\n[another]\nhost=third-server\nport=5000\nuser=test\npassword=' + encrypted('third-secret') + '\n')
+    result = module.save_connection(prepared, path)
+    profiles = module.public_profiles(path)['profiles']
+    assert len(profiles) == 3
+    third = next(item for item in profiles if item['name'] == 'another')
+    assert module.decrypt_connection(third['id'], MASTER, path)['connection']['password'] == 'third-secret'
+    assert module.decrypt_connection(result['profile_id'], MASTER, path)['connection']['password'] == 'new-secret'
+
+
+def test_removed_profile_after_atomic_write_returns_safe_save_error(tmp_path, monkeypatch):
+    module = loader()
+    path = write_profile(tmp_path)
+    prepared = module.prepare_connection({'host': 'new-server', 'port': 5000, 'user': 'test', 'password': 'new-secret'}, MASTER, path)
+    replace = module.os.replace
+    def replace_and_external_delete(source, target):
+        replace(source, target)
+        Path(target).write_text('# all profiles externally removed\n')
+    monkeypatch.setattr(module.os, 'replace', replace_and_external_delete)
+    with pytest.raises(ValueError) as exc:
+        module.save_connection(prepared, path)
+    assert 'new-secret' not in str(exc.value)

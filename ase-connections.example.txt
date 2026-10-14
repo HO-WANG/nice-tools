@@ -1,7 +1,13 @@
 # Copy this file beside nice-tools.exe as ase-connections.txt (UTF-8).
-# Replace each ENC(...) placeholder with the Jasypt tool's encrypted result.
+# New successful connections are saved automatically with encrypted passwords.
+# Manual examples below require actual Jasypt ciphertext instead of placeholders.
 # Enter the Jasypt master key in the UI; never write it or plaintext passwords here.
 # Comments must occupy their own lines. Settings apply to all server sections.
+# Optional explicit SAP paths; omit this section to use PATH/SYBASE/SYBASE_OCS.
+
+[sap_client]
+isql_path = C:\SAP\OCS-16_0\bin\isql.exe
+bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
 
 [jasypt]
 algorithm = PBEWithMD5AndDES
@@ -23,3 +29,7 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 # database is optional.
+
+[preferences]
+# Updated automatically after a successful connection.
+last_profile = Development ASE

@@ -37,7 +37,7 @@ async def _connect_for_request(request, connection):
             raise ValueError("접속 요청이 종료되었습니다. 다시 접속하세요.")
         return result
     except asyncio.CancelledError:
-        # Native work continues in its thread. Own its eventual session until
+        # CLI work continues in its thread. Own its eventual session until
         # completion, including cancellation during the disconnect check.
         task.add_done_callback(_discard_connected_session)
         raise
@@ -68,7 +68,7 @@ async def status(request: Request):
     except PermissionError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=403, headers=HEADERS)
     except (ValueError, OSError):
-        return JSONResponse({"available": False, "detail": "ASE 드라이버 상태를 확인하지 못했습니다."}, headers=HEADERS)
+        return JSONResponse({"available": False, "detail": "SAP 클라이언트 상태를 확인하지 못했습니다."}, headers=HEADERS)
 
 
 @router.get("/profiles")
@@ -98,18 +98,40 @@ async def operation(request: Request, operation: str):
             raise ValueError("입력 형식이 올바르지 않습니다.")
         session = data.get("session")
         if operation == "connect":
+            from .ase_profiles import (decrypt_connection, prepare_connection, remember_connection,
+                                       save_connection, SAVE_ERROR)
+
             if "profile_id" in data:
                 if set(data) - {"profile_id", "master_password"}:
                     raise ValueError("저장된 서버는 선택한 설정과 Jasypt 키로 연결하세요.")
-                from .ase_profiles import decrypt_connection
-
                 selected = await run_in_threadpool(decrypt_connection, data.get("profile_id"), data.get("master_password"))
                 result = await _connect_for_request(request, selected["connection"])
                 result["profile_name"] = selected["profile_name"]
                 if selected.get("database"):
                     result["database"] = selected["database"]
+                save_function, save_arguments = remember_connection, (data.get("profile_id"),)
             else:
-                result = await _connect_for_request(request, data)
+                if set(data) - {"host", "port", "user", "password", "master_password"}:
+                    raise ValueError("접속 정보와 저장용 Jasypt 키를 입력하세요.")
+                prepared = await run_in_threadpool(prepare_connection, data, data.get("master_password"))
+                result = await _connect_for_request(request, prepared["connection"])
+                save_function, save_arguments = save_connection, (prepared,)
+            try:
+                try:
+                    saved = await run_in_threadpool(save_function, *save_arguments)
+                    result.update(saved)
+                except (ValueError, OSError):
+                    # A read-only/malformed/externally modified configuration
+                    # must not turn a successful DB login into an API failure.
+                    result.update(saved=False, save_warning=SAVE_ERROR)
+                if await request.is_disconnected():
+                    raise ValueError("접속 요청이 종료되었습니다. 다시 접속하세요.")
+            except (asyncio.CancelledError, ValueError):
+                try:
+                    manager.disconnect(result["session"])
+                except Exception:
+                    pass
+                raise
         elif operation in ("owners", "objects"):
             database = data.get("database")
             if not isinstance(database, str) or not database or "\x00" in database or len(database) > 255:

@@ -14,8 +14,6 @@ jobs:
   windows-exe:
     runs-on: windows-2022
     timeout-minutes: 45
-    env:
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/build/vcpkg-cache
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
@@ -26,6 +24,11 @@ jobs:
           cache-dependency-path: "requirements*.txt"
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
+      - name: Build external SAP console test clients
+        shell: pwsh
+        run: |
+          ./scripts/build_sap_test_clients.ps1
+          "NICE_TOOLS_SAP_TEST_CLIENTS=$((Resolve-Path build/sap-test-clients).Path)" >> $env:GITHUB_ENV
       - name: Run source tests
         shell: pwsh
         run: |
@@ -41,17 +44,9 @@ jobs:
       - name: Verify Java Jasypt interoperability
         shell: pwsh
         run: python scripts/check_jasypt_java.py --java "$env:JAVA_HOME_17_X64\bin\java.exe"
-      - name: Create native dependency cache directory
-        shell: pwsh
-        run: New-Item -ItemType Directory -Path $env:VCPKG_DEFAULT_BINARY_CACHE -Force | Out-Null
-      - name: Cache pinned native dependencies
-        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
-        with:
-          path: build/vcpkg-cache
-          key: ase-msvc-x64-e456309491fd875487bf02b8a0dca76c1b1b00cc-v1
       - name: Build and verify the single executable
         shell: pwsh
-        run: ./scripts/build_windows.ps1
+        run: ./scripts/build_windows.ps1 -SapTestClients "$env:NICE_TOOLS_SAP_TEST_CLIENTS"
       - name: Upload the verified executable
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:

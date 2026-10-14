@@ -19,12 +19,12 @@ def worker():
     return ase_worker
 
 
-def native(monkeypatch, operation=None, status=None):
+def client(monkeypatch, operation=None, status=None):
     module = SimpleNamespace(
-        native_status=status or (lambda: {"available": False, "detail": "Unavailable"}),
-        run_operation=operation or (lambda payload, emit: {}),
+        client_status=status or (lambda: {"available": False, "detail": "Unavailable"}),
+        run_operation=(lambda payload, emit=None, register=None: operation(payload, emit)) if operation else (lambda payload, emit=None, register=None: {}),
     )
-    monkeypatch.setitem(sys.modules, "nice_tools.ase_native", module)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", module)
     return module
 
 
@@ -53,12 +53,12 @@ def transfer_payload(path, direction):
 
 
 def test_status_uses_native_status_without_requiring_a_connection(worker, monkeypatch):
-    native(monkeypatch, status=lambda: {"available": False, "version": None, "detail": "Windows required"})
+    client(monkeypatch, status=lambda: {"available": False, "version": None, "detail": "Windows required"})
     assert worker.execute({"operation": "status"}) == {"available": False, "version": None, "detail": "Windows required"}
 
 
 def test_picker_does_not_load_native_library(worker, monkeypatch):
-    monkeypatch.setitem(sys.modules, "nice_tools.ase_native", None)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", None)
     monkeypatch.setitem(sys.modules, "nice_tools.ase_picker", SimpleNamespace(
         pick_file=lambda direction, suggested_name: {"cancelled": False, "path": "C:\\资料\\导出.bcp"},
     ))
@@ -69,7 +69,7 @@ def test_input_preview_uses_fresh_object_metadata(worker, monkeypatch, tmp_path)
     path = tmp_path / "资料.bcp"
     path.write_text("1\n", encoding="utf-8")
     columns = [{"position": 1, "name": "item", "type_name": "int"}]
-    native(monkeypatch, operation=lambda payload, emit: {"object": {"id": 7, "name": "items"}, "columns": columns})
+    client(monkeypatch, operation=lambda payload, emit: {"object": {"id": 7, "name": "items"}, "columns": columns})
     def inspect(actual_path, actual_columns, options, emit):
         assert actual_path == path
         assert actual_columns == columns
@@ -88,7 +88,7 @@ def test_input_preview_uses_fresh_object_metadata(worker, monkeypatch, tmp_path)
 def test_output_preview_reports_existing_target_fingerprint(worker, monkeypatch, tmp_path):
     path = tmp_path / "导出.bcp"
     path.write_bytes(b"existing")
-    native(monkeypatch, operation=lambda payload, emit: {"object": {"id": 7}, "columns": []})
+    client(monkeypatch, operation=lambda payload, emit: {"object": {"id": 7}, "columns": []})
     monkeypatch.setitem(sys.modules, "nice_tools.ase_files", SimpleNamespace(parse_options=lambda options: options))
     payload = transfer_payload(path, "out")
     payload["operation"] = "preview"
@@ -103,7 +103,7 @@ def test_input_transfer_checks_reviewed_hash_streaming(worker, monkeypatch, tmp_
     path.write_bytes(b"1\n")
     payload = transfer_payload(path, "in")
     payload["fingerprint"] = fingerprint(path)
-    native(monkeypatch, operation=lambda request, emit: {"rows": 1, "direction": "in"})
+    client(monkeypatch, operation=lambda request, emit: {"rows": 1, "direction": "in"})
     monkeypatch.setattr(Path, "read_bytes", lambda path: pytest.fail("Input verification must stream the file"))
     assert worker.execute(payload)["rows"] == 1
 
@@ -114,7 +114,7 @@ def test_input_transfer_rejects_changed_file_before_native_work(worker, monkeypa
     payload = transfer_payload(path, "in")
     payload["fingerprint"] = fingerprint(path)
     path.write_bytes(b"2\n")
-    native(monkeypatch, operation=lambda request, emit: pytest.fail("Changed input must not reach native transfer"))
+    client(monkeypatch, operation=lambda request, emit: pytest.fail("Changed input must not reach native transfer"))
     with pytest.raises(ValueError, match="changed"):
         worker.execute(payload)
 
@@ -171,7 +171,7 @@ def test_windows_input_guard_denies_writes_and_delete_until_native_finishes(work
         if native_error:
             raise ValueError("Import failed")
         return {"rows": 1}
-    native(monkeypatch, operation=operation)
+    client(monkeypatch, operation=operation)
     if native_error:
         with pytest.raises(ValueError, match="Import failed"):
             worker.execute(payload)
@@ -191,7 +191,7 @@ def test_windows_input_guard_reports_open_editor_sharing_error(worker, monkeypat
     monkeypatch.setattr(worker.sys, "platform", "win32")
     monkeypatch.setattr(worker, "_load_windows_file_api", lambda: SimpleNamespace(CreateFileW=create, CloseHandle=close), raising=False)
     monkeypatch.setattr(worker, "_last_windows_error", lambda: 32, raising=False)
-    native(monkeypatch, operation=lambda request, emit: pytest.fail("Locked input must not reach ASE"))
+    client(monkeypatch, operation=lambda request, emit: pytest.fail("Locked input must not reach ASE"))
     with pytest.raises(ValueError, match="Close.*editing"):
         worker.execute(payload)
 
@@ -226,7 +226,7 @@ def test_output_transfer_atomically_replaces_unicode_path(worker, monkeypatch, t
         Path(request["path"]).write_bytes(b"complete export")
         assert path.read_bytes() == b"original"
         return {"rows": 3, "direction": "out"}
-    native(monkeypatch, operation=transfer)
+    client(monkeypatch, operation=transfer)
     assert worker.execute(payload) == {"rows": 3, "direction": "out", "path": str(path)}
     assert path.read_bytes() == b"complete export"
     assert not stage.exists()
@@ -242,7 +242,7 @@ def test_deferred_output_preserves_target_until_manager_publishes(worker, monkey
     def transfer(request, emit):
         Path(request["path"]).write_bytes(b"complete export")
         return {"rows": 3, "direction": "out"}
-    native(monkeypatch, operation=transfer)
+    client(monkeypatch, operation=transfer)
     assert worker.execute(payload) == {"rows": 3, "direction": "out", "path": str(path), "stage_path": str(stage)}
     assert path.read_bytes() == b"original"
     assert stage.read_bytes() == b"complete export"
@@ -258,7 +258,7 @@ def test_failed_output_transfer_preserves_original_and_cleans_stage(worker, monk
     def transfer(request, emit):
         Path(request["path"]).write_bytes(b"partial")
         raise ValueError("Export failed")
-    native(monkeypatch, operation=transfer)
+    client(monkeypatch, operation=transfer)
     with pytest.raises(ValueError, match="Export failed"):
         worker.execute(payload)
     assert path.read_bytes() == b"original"
@@ -281,7 +281,7 @@ def test_rejected_stage_never_removes_existing_user_files(worker, monkeypatch, t
         stage.write_bytes(b"user data")
     payload = transfer_payload(path, "out")
     payload.update(stage_path=str(stage), out_target_fingerprint=target_fingerprint(path))
-    native(monkeypatch, operation=lambda request, emit: pytest.fail("Invalid stage must never reach ASE"))
+    client(monkeypatch, operation=lambda request, emit: pytest.fail("Invalid stage must never reach ASE"))
     with pytest.raises(ValueError, match="staging"):
         worker.execute(payload)
     assert path.read_bytes() == b"original"
@@ -298,7 +298,7 @@ def test_hardlinked_output_stage_is_rejected_without_touching_destination(worker
     def operation(request, emit):
         Path(request["path"]).write_bytes(b"partial export")
         raise ValueError("Export failed")
-    native(monkeypatch, operation=operation)
+    client(monkeypatch, operation=operation)
     with pytest.raises(ValueError, match="staging"):
         worker.execute(payload)
     assert path.read_bytes() == b""
@@ -318,7 +318,7 @@ def test_output_transfer_rejects_target_changed_since_preview(worker, monkeypatc
         Path(request["path"]).write_bytes(b"export")
         path.write_bytes(b"externally changed")
         return {"rows": 1}
-    native(monkeypatch, operation=transfer)
+    client(monkeypatch, operation=transfer)
     with pytest.raises(ValueError, match="changed"):
         worker.execute(payload)
     assert path.read_bytes() == b"externally changed"
@@ -330,7 +330,7 @@ def test_worker_protocol_emits_progress_and_result_with_secret_redaction(worker,
         print("private-password native accidental print")
         emit({"rows": 2, "detail": "private-password"})
         return {"rows": 2}
-    native(monkeypatch, operation=operation)
+    client(monkeypatch, operation=operation)
     stream = io.StringIO()
     code = worker.main(io.StringIO(json.dumps({"operation": "databases", "connection": {"password": "private-password"}})), stream)
     assert code == 0
@@ -345,7 +345,7 @@ def test_worker_protocol_emits_progress_and_result_with_secret_redaction(worker,
     ("a", {"path": "C:\\data\\catalog.bcp", "fingerprint": {"sha256": "abcd1234"}, "sample": [["a"]]}),
 ])
 def test_success_protocol_preserves_catalog_paths_hashes_and_samples(worker, monkeypatch, password, result):
-    native(monkeypatch, operation=lambda payload, emit: result)
+    client(monkeypatch, operation=lambda payload, emit: result)
     stream = io.StringIO()
     payload = {"operation": "databases", "connection": {"password": password}}
     assert worker.main(io.StringIO(json.dumps(payload)), stream) == 0
@@ -356,7 +356,7 @@ def test_short_password_redaction_preserves_protocol_and_progress_keys(worker, m
     def operation(payload, emit):
         emit({"message": "password a", "phase": "metadata", "rows": 2})
         return {"rows": 2}
-    native(monkeypatch, operation=operation)
+    client(monkeypatch, operation=operation)
     stream = io.StringIO()
     payload = {"operation": "databases", "connection": {"password": "a"}}
     assert worker.main(io.StringIO(json.dumps(payload)), stream) == 0
@@ -372,7 +372,7 @@ def test_short_password_redaction_preserves_protocol_and_progress_keys(worker, m
 def test_worker_protocol_returns_sanitized_errors(worker, monkeypatch, exception, expected):
     def operation(payload, emit):
         raise exception
-    native(monkeypatch, operation=operation)
+    client(monkeypatch, operation=operation)
     stream = io.StringIO()
     assert worker.main(io.StringIO(json.dumps({"operation": "databases", "connection": {"password": "private-password"}})), stream) == 1
     assert "private-password" not in stream.getvalue()
@@ -396,7 +396,7 @@ def test_worker_metadata_limit_does_not_limit_transfer_file_size(worker, monkeyp
     path.write_bytes(b"1\n" * 1000)
     payload = transfer_payload(path, "in")
     payload["fingerprint"] = fingerprint(path)
-    native(monkeypatch, operation=lambda request, emit: {"rows": 1000})
+    client(monkeypatch, operation=lambda request, emit: {"rows": 1000})
     assert worker.execute(payload)["rows"] == 1000
 
 
@@ -412,3 +412,30 @@ def test_worker_real_module_uses_stdin_json_for_status():
     assert len(records) == 1
     assert records[0]["event"] == "result"
     assert isinstance(records[0]["result"]["available"], bool)
+
+
+def test_catalog_cli_receives_parent_process_registration(worker, monkeypatch):
+    handles = []
+    registration = lambda handle: handles.append(handle)
+    client_handle = object()
+    def run(payload, emit=None, register=None):
+        assert payload["operation"] == "databases"
+        register(client_handle)
+        return {"databases": []}
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", SimpleNamespace(run_operation=run))
+    assert worker.execute({"operation": "databases"}, register=registration) == {"databases": []}
+    assert handles == [client_handle]
+
+
+def test_preview_cli_receives_parent_process_registration(worker, monkeypatch, tmp_path):
+    source = tmp_path / "data.txt"
+    source.write_bytes(b"1\n")
+    registration = lambda handle: None
+    def run(payload, emit=None, register=None):
+        assert register is registration
+        assert payload["operation"] == "columns"
+        return {"columns": []}
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", SimpleNamespace(run_operation=run))
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_files", SimpleNamespace(parse_options=lambda options: options))
+    result = worker.execute({"operation": "preview", "options": {"direction": "out"}, "path": str(source)}, register=registration)
+    assert result["columns"] == []

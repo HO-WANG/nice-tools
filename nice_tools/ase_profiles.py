@@ -5,8 +5,11 @@ from __future__ import annotations
 import configparser
 import hashlib
 from pathlib import Path
+import os
 import re
 import sys
+import tempfile
+import threading
 
 from . import jasypt
 from .ase_jobs import connection_data
@@ -17,6 +20,10 @@ FILENAME = "ase-connections.txt"
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROFILES = 100
 JASYPT_FIELDS = ("algorithm", "iterations", "salt_generator", "iv_generator", "output_type")
+RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences"}
+CLIENT_FIELDS = {"isql_path", "bcp_path"}
+SAVE_ERROR = "접속은 성공했지만 연결 정보를 저장하지 못했습니다. 설정 파일의 형식·권한과 변경 여부를 확인하세요."
+_SAVE_LOCK = threading.RLock()
 PROFILE_FIELDS = {"host", "port", "user", "password", "database"}
 REQUIRED_FIELDS = {"host", "port", "user", "password"}
 CONFIG_ERROR = (
@@ -64,15 +71,35 @@ def _settings(values: dict) -> dict:
     return {key: config[key] for key in JASYPT_FIELDS}
 
 
-def _load(path: Path | None) -> tuple[Path, bool, dict, list[dict]]:
-    location = _profile_path(path)
+def _client_settings(values: dict) -> dict:
+    if set(values) - CLIENT_FIELDS:
+        raise ValueError(CONFIG_ERROR)
+    result = {}
+    for key, value in values.items():
+        value = value.strip()
+        if not value:
+            continue
+        candidate = Path(value)
+        expected = key.removesuffix("_path")
+        allowed = {expected + ".exe"} if os.name == "nt" else {expected, expected + ".exe"}
+        if (any(char in value for char in "\r\n\x00") or not candidate.is_absolute()
+                or candidate.name.casefold() not in allowed):
+            raise ValueError(CONFIG_ERROR)
+        result[key] = value
+    return result
+
+
+def _read_raw(location: Path) -> bytes | None:
     try:
         with location.open("rb") as stream:
-            raw = stream.read(MAX_CONFIG_BYTES + 1)
+            return stream.read(MAX_CONFIG_BYTES + 1)
     except FileNotFoundError:
-        return location, False, _settings({}), []
+        return None
     except OSError:
         raise ValueError(READ_ERROR) from None
+
+
+def _parse_raw(raw: bytes) -> tuple[str, configparser.ConfigParser]:
     if len(raw) > MAX_CONFIG_BYTES:
         raise ValueError(CONFIG_ERROR)
     try:
@@ -92,11 +119,26 @@ def _load(path: Path | None) -> tuple[Path, bool, dict, list[dict]]:
     except configparser.Error:
         # Parser exceptions can contain full secret-bearing input lines.
         raise ValueError(CONFIG_ERROR) from None
-    names = parser.sections()
-    if any(name.casefold() == "default" for name in names):
+    if any(name.casefold() == "default" for name in parser.sections()):
         raise ValueError(CONFIG_ERROR)
+    return text, parser
+
+
+def _load(path: Path | None) -> dict:
+    location = _profile_path(path)
+    raw = _read_raw(location)
+    if raw is None:
+        return {"path": location, "raw": None, "text": "", "exists": False,
+                "settings": _settings({}), "profiles": [], "clients": {}, "last_profile": ""}
+    text, parser = _parse_raw(raw)
+    names = parser.sections()
     settings = _settings(dict(parser["jasypt"]) if parser.has_section("jasypt") else {})
-    profile_names = [name for name in names if name != "jasypt"]
+    clients = _client_settings(dict(parser["sap_client"]) if parser.has_section("sap_client") else {})
+    preferences = dict(parser["preferences"]) if parser.has_section("preferences") else {}
+    if (set(preferences) - {"last_profile"} or any("\r" in value or "\n" in value
+                                                for value in preferences.values())):
+        raise ValueError(CONFIG_ERROR)
+    profile_names = [name for name in names if name not in RESERVED_SECTIONS]
     if len(profile_names) > MAX_PROFILES:
         raise ValueError(CONFIG_ERROR)
     profiles = []
@@ -125,19 +167,23 @@ def _load(path: Path | None) -> tuple[Path, bool, dict, list[dict]]:
                 raise ValueError(CONFIG_ERROR)
             public["database"] = database
         profiles.append({"public": public, "ciphertext": ciphertext})
-    return location, True, settings, profiles
+    return {"path": location, "raw": raw, "text": text, "exists": True, "settings": settings,
+            "profiles": profiles, "clients": clients, "last_profile": preferences.get("last_profile", "")}
 
 
 def public_profiles(path: Path | None = None) -> dict:
     """Return connection choices and crypto metadata without password material."""
-    location, exists, settings, profiles = _load(path)
-    return {"path": str(location), "exists": exists,
-            "profiles": [item["public"] for item in profiles], "jasypt": settings}
+    document = _load(path)
+    profiles = [item["public"] for item in document["profiles"]]
+    selected = next((item["id"] for item in profiles if item["name"] == document["last_profile"]), None)
+    return {"path": str(document["path"]), "exists": document["exists"], "profiles": profiles,
+            "jasypt": document["settings"], "clients": document["clients"], "last_profile_id": selected}
 
 
 def decrypt_connection(profile_id: str, master_password: str, path: Path | None = None) -> dict:
     """Decrypt one current choice using a caller-provided, memory-only master key."""
-    _, _, settings, profiles = _load(path)
+    document = _load(path)
+    settings, profiles = document["settings"], document["profiles"]
     selected = next((item for item in profiles if item["public"]["id"] == profile_id), None)
     if not isinstance(profile_id, str) or selected is None:
         raise ValueError(PROFILE_ERROR)
@@ -153,3 +199,139 @@ def decrypt_connection(profile_id: str, master_password: str, path: Path | None 
     if "database" in metadata:
         result["database"] = metadata["database"]
     return result
+
+
+def client_settings(path: Path | None = None) -> dict:
+    """Configured executable locations; discovery/existence checks happen separately."""
+    raw = _read_raw(_profile_path(path))
+    if raw is None:
+        return {}
+    _, parser = _parse_raw(raw)
+    # A syntactically valid but broken profile must still allow manual login
+    # using installed tools. Never relax validation of the executable section.
+    return _client_settings(dict(parser["sap_client"]) if parser.has_section("sap_client") else {})
+
+
+def prepare_connection(connection: dict, master_password: str, path: Path | None = None) -> dict:
+    """Validate and encrypt before login, without creating or modifying any file."""
+    validated = connection_data(connection)
+    if any(char in validated["user"] for char in "\r\n"):
+        raise ValueError("사용자 이름에는 줄바꿈을 사용할 수 없습니다.")
+    data = {key: validated[key] for key in ("host", "port", "user", "password")}
+    # Corrupt user data must not block a manual login or be overwritten. Validate
+    # the entered key using defaults; the eventual save still rejects this file.
+    try:
+        settings = _load(path)["settings"]
+    except ValueError:
+        settings = _settings({})
+    ciphertext = jasypt.transform({"operation": "encrypt", "text": data["password"],
+                                  "password": master_password, "wrap_enc": True, **settings})
+    return {"connection": data, "ciphertext": ciphertext, "settings": settings}
+
+
+def _update_section(text: str, section: str, values: dict) -> str:
+    """Update known single-line INI values while retaining comments and order."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines(keepends=True)
+    header = re.compile(r"^\[(?P<name>[^\[\]\r\n]+)\]\s*$")
+    start = end = None
+    for index, line in enumerate(lines):
+        match = header.fullmatch(line.rstrip("\r\n").strip())
+        if match:
+            if start is not None:
+                end = index
+                break
+            if match["name"] == section:
+                start = index
+    if start is None:
+        prefix = text + (newline if text and not text.endswith(("\n", "\r")) else "")
+        if prefix and not prefix.endswith(newline * 2):
+            prefix += newline
+        return prefix + f"[{section}]{newline}" + "".join(f"{key} = {value}{newline}" for key, value in values.items())
+    end = len(lines) if end is None else end
+    pending = dict(values)
+    for index in range(start + 1, end):
+        # Parser validation already excludes duplicate/multiline values.
+        match = re.match(r"^\s*([^#;:=\s][^:=]*?)\s*[:=]", lines[index])
+        if match:
+            key = match[1].strip().lower()
+            if key in pending:
+                lines[index] = f"{key} = {pending.pop(key)}{newline}"
+    if end and not lines[end - 1].endswith(("\n", "\r")):
+        lines[end - 1] += newline
+    lines[end:end] = [f"{key} = {value}{newline}" for key, value in pending.items()]
+    return "".join(lines)
+
+
+def _write_document(document: dict, text: str) -> None:
+    location = document["path"]
+    raw = (b"\xef\xbb\xbf" if document["raw"] and document["raw"].startswith(b"\xef\xbb\xbf") else b"") + text.encode("utf-8")
+    if len(raw) > MAX_CONFIG_BYTES:
+        raise ValueError(SAVE_ERROR)
+    temporary = None
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=".ase-connections-", suffix=".tmp", dir=location.parent)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if _read_raw(location) != document["raw"]:
+            raise ValueError(SAVE_ERROR)
+        os.replace(temporary, location)
+        temporary = None
+    except (OSError, ValueError):
+        raise ValueError(SAVE_ERROR) from None
+    finally:
+        if temporary is not None:
+            try:
+                Path(temporary).unlink()
+            except OSError:
+                pass
+
+
+def _saved_result(name: str, path: Path | None) -> dict:
+    public = public_profiles(path)
+    profile = next((item for item in public["profiles"] if item["name"] == name), None)
+    if profile is None:
+        raise ValueError(SAVE_ERROR)
+    return {"saved": True, "profile_id": profile["id"], "profile_name": name}
+
+
+def save_connection(prepared: dict, path: Path | None = None) -> dict:
+    """Persist encrypted credentials only after the caller confirms login success."""
+    with _SAVE_LOCK:
+        document = _load(path)
+        if document["settings"] != prepared["settings"]:
+            raise ValueError(SAVE_ERROR)
+        connection = prepared["connection"]
+        identity = tuple(connection[key] for key in ("host", "port", "user"))
+        existing = next((item["public"] for item in document["profiles"]
+                         if tuple(item["public"][key] for key in ("host", "port", "user")) == identity), None)
+        if existing:
+            name = existing["name"]
+        else:
+            if len(document["profiles"]) >= MAX_PROFILES:
+                raise ValueError(SAVE_ERROR)
+            stem = "saved-" + hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
+            names = {item["public"]["name"] for item in document["profiles"]}
+            name, counter = stem, 1
+            while name in names:
+                name, counter = f"{stem}-{counter}", counter + 1
+        values = {key: connection[key] for key in ("host", "port", "user")}
+        values["password"] = prepared["ciphertext"]
+        text = _update_section(document["text"], name, values)
+        text = _update_section(text, "preferences", {"last_profile": name})
+        _write_document(document, text)
+        return _saved_result(name, path)
+
+
+def remember_connection(profile_id: str, path: Path | None = None) -> dict:
+    """Record the last successfully used existing profile without touching its cipher."""
+    with _SAVE_LOCK:
+        document = _load(path)
+        profile = next((item["public"] for item in document["profiles"] if item["public"]["id"] == profile_id), None)
+        if profile is None:
+            raise ValueError(PROFILE_ERROR)
+        text = _update_section(document["text"], "preferences", {"last_profile": profile["name"]})
+        _write_document(document, text)
+        return _saved_result(profile["name"], path)
