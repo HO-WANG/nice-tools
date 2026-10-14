@@ -15,9 +15,66 @@ import time
 class AseOdbcError(ValueError):
     """A secret-free error suitable for the local application's response."""
 
+    def __init__(self, message, *, stage=None, sqlstate=None, action=None, cancelled=False):
+        self.stage = stage
+        self.sqlstate = sqlstate
+        self.cancelled = cancelled
+        if stage is not None:
+            context = "단계: " + stage
+            if sqlstate is not None:
+                context += " · SQLSTATE: " + sqlstate
+            if action is not None:
+                context += " · " + action
+            message = "[" + context + "] " + message
+        super().__init__(message)
+
 
 _COLUMN_KEYS = ("position", "name", "type_id", "type_name", "length", "precision", "scale", "nullable", "identity")
 _CATALOGS = {"databases", "owners", "objects", "columns"}
+_SAFE_SQLSTATES = frozenset({"08001", "08003", "08004", "08006", "08S01", "28000", "HYT00", "HYT01",
+                            "IM002", "IM003", "IM004", "IM005", "IM006", "IM014", "HY000", "HY010", "HY090",
+                            "HY092", "HYC00", "42000", "42S02", "42S22", "40001", "07002", "07009",
+                            "22001", "22003", "22018"})
+_STAGE_MESSAGES = {
+    "driver-resolution": "SAP ASE ODBC 드라이버를 확인하지 못했습니다. 64비트 드라이버 설치와 설정을 확인하세요.",
+    "connect": "ASE ODBC 접속에 실패했습니다. 서버 연결 설정을 확인하세요.",
+    "connection-timeout-setting": "DB 연결 후 ODBC 시간 제한 속성을 설정하지 못했습니다.",
+    "startup": "DB 연결 후 ODBC 커서 또는 세션 초기화를 완료하지 못했습니다.",
+    "ASE-identity": "DB 연결 후 ASE 서버 확인을 완료하지 못했습니다.",
+    "databases": "DB 연결 후 데이터베이스 목록을 조회하지 못했습니다.",
+    "query": "ASE ODBC 조회를 완료하지 못했습니다.",
+}
+
+
+def _sqlstate(error, library):
+    error_type = getattr(library, "Error", None)
+    if not isinstance(error_type, type) or not issubclass(error_type, BaseException) or not isinstance(error, error_type):
+        return None
+    arguments = error.args
+    state = arguments[0] if arguments else None
+    if isinstance(state, str) and re.fullmatch(r"[A-Z0-9]{5}", state) and state in _SAFE_SQLSTATES:
+        return state
+    return None
+
+
+def _diagnostic(stage, error, library=None, action=None):
+    # Never format, search or copy the driver's raw message or connection string.
+    # Only a known SQLSTATE in the documented first typed-error argument is safe.
+    state = _sqlstate(error, library)
+    message = _STAGE_MESSAGES[stage]
+    if state in ("08001", "08004", "08006", "08S01", "08003"):
+        message += " 서버 주소·포트, 네트워크 경로 또는 연결 협상에 문제가 있을 수 있습니다."
+    elif state == "28000":
+        message += " 인증이 거부되었을 수 있습니다. DB 사용자·비밀번호와 계정 상태를 확인하세요."
+    elif state in ("HYT00", "HYT01"):
+        message += " 연결 또는 조회 제한 시간이 지났을 수 있습니다. 네트워크와 서버 응답을 확인하세요."
+    elif state in ("IM002", "IM003", "IM004", "IM005", "IM006", "IM014"):
+        message += " ODBC 드라이버 등록과 64비트 설치 상태를 확인하세요."
+    elif state in ("HY092", "HYC00"):
+        message += " 드라이버가 시간 제한 등 요청한 연결 속성 또는 기능을 지원하지 않을 수 있습니다."
+    elif state in ("42000", "42S02", "42S22"):
+        message += " SQL 실행, 객체 존재 여부 또는 조회 권한에 문제가 있을 수 있습니다."
+    return AseOdbcError(message, stage=stage, sqlstate=state, action=action)
 
 
 def _pyodbc():
@@ -47,8 +104,8 @@ def _registered_drivers(library):
         if not isinstance(drivers, (list, tuple)) or any(not isinstance(driver, str) for driver in drivers):
             raise ValueError
         return list(dict.fromkeys(drivers))
-    except Exception:
-        raise AseOdbcError("설치된 64비트 ODBC 드라이버 목록을 읽지 못했습니다.") from None
+    except Exception as error:
+        raise _diagnostic("driver-resolution", error, library) from None
 
 
 def _select_driver(drivers, configured=None):
@@ -229,6 +286,7 @@ class OdbcSession:
         self._initial_seconds = 0.0
         self._first_result = True
         self._connection = None
+        self._library = None
         self._cursor = None
         self._closed = False
         self._generation = 0
@@ -238,7 +296,7 @@ class OdbcSession:
     def _check(self, generation=None):
         with self._state_lock:
             if self._closed or (generation is not None and generation != self._generation):
-                raise AseOdbcError("ODBC 작업이 취소되었습니다. 다시 접속하세요.")
+                raise AseOdbcError("ODBC 작업이 취소되었습니다. 다시 접속하세요.", cancelled=True)
             return self._generation
 
     def open(self):
@@ -249,38 +307,47 @@ class OdbcSession:
             started = time.monotonic()
             connection = None
             attached = False
+            stage = "driver-resolution"
+            library = None
             try:
                 library = _pyodbc()
+                self._library = library
                 configured = self._explicit_driver if self._explicit_driver is not None else _odbc_settings().get("driver")
                 self.driver = _select_driver(_registered_drivers(library), configured)
                 settings = self._settings
                 login_started = time.monotonic()
+                stage = "connect"
                 connection = library.connect(_connection_string(settings, self.driver), autocommit=True, timeout=settings["login_timeout"])
                 self.login_seconds = max(0.0, time.monotonic() - login_started)
                 self._check(generation)
+                stage = "connection-timeout-setting"
                 connection.timeout = settings["query_timeout"]
                 with self._state_lock:
                     if self._closed or generation != self._generation:
-                        raise AseOdbcError("ODBC 작업이 취소되었습니다. 다시 접속하세요.")
+                        raise AseOdbcError("ODBC 작업이 취소되었습니다. 다시 접속하세요.", cancelled=True)
                     self._connection = connection
                     attached = True
-                self._query("SET QUOTED_IDENTIFIER ON SET NOCOUNT ON", fields=None)
-                versions = self._query("SELECT @@version", fields=1)
+                stage = "startup"
+                self._query("SET QUOTED_IDENTIFIER ON SET NOCOUNT ON", fields=None, stage=stage)
+                stage = "ASE-identity"
+                versions = self._query("SELECT @@version", fields=1, stage=stage)
                 if len(versions) != 1 or not isinstance(versions[0][0], str) or not any(term in versions[0][0].lower() for term in ("adaptive server", "sap ase")):
                     raise AseOdbcError("This connection does not identify itself as SAP Adaptive Server Enterprise.")
                 self._check(generation)
                 self._initial_seconds = max(0.0, time.monotonic() - started)
                 return self
-            except AseOdbcError:
+            except AseOdbcError as error:
                 self.close()
                 if connection is not None and not attached:
                     self._close_connection(connection)
-                raise
-            except Exception:
+                if error.stage is not None or error.cancelled:
+                    raise
+                raise AseOdbcError(str(error), stage=stage) from None
+            except Exception as error:
                 self.close()
                 if connection is not None and not attached:
                     self._close_connection(connection)
-                raise AseOdbcError("ASE ODBC 접속에 실패했습니다. 서버 주소·포트·사용자·비밀번호를 확인하세요.") from None
+                raise _diagnostic(stage, error, library) from None
             finally:
                 self._settings = None
 
@@ -291,21 +358,24 @@ class OdbcSession:
         except Exception:
             pass
 
-    def _query(self, sql, parameters=(), fields=None):
+    def _query(self, sql, parameters=(), fields=None, stage="query"):
         generation = self._check()
         connection = self._connection
         if connection is None:
             raise AseOdbcError("다시 접속하세요.")
         cursor = None
+        action = "ODBC 커서 생성"
         try:
             cursor = connection.cursor()
             with self._state_lock:
                 self._cursor = cursor
             self._check(generation)
+            action = "SQL 실행"
             cursor.execute(sql, *parameters)
             if fields is None:
                 rows = []
             else:
+                action = "결과 읽기"
                 rows = [tuple(row) for row in cursor.fetchall()]
                 if any(len(row) != fields for row in rows):
                     raise AseOdbcError("ASE did not return valid catalog metadata.")
@@ -313,9 +383,9 @@ class OdbcSession:
             return rows
         except AseOdbcError:
             raise
-        except Exception:
+        except Exception as error:
             self._check(generation)
-            raise AseOdbcError("ASE ODBC 조회에 실패했습니다. 접속 상태와 조회 권한을 확인하세요.") from None
+            raise _diagnostic(stage, error, self._library, action) from None
         finally:
             with self._state_lock:
                 if self._cursor is cursor:
@@ -332,7 +402,7 @@ class OdbcSession:
             generation = self._check()
             started = time.monotonic()
             if operation == "databases":
-                rows = self._query("SELECT dbid, name FROM master.dbo.sysdatabases ORDER BY name", fields=2)
+                rows = self._query("SELECT dbid, name FROM master.dbo.sysdatabases ORDER BY name", fields=2, stage="databases")
                 result = {"databases": [{"id": _id(row[0]), "name": row[1]} for row in rows]}
             elif operation == "owners":
                 db = _identifier(database)
@@ -391,6 +461,7 @@ class OdbcSession:
             with self._state_lock:
                 connection = self._connection
                 self._connection = None
+                self._library = None
                 self._settings = None
             if connection is not None:
                 self._close_connection(connection)

@@ -20,6 +20,10 @@ def module():
         pytest.fail("The persistent ASE ODBC adapter is not implemented")
 
 
+class FakeDriverError(Exception):
+    pass
+
+
 class FakeCursor:
     def __init__(self, connection):
         self.connection = connection
@@ -30,7 +34,12 @@ class FakeCursor:
     def execute(self, sql, *parameters):
         db = self.connection.db
         self.connection.queries.append((sql, parameters))
+        for part, error in db.query_errors.items():
+            if part in sql:
+                raise error
         if db.query_error:
+            if isinstance(db.query_error, Exception):
+                raise db.query_error
             raise RuntimeError(db.query_error)
         if "sysdatabases" in sql and db.block:
             db.entered.set()
@@ -49,6 +58,8 @@ class FakeCursor:
         return self
 
     def fetchall(self):
+        if self.connection.db.fetch_error:
+            raise self.connection.db.fetch_error
         return self.rows
 
     def cancel(self):
@@ -66,9 +77,21 @@ class FakeConnection:
         self.cursors = []
         self.closed = False
         self.close_calls = 0
-        self.timeout = None
+        self._timeout = None
+
+    @property
+    def timeout(self):
+        return self._timeout
+
+    @timeout.setter
+    def timeout(self, value):
+        if self.db.timeout_error:
+            raise self.db.timeout_error
+        self._timeout = value
 
     def cursor(self):
+        if self.db.cursor_error:
+            raise self.db.cursor_error
         cursor = FakeCursor(self)
         self.cursors.append(cursor)
         return cursor
@@ -80,6 +103,7 @@ class FakeConnection:
 
 class FakeOdbc:
     version = "5.3.0"
+    Error = FakeDriverError
 
     def __init__(self):
         self.driver_names = ["SQL Server", "SAP ASE ODBC Driver", "Adaptive Server Enterprise"]
@@ -88,6 +112,10 @@ class FakeOdbc:
         self.connect_calls = []
         self.connect_error = None
         self.query_error = None
+        self.query_errors = {}
+        self.cursor_error = None
+        self.timeout_error = None
+        self.fetch_error = None
         self.databases = [(5, "연구]db")]
         self.object = dict(OBJECT)
         self.columns = [dict(c) for c in COLUMNS]
@@ -104,6 +132,8 @@ class FakeOdbc:
     def connect(self, connection_string, **options):
         self.connect_calls.append((connection_string, options))
         if self.connect_error:
+            if isinstance(self.connect_error, Exception):
+                raise self.connect_error
             raise RuntimeError(self.connect_error)
         connection = FakeConnection(self)
         self.connections.append(connection)
@@ -394,3 +424,115 @@ def test_cancel_during_login_closes_the_unpublished_connection(odbc):
     assert all("@@version" not in query for query, _ in db.connections[0].queries)
     session.close()
     assert db.connections[0].close_calls == 1
+
+
+@pytest.mark.parametrize("state,hint", [("08001", "연결 협상"), ("28000", "인증"),
+                                        ("HYT00", "제한 시간"), ("HYT01", "제한 시간"), ("IM002", "드라이버")])
+def test_connect_diagnostic_reports_safe_sqlstate_and_possible_reason(odbc, state, hint):
+    adapter, db = odbc
+    db.connect_error = FakeDriverError(state, "[SAP ODBC] PWD=private-password; native 4002 SELECT confidential")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    message = str(error.value)
+    assert "단계: connect" in message
+    assert "SQLSTATE: " + state in message
+    assert hint in message
+    assert "private-password" not in message and "confidential" not in message
+    assert "4002" not in message and "[SAP ODBC]" not in message
+    assert len(db.connect_calls) == 1 and db.connections == []
+
+
+def test_unsupported_timeout_attribute_is_not_reported_as_a_login_failure(odbc):
+    adapter, db = odbc
+    db.timeout_error = FakeDriverError("HY092", "PWD=private-password unsupported native attribute")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    message = str(error.value)
+    assert "단계: connection-timeout-setting" in message
+    assert "SQLSTATE: HY092" in message
+    assert "연결 속성" in message
+    assert "private-password" not in message
+    assert len(db.connect_calls) == 1 and db.connections[0].close_calls == 1
+    assert db.connections[0].queries == []
+
+
+@pytest.mark.parametrize("action", ["cursor", "execute", "identity"])
+def test_post_login_startup_failure_names_the_phase_and_operation(odbc, action):
+    adapter, db = odbc
+    native_error = FakeDriverError("HY092", "private-password startup detail")
+    if action == "cursor":
+        db.cursor_error = native_error
+        expected_stage, expected_action = "startup", "ODBC 커서 생성"
+    elif action == "execute":
+        db.query_error = native_error
+        expected_stage, expected_action = "startup", "SQL 실행"
+    else:
+        db.query_errors["@@version"] = native_error
+        expected_stage, expected_action = "ASE-identity", "SQL 실행"
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    message = str(error.value)
+    assert "단계: " + expected_stage in message
+    assert expected_action in message
+    assert "SQLSTATE: HY092" in message
+    assert "private-password" not in message
+    assert db.connections[0].close_calls == 1
+
+
+@pytest.mark.parametrize("operation,action", [("databases", "execute"), ("objects", "execute"), ("databases", "fetch")])
+def test_catalog_diagnostic_preserves_safe_state_without_raw_driver_details(odbc, operation, action):
+    adapter, db = odbc
+    session = adapter.connect(CONNECTION)
+    if action == "execute":
+        db.query_error = FakeDriverError("42000", "private-password SELECT confidential")
+        expected_action = "SQL 실행"
+    else:
+        db.fetch_error = FakeDriverError("08S01", "private-password connection lost")
+        expected_action = "결과 읽기"
+    try:
+        with pytest.raises(ValueError) as error:
+            session.run_operation(payload(operation, database=OBJECT["database"]))
+        message = str(error.value)
+        assert "단계: " + ("databases" if operation == "databases" else "query") in message
+        assert expected_action in message
+        assert "SQLSTATE: " + ("42000" if action == "execute" else "08S01") in message
+        assert "private-password" not in message and "confidential" not in message
+        assert all(cursor.closed for cursor in db.connections[0].cursors)
+    finally:
+        session.close()
+
+
+@pytest.mark.parametrize("state", ["PRIVATE", "zz999", "ZZ999", "08001 secret", "08001\n", b"08001", ("08001",), None])
+def test_malformed_or_unknown_sqlstates_never_echo_driver_arguments(odbc, state):
+    adapter, db = odbc
+    db.connect_error = FakeDriverError(state, "private-password unsafe driver message")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    message = str(error.value)
+    assert "단계: connect" in message
+    assert "SQLSTATE" not in message
+    assert "private-password" not in message and "unsafe driver message" not in message
+    assert "ZZ999" not in message and "PRIVATE" not in message
+
+
+def test_non_driver_exception_does_not_fabricate_a_sqlstate(odbc):
+    adapter, db = odbc
+    db.connect_error = RuntimeError("08001", "private-password")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    assert "단계: connect" in str(error.value)
+    assert "SQLSTATE" not in str(error.value)
+    assert "private-password" not in str(error.value)
+
+
+def test_real_pyodbc_error_subclass_exposes_only_its_known_sqlstate(odbc, monkeypatch):
+    import pyodbc
+
+    adapter, db = odbc
+    monkeypatch.setattr(db, "Error", pyodbc.Error)
+    db.connect_error = pyodbc.OperationalError("08001", "PWD=private-password; native confidential")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    assert "SQLSTATE: 08001" in str(error.value)
+    assert "private-password" not in str(error.value)
+    assert "confidential" not in str(error.value)
