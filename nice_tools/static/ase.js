@@ -7,9 +7,9 @@
     available: false, bcpAvailable: false, session: null, databases: [], owners: [], ownersLoaded: false, objects: [], searched: false, object: null,
     columns: [], columnsLoaded: false, file: null, path: "", review: null,
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
-    profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "",
+    profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "", dataSources: [], dataSourcesDetail: "",
   };
-  const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password"];
+  const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password", "ase-dsn"];
   const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity"];
   const kindNames = { U: "테이블", V: "뷰", P: "프로시저" };
   const direction = () => get("ase-in").checked ? "in" : "out";
@@ -30,13 +30,55 @@
     get("ase-password").value = "";
   }
 
+  function findDataSource(name) {
+    return state.dataSources.find((source) => source.name.toLowerCase() === name.toLowerCase());
+  }
+
+  function setDsnChoices(selected = get("ase-dsn").value) {
+    setChoices("ase-dsn", state.dataSources, "직접 연결 (DSN 없음)", "name");
+    if (selected && !state.dataSources.some((source) => source.name === selected)) {
+      const option = document.createElement("option");
+      option.value = selected;
+      option.textContent = findDataSource(selected) ? selected : `${selected} (${state.dataSourcesDetail ? "등록 확인 필요" : "등록되지 않은 DSN"})`;
+      get("ase-dsn").append(option);
+    }
+    get("ase-dsn").value = selected;
+    showDsnHelp();
+  }
+
+  function showDsnHelp() {
+    const selected = get("ase-dsn").value;
+    const unavailable = selected && !findDataSource(selected);
+    const note = "DSN의 문자셋·기본 DB·보안 설정을 사용하며, 서버·포트·계정은 입력값으로 접속합니다.";
+    get("ase-dsn-help").textContent = state.dataSourcesDetail ? `${state.dataSourcesDetail} ${note}` : unavailable ? `선택한 DSN이 이 PC에 등록되어 있지 않습니다. ODBC 관리자에서 같은 이름의 64비트 SAP ASE DSN을 등록하세요. ${note}` : state.dataSources.length ? note : `등록된 64비트 SAP ASE DSN이 없습니다. 직접 연결을 사용하거나 ODBC 관리자에서 DSN을 추가하세요. ${note}`;
+    get("ase-dsn-help").dataset.tone = state.dataSourcesDetail || unavailable ? "error" : "info";
+    renderOdbcDriver();
+  }
+
+  function renderOdbcDriver() {
+    const source = findDataSource(get("ase-dsn").value);
+    const driver = source?.driver || state.odbcDriver || state.configuredDriver;
+    const context = source ? " (DSN)" : state.odbcDriver ? "" : " (설정)";
+    get("ase-odbc-driver").textContent = driver ? `ODBC 드라이버${context}: ${driver}` : "";
+    get("ase-odbc-driver").hidden = !driver;
+  }
+
   function showOdbcDriver(odbc, configured = false) {
     const driver = odbc && typeof odbc.driver === "string" ? odbc.driver : "";
     if (configured) state.configuredDriver = driver;
     else state.odbcDriver = driver;
-    const selected = state.odbcDriver || state.configuredDriver;
-    get("ase-odbc-driver").textContent = selected ? `ODBC 드라이버${state.odbcDriver ? "" : " (설정)"}: ${selected}` : "";
-    get("ase-odbc-driver").hidden = !selected;
+    if (!configured) {
+      const sources = Array.isArray(odbc?.data_sources) ? odbc.data_sources : [];
+      const names = new Set();
+      state.dataSources = [];
+      for (const source of sources) {
+        if (!source || typeof source.name !== "string" || !source.name || typeof source.driver !== "string" || !source.driver || names.has(source.name)) continue;
+        names.add(source.name);
+        state.dataSources.push({ name: source.name, driver: source.driver });
+      }
+      state.dataSourcesDetail = typeof odbc?.data_sources_detail === "string" ? odbc.data_sources_detail : "";
+      setDsnChoices();
+    } else renderOdbcDriver();
   }
 
   function showClientPaths(paths, configured = false) {
@@ -214,10 +256,12 @@
       get("ase-host").value = profile.host;
       get("ase-port").value = String(profile.port);
       get("ase-user").value = profile.user;
+      setDsnChoices(profile.dsn || "");
     } else if (wasProfile && !preserveConnection) {
       get("ase-host").value = "";
       get("ase-port").value = "5000";
       get("ase-user").value = "";
+      setDsnChoices("");
     }
     render();
   }
@@ -252,12 +296,13 @@
       if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "설정 파일을 읽을 수 없습니다. 직접 입력으로 연결할 수 있습니다.");
       if (!Array.isArray(data.profiles) || !data.profiles.every((profile) => profile &&
         ["id", "name", "host", "user"].every((key) => typeof profile[key] === "string" && profile[key]) &&
-        Number.isInteger(profile.port) && profile.port >= 1 && profile.port <= 65535)) throw new Error("설정 파일의 서버 목록을 확인할 수 없습니다. 직접 입력으로 연결할 수 있습니다.");
-      state.profiles = data.profiles.map(({ id, name, host, port, user, database }) => ({ id, name, host, port, user, ...(typeof database === "string" ? { database } : {}) }));
+        Number.isInteger(profile.port) && profile.port >= 1 && profile.port <= 65535 &&
+        (!("dsn" in profile) || typeof profile.dsn === "string"))) throw new Error("설정 파일의 서버 목록을 확인할 수 없습니다. 직접 입력으로 연결할 수 있습니다.");
+      state.profiles = data.profiles.map(({ id, name, host, port, user, database, dsn }) => ({ id, name, host, port, user, ...(typeof database === "string" ? { database } : {}), ...(typeof dsn === "string" && dsn ? { dsn } : {}) }));
       setChoices("ase-profile", state.profiles, "직접 입력", "id");
       let profileId;
       if (preserveSession) {
-        const matches = state.profiles.filter((profile) => profile.host === get("ase-host").value.trim() && profile.port === Number(get("ase-port").value) && profile.user === get("ase-user").value.trim());
+        const matches = state.profiles.filter((profile) => profile.host === get("ase-host").value.trim() && profile.port === Number(get("ase-port").value) && profile.user === get("ase-user").value.trim() && (profile.dsn || "") === get("ase-dsn").value);
         const preferred = [preferredId, state.profileId].find((id) => matches.some((profile) => profile.id === id));
         profileId = preferred || (matches.length === 1 ? matches[0].id : "");
       } else {
@@ -338,6 +383,8 @@
     const canTransfer = transferable();
     for (const id of connectionIds) get(id).disabled = Boolean(state.session) || Boolean(state.busy);
     const profile = selectedProfile();
+    get("ase-dsn").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
+    showDsnHelp();
     for (const id of ["ase-host", "ase-port", "ase-user"]) get(id).readOnly = Boolean(profile);
     get("ase-password").required = false;
     get("ase-password").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
@@ -404,9 +451,11 @@
     event.preventDefault();
     if (state.session || state.busy || !state.available || !event.currentTarget.reportValidity()) return;
     const profile = selectedProfile();
+    const dsn = get("ase-dsn").value;
     const payload = profile ? { profile_id: profile.id } : {
       host: get("ase-host").value.trim(), port: Number(get("ase-port").value),
       user: get("ase-user").value.trim(), password: get("ase-password").value,
+      ...(dsn ? { dsn } : {}),
     };
     invalidateProfileRead();
     reset("connection");

@@ -7,6 +7,22 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_connection_data_preserves_optional_dsn_for_catalog_and_workers():
+    from nice_tools.ase_jobs import connection_data
+    data = {"host": "ase.internal", "port": 5000, "user": "reader", "password": "private-password"}
+    assert connection_data({**data, "dsn": "  ASE_UAT  "})["dsn"] == "ASE_UAT"
+    assert "dsn" not in connection_data(data)
+    assert "dsn" not in connection_data({**data, "dsn": "   "})
+
+
+@pytest.mark.parametrize("dsn", [None, 123, "x" * 256, "ASE\n", "\tASE", "ASE\x00DSN", "ASE\x7fDSN"])
+def test_connection_data_rejects_invalid_dsn_without_reflecting_it(dsn):
+    from nice_tools.ase_jobs import connection_data
+    with pytest.raises(ValueError, match="DSN") as error:
+        connection_data({"host": "ase.internal", "user": "reader", "password": "private-password", "dsn": dsn})
+    assert "private-password" not in str(error.value)
+
+
 @pytest.fixture(autouse=True)
 def sap_client(monkeypatch):
     import nice_tools

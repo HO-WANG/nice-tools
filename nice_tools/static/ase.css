@@ -3,6 +3,9 @@
 #ase-tool .ase-connection-grid .field input:read-only { background: #f5f6f8; }
 .ase-profile-controls { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 12px; }
 .ase-profile-controls > button { min-height: 36px; }
+.ase-dsn-controls { display: grid; grid-template-columns: minmax(180px,2fr) minmax(0,3fr); align-items: end; gap: 12px; padding: 0 20px 16px; }
+.ase-dsn-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.ase-dsn-help[data-tone="error"] { color: #a52a2a; }
 .ase-profile-detail { overflow-wrap: anywhere; }
 .ase-client-paths { margin: -4px 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; white-space: pre-line; }
 #ase-profile-help[data-tone="error"] { color: #a52a2a; }
@@ -62,7 +65,7 @@
   .ase-columns { border-left: 0; border-top: 1px solid var(--line); }
 }
 @media (max-width: 760px) {
-  .ase-connection-grid, .ase-connection-grid.has-saved-profile, .ase-profile-controls, .ase-browser-controls, .ase-options-grid { grid-template-columns: minmax(0,1fr); padding-inline: 14px; }
+  .ase-connection-grid, .ase-connection-grid.has-saved-profile, .ase-profile-controls, .ase-dsn-controls, .ase-browser-controls, .ase-options-grid { grid-template-columns: minmax(0,1fr); padding-inline: 14px; }
   .ase-profile-controls > button { justify-self: start; }
   .ase-note, .ase-instructions, .ase-file-row, .ase-job-status { padding-inline: 14px; }
   .ase-warning, .ase-review-warnings { margin-inline: 14px; }

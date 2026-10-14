@@ -85,6 +85,9 @@ class ASEMock:
     fail_connect: bool = False
     replace_profile_after_save: bool | str = False
     legacy_profile: bool = False
+    data_sources: list | None = None
+    data_sources_detail: str = ""
+    expected_dsn: str = ""
 
     def timed(self, payload):
         return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
@@ -125,7 +128,8 @@ class ASEMock:
             assert headers.get("x-nice-tools") == "ase", "ASE request is missing its browser-origin guard"
             if endpoint == "status":
                 assert request.method == "GET"
-                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": ODBC, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
+                odbc = {**ODBC, **({"data_sources": self.data_sources} if self.data_sources is not None else {}), **({"data_sources_detail": self.data_sources_detail} if self.data_sources_detail else {})}
+                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": odbc, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
             if endpoint == "profiles":
                 assert request.method == "GET"
                 if self.delay_profiles:
@@ -152,14 +156,18 @@ class ASEMock:
                     self.last_profile_id = profile["id"]
                     response.update({"profile_id": profile["id"], "profile_name": profile["name"], "database": profile.get("database")})
                 else:
-                    assert payload in [
+                    assert {key: value for key, value in payload.items() if key != "dsn"} in [
                         {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD},
                         {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": ""},
                     ]
+                    assert payload.get("dsn", "") == self.expected_dsn
+                    assert "dsn" not in payload or isinstance(payload["dsn"], str) and payload["dsn"], "Empty DSN must be omitted"
                     if self.fail_save:
                         response.update({"saved": False, "save_warning": HOSTILE_ERROR})
                     elif self.auto_save:
                         saved = {"id": "saved-new", "name": f"{payload['host']}-{payload['user']}", "host": payload["host"], "port": payload["port"], "user": payload["user"]}
+                        if "dsn" in payload:
+                            saved["dsn"] = payload["dsn"]
                         self.profiles = [profile for profile in self.profiles if profile["id"] != saved["id"]] + [saved]
                         self.profiles_exist = True
                         self.last_profile_id = saved["id"]
@@ -170,6 +178,9 @@ class ASEMock:
                             self.last_profile_id = "main"
                             if self.replace_profile_after_save == "rotated":
                                 self.profiles.append({**saved, "id": "rotated-profile"})
+                            if self.replace_profile_after_save == "different-dsn":
+                                self.profiles.append({**saved, "id": "other-dsn-profile", "dsn": "OTHER_ASE_DSN"})
+                                self.last_profile_id = "other-dsn-profile"
                 if self.delay_connect:
                     self.delay_connect = False
                     response["session"] = f"late-session-{len(self.endpoint_calls('connect'))}"
@@ -999,12 +1010,15 @@ def validate_saved_connections(page, url):
     assert not errors, errors
 
 
-def validate_saved_profile_race(page, url, retain_profile=False):
+def validate_saved_profile_race(page, url, retain_profile=False, different_dsn=False):
     """A changed file must not make a live connection appear to target another server."""
-    mock = ASEMock(auto_save=True, replace_profile_after_save="rotated" if retain_profile else True)
+    replacement = "different-dsn" if different_dsn else "rotated" if retain_profile else True
+    mock = ASEMock(auto_save=True, replace_profile_after_save=replacement, expected_dsn="TEST_ASE_DSN" if different_dsn else "", data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}] if different_dsn else None)
     page.route("**/api/ase/**", mock.handle)
     page.goto(url, wait_until="networkidle")
     page.locator('a[data-tool="ase-tool"]').click()
+    if different_dsn:
+        page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
     page.locator("#ase-host").fill("ase.example.internal")
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
@@ -1015,6 +1029,8 @@ def validate_saved_profile_race(page, url, retain_profile=False):
     expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
     expect(page.locator("#ase-port")).to_have_value("5000")
     expect(page.locator("#ase-user")).to_have_value("tester")
+    if different_dsn:
+        expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
     assert not mock.endpoint_calls("disconnect")
     page.locator("#ase-database").select_option("db1")
     page.locator("#ase-search-button").click()
@@ -1085,6 +1101,88 @@ def validate_driver_status(page, url):
     assert not mock.violations, mock.violations
 
 
+def validate_dsns(page, url):
+    """Registered names, manual overrides, saved DSNs, and missing registration are explicit."""
+    dsn = "한글 ASE 테스트"
+    dsn_driver = "SAP ASE ODBC Driver"
+    mock = ASEMock(auto_save=True, expected_dsn=dsn, data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}, {"name": dsn, "driver": dsn_driver}, {"name": HOSTILE, "driver": ODBC["driver"]}])
+    page.add_init_script("window.__aseXss = false;")
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-dsn")).to_have_value("")
+    expect(page.locator("#ase-dsn option")).to_have_count(4)
+    expect(page.locator("#ase-dsn option[value='']")).to_have_text("직접 연결 (DSN 없음)")
+    expect(page.locator("#ase-dsn-help")).to_contain_text("서버·포트·계정은 입력값")
+    assert not mock.endpoint_calls("connect")
+    page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-dsn").select_option(HOSTILE)
+    expect(page.locator("#ase-password")).to_have_value("")
+    assert page.locator("#ase-dsn option img").count() == 0
+    page.locator("#ase-dsn").select_option(dsn)
+    expect(page.locator("#ase-odbc-driver")).to_contain_text(dsn_driver)
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-profile")).to_have_value("saved-new")
+    expect(page.locator("#ase-dsn")).to_have_value(dsn)
+    expect(page.locator("#ase-dsn")).to_be_disabled()
+    assert mock.endpoint_calls("connect")[-1]["payload"]["dsn"] == dsn
+    assert not mock.endpoint_calls("disconnect"), "Saved DSN refresh must keep the active session"
+    page.locator("#ase-disconnect").click()
+    mock.data_sources = []
+    mock.data_sources_detail = "DSN 목록을 읽지 못했습니다. ODBC 설정을 확인하세요."
+    page.reload(wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-dsn")).to_have_value(dsn)
+    expect(page.locator("#ase-dsn-help")).to_contain_text(mock.data_sources_detail)
+    assert "등록된 64비트 SAP ASE DSN이 없습니다" not in page.locator("#ase-dsn-help").inner_text()
+    expect(page.locator("#ase-dsn option[value='" + dsn + "']")).to_contain_text("등록 확인 필요")
+    mock.data_sources_detail = ""
+    page.reload(wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-dsn")).to_have_value(dsn)
+    expect(page.locator("#ase-dsn option[value='" + dsn + "']")).to_contain_text("등록되지 않은 DSN")
+    expect(page.locator("#ase-dsn-help")).to_contain_text("등록되어 있지 않습니다")
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new"}
+    page.locator("#ase-profile").select_option("")
+    expect(page.locator("#ase-dsn")).to_have_value("")
+    expect(page.locator("#ase-dsn-help")).to_contain_text("등록된 64비트 SAP ASE DSN이 없습니다")
+    for width in (390, 768, 1440):
+        page.set_viewport_size({"width": width, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"ASE DSN overflow at {width}px"
+    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+    assert page.evaluate("window.__aseXss") is False
+    assert not mock.violations, mock.violations
+
+
+def validate_dsn_case(page, url):
+    """Saved DSN spelling is preserved while registration and driver lookup ignore case."""
+    registered = "TEST_ASE_CASE_DSN"
+    saved_name = registered.lower()
+    driver = "SAP ASE ODBC Driver"
+    profile = {**PROFILES[0], "dsn": saved_name}
+    mock = ASEMock(profiles=[profile], profiles_exist=True, data_sources=[{"name": registered, "driver": driver}])
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-dsn")).to_have_value(saved_name)
+    assert "등록되어 있지 않습니다" not in page.locator("#ase-dsn-help").inner_text()
+    assert "등록되지 않은 DSN" not in page.locator("#ase-dsn option:checked").inner_text()
+    expect(page.locator("#ase-odbc-driver")).to_contain_text(driver)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    expect(page.locator("#ase-dsn")).to_have_value(saved_name)
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "main"}
+    assert not mock.endpoint_calls("disconnect")
+    assert not mock.violations, mock.violations
+
+
 def validate_removed_owner(page, url):
     """A full owner refresh must invalidate a now-missing selected owner's review."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
@@ -1127,11 +1225,14 @@ def main():
         validate_saved_connections(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url, retain_profile=True)
+        validate_saved_profile_race(context.new_page(), args.url, different_dsn=True)
+        validate_dsns(context.new_page(), args.url)
+        validate_dsn_case(context.new_page(), args.url)
         validate_legacy_profile(context.new_page(), args.url)
         validate_driver_status(context.new_page(), args.url)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP ODBC driver/BCP paths and persistent-connection timings, saved manual connections and last-profile selection, fixed-key profile contract, removed owner invalidation, job locks, total/CLI OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: registered DSNs, saved spelling and unavailable choices, DSN discovery/driver diagnostics and session identity, explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP ODBC driver/BCP paths and persistent-connection timings, saved connections, fixed-key profiles, job locks, OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

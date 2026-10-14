@@ -531,3 +531,94 @@ def test_port_suffix_collision_preserves_unrelated_named_profile(tmp_path):
     untouched = next(item for item in public['profiles'] if item['name'] == 'server-sa-5010')
     assert module.decrypt_connection(untouched['id'], path)['connection']['password'] == 'untouched-secret'
     assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data
+
+
+@pytest.mark.parametrize('settings', [{}, {'algorithm': jasypt.AES_ALGORITHM, 'iterations': 32, 'iv_generator': 'random'}])
+def test_optional_dsn_round_trip_preserves_crypto_comments_and_legacy_profiles(tmp_path, settings):
+    module = loader()
+    path = write_profile(tmp_path, settings=settings, name='legacy', database='default-db')
+    original = '# operator comments remain\n' + path.read_text()
+    path.write_text(original)
+    data = {'host': 'ase-host', 'port': 5000, 'user': 'reader', 'password': 'new-db-secret', 'dsn': ' My ASE DSN '}
+    saved = module.save_connection(module.prepare_connection(data, path), path)
+    public = module.public_profiles(path)
+    fresh = next(item for item in public['profiles'] if item['id'] == saved['profile_id'])
+    assert fresh['dsn'] == 'My ASE DSN'
+    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == {**data, 'dsn': 'My ASE DSN'}
+    legacy = next(item for item in public['profiles'] if item['name'] == 'legacy')
+    assert 'dsn' not in legacy
+    assert 'dsn' not in module.decrypt_connection(legacy['id'], path)['connection']
+    assert legacy['database'] == 'default-db'
+    assert path.read_text().startswith(original)
+    assert module.public_profiles(path)['jasypt']['algorithm'] == (settings.get('algorithm') or jasypt.DES_ALGORITHM)
+
+
+def test_dsn_distinguishes_profiles_without_overwriting_direct_or_other_dsn(tmp_path):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    base = {'host': 'server', 'port': 5000, 'user': 'sa', 'password': 'direct-secret'}
+    module.save_connection(module.prepare_connection(base, path), path)
+    one = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN A', 'password': 'dsn-a-secret'}, path), path)
+    two = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN B', 'password': 'dsn-b-secret'}, path), path)
+    updated = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN A', 'password': 'dsn-a-updated'}, path), path)
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 3
+    assert one['profile_name'] == updated['profile_name']
+    assert one['profile_name'] != two['profile_name']
+    direct = next(item for item in public['profiles'] if 'dsn' not in item)
+    dsn_b = next(item for item in public['profiles'] if item.get('dsn') == 'DSN B')
+    assert module.decrypt_connection(direct['id'], path)['connection']['password'] == 'direct-secret'
+    assert module.decrypt_connection(dsn_b['id'], path)['connection']['password'] == 'dsn-b-secret'
+    assert module.decrypt_connection(updated['profile_id'], path)['connection']['password'] == 'dsn-a-updated'
+    assert public['last_profile_id'] == updated['profile_id']
+
+
+@pytest.mark.parametrize('dsn', ['', '   '])
+def test_blank_dsn_is_absent_and_reuses_legacy_connection_identity(tmp_path, dsn):
+    module = loader()
+    path = write_profile(tmp_path)
+    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'updated-secret', 'dsn': dsn}
+    saved = module.save_connection(module.prepare_connection(data, path), path)
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 1 and 'dsn' not in public['profiles'][0]
+    assert 'dsn' not in module.decrypt_connection(saved['profile_id'], path)['connection']
+
+
+@pytest.mark.parametrize('dsn', ['bad\tprivate-dsn', 'bad\x7fprivate-dsn', 'x' * 256, None, 123])
+def test_invalid_manual_dsn_is_sanitized_before_connect_or_save(tmp_path, dsn):
+    path = tmp_path / 'ase-connections.txt'
+    with pytest.raises(ValueError) as exc:
+        loader().prepare_connection({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'dsn': dsn}, path)
+    assert 'private-dsn' not in str(exc.value) and 'db-secret' not in str(exc.value)
+    assert not path.exists()
+
+
+@pytest.mark.parametrize('dsn', ['bad\tprivate-dsn', 'bad\x7fprivate-dsn', 'x' * 256])
+def test_invalid_profile_dsn_is_rejected_without_echo(tmp_path, dsn):
+    path = write_profile(tmp_path, dsn=dsn)
+    with pytest.raises(ValueError) as exc:
+        loader().public_profiles(path)
+    assert 'private-dsn' not in str(exc.value)
+
+
+def test_global_odbc_dsn_is_rejected(tmp_path):
+    path = tmp_path / 'ase-connections.txt'
+    path.write_text('[odbc]\ndsn=global-dsn\n')
+    with pytest.raises(ValueError):
+        loader().public_profiles(path)
+
+
+def test_existing_aes_dsn_profile_update_preserves_database_and_comments(tmp_path):
+    module = loader()
+    settings = {'algorithm': jasypt.AES_ALGORITHM, 'iterations': 32, 'iv_generator': 'random'}
+    path = write_profile(tmp_path, settings=settings, name='custom-old-name', database='default-db', dsn='ASE DSN')
+    path.write_text(path.read_text().replace('[custom-old-name]\n', '[custom-old-name]\n# retained DSN profile comment\n'))
+    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'new-secret', 'dsn': 'ASE DSN'}
+    saved = module.save_connection(module.prepare_connection(data, path), path)
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 1
+    assert public['profiles'][0]['dsn'] == 'ASE DSN' and public['profiles'][0]['database'] == 'default-db'
+    assert saved['profile_name'] == '127.0.0.1-sa'
+    assert '# retained DSN profile comment' in path.read_text()
+    assert '[custom-old-name]' not in path.read_text()
+    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data

@@ -530,3 +530,52 @@ def test_background_disconnect_failures_are_consumed_without_event_loop_errors(t
         await asyncio.sleep(0)
         assert not loop_errors
     asyncio.run(scenario())
+
+
+def test_manual_dsn_connect_persists_and_saved_profile_forwards_same_dsn(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    calls = []
+    def connect(connection):
+        calls.append(dict(connection))
+        return {'session': 'test-session', 'databases': []}
+    monkeypatch.setattr(ase_api.manager, 'connect', connect)
+    data = {'host': 'ase-host', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'dsn': ' My ASE DSN '}
+    with TestClient(app, base_url='http://127.0.0.1:8000') as client:
+        response = client.post('/api/ase/connect', json=data, headers={'X-Nice-Tools': 'ase'})
+        assert response.status_code == 200
+        saved = response.json()
+        public = client.get('/api/ase/profiles').json()
+        assert public['profiles'][0]['dsn'] == 'My ASE DSN'
+        response = client.post('/api/ase/connect', json={'profile_id': saved['profile_id']}, headers={'X-Nice-Tools': 'ase'})
+        assert response.status_code == 200
+    assert [connection['dsn'] for connection in calls] == ['My ASE DSN', 'My ASE DSN']
+    assert 'db-secret' not in path.read_text() and 'db-secret' not in response.text
+
+
+def test_failed_dsn_login_never_persists_configuration(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles
+    path = tmp_path / 'ase-connections.txt'
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    calls = []
+    def fail(connection):
+        calls.append(connection)
+        raise ValueError('ASE 접속 실패')
+    monkeypatch.setattr(ase_api.manager, 'connect', fail)
+    data = {'host': 'ase-host', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'dsn': 'ASE DSN'}
+    response = asyncio.run(ase_api.operation(ConnectRequest(data), 'connect'))
+    assert response.status_code == 400 and calls[0]['dsn'] == 'ASE DSN'
+    assert not path.exists()
+
+
+@pytest.mark.parametrize('dsn', [None, 123, 'bad\tprivate-dsn', 'bad\x7fprivate-dsn', 'x' * 256])
+def test_bad_api_dsn_cannot_start_driver_or_echo_secret(tmp_path, monkeypatch, dsn):
+    from nice_tools import ase_api, ase_profiles
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: tmp_path / 'ase-connections.txt')
+    calls = []
+    monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: calls.append(connection) or {'session': 'unused'})
+    data = {'host': 'ase-host', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'dsn': dsn}
+    response = asyncio.run(ase_api.operation(ConnectRequest(data), 'connect'))
+    assert response.status_code == 400 and not calls
+    assert 'private-dsn' not in response.body.decode() and 'db-secret' not in response.body.decode()

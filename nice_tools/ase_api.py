@@ -144,7 +144,7 @@ async def operation(request: Request, operation: str):
                     result["database"] = selected["database"]
                 save_function, save_arguments = remember_connection, (data.get("profile_id"),)
             else:
-                if set(data) - {"host", "port", "user", "password"}:
+                if set(data) - {"host", "port", "user", "password", "dsn"}:
                     raise ValueError("서버 주소·포트·사용자·DB 비밀번호를 입력하세요.")
                 prepared = await run_in_threadpool(prepare_connection, data)
                 result = await _connect_for_request(request, prepared["connection"])

@@ -45,6 +45,13 @@ def connection_data(value):
             minimum = 0 if key == "password" else 1
             raise ValueError(f"{label}는 UTF-8 기준 {minimum}~255바이트로 입력하세요.")
         result[key] = text
+    if "dsn" in value:
+        dsn = value["dsn"]
+        if (not isinstance(dsn, str) or len(dsn) > 255
+                or any(ord(char) < 32 or ord(char) == 127 for char in dsn)):
+            raise ValueError("ODBC DSN은 제어 문자 없이 255자 이내로 입력하세요.")
+        if dsn.strip():
+            result["dsn"] = dsn.strip()
     return result
 
 

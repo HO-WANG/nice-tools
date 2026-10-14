@@ -119,6 +119,31 @@ def test_transfer_rechecks_full_schema_before_calling_bcp(clients, tmp_path):
     assert fake.calls == []
 
 
+def test_dsn_is_preserved_for_fresh_schema_check_with_explicit_bcp_endpoint(clients, tmp_path):
+    module, fake = clients
+    result = module.run_operation(payload("transfer", connection={**CONNECTION, "dsn": " ASE_UAT "},
+                                         path=str(tmp_path / "data.bcp"), columns=COLUMNS,
+                                         options={"direction": "out"}))
+    assert result["rows"] == 3
+    assert fake.metadata_calls[0]["connection"]["dsn"] == "ASE_UAT"
+    assert fake.metadata_calls[0]["connection"]["host"] == CONNECTION["host"]
+    assert fake.metadata_calls[0]["connection"]["port"] == CONNECTION["port"]
+    assert "NLWNSCK,ase.internal,5000" in fake.calls[0]["ini"]
+    assert "ASE_UAT" not in fake.calls[0]["ini"]
+    assert "ASE_UAT" not in fake.calls[0]["argv"]
+
+
+@pytest.mark.parametrize("dsn", [None, 1, "x" * 256, "ASE\n", "\tASE", "ASE\x00DSN", "ASE\x7fDSN"])
+def test_transfer_rejects_invalid_dsn_before_schema_or_bcp(clients, tmp_path, dsn):
+    module, fake = clients
+    with pytest.raises(ValueError, match="DSN"):
+        module.run_operation(payload("transfer", connection={**CONNECTION, "dsn": dsn},
+                                     path=str(tmp_path / "data.bcp"), columns=COLUMNS,
+                                     options={"direction": "out"}))
+    assert fake.metadata_calls == []
+    assert fake.calls == []
+
+
 @pytest.mark.parametrize("encoding,sap_name", [("utf-8", "utf8"), ("cp949", "cp949"), ("euc-kr", "eucksc")])
 def test_out_calls_sap_bcp_character_mode_and_reports_copy_time(clients, tmp_path, encoding, sap_name):
     module, fake = clients

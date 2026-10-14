@@ -12,6 +12,8 @@ bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
 
 # Optional: exact SAP ASE driver name from the Windows 64-bit ODBC administrator.
 # Remove this section to select a registered SAP ASE driver automatically.
+# With dsn, this name must match that DSN's registered driver; otherwise reject.
+# It never overrides the driver supplied by the DSN connection string.
 [odbc]
 driver = Adaptive Server Enterprise
 
@@ -28,6 +30,10 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 database = appdb
+# Optional: exact registered 64-bit SAP ASE user/system DSN name.
+# DSN supplies driver/charset/default database/security settings. Explicit
+# host/port/user/password remain the endpoint and credentials used by BCP.
+# dsn = ASE_UAT
 
 [ase-test.example.internal-bcp_user]
 host = ase-test.example.internal
@@ -35,6 +41,7 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 # database is optional.
+# dsn = ASE_UAT
 
 [preferences]
 # Updated automatically after a successful connection.

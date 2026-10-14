@@ -27,7 +27,7 @@ RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences", "odbc"}
 CLIENT_FIELDS = {"isql_path", "bcp_path"}
 SAVE_ERROR = "접속은 성공했지만 연결 정보를 저장하지 못했습니다. 설정 파일의 형식·권한과 변경 여부를 확인하세요."
 _SAVE_LOCK = threading.RLock()
-PROFILE_FIELDS = {"host", "port", "user", "password", "database"}
+PROFILE_FIELDS = {"host", "port", "user", "password", "database", "dsn"}
 REQUIRED_FIELDS = {"host", "port", "user", "password"}
 CONFIG_ERROR = (
     "ase-connections.txt의 형식이 올바르지 않습니다. 프로필의 host·port·user·password=ENC(...)와 "
@@ -172,11 +172,12 @@ def _load(path: Path | None) -> dict:
                 raise ValueError(CONFIG_ERROR)
             connection = connection_data({"host": values["host"].strip(),
                                           "port": int(values["port"].strip()),
-                                          "user": values["user"].strip(), "password": ""})
+                                          "user": values["user"].strip(), "password": "",
+                                          **({"dsn": values["dsn"]} if "dsn" in values else {})})
         except (ValueError, UnicodeError):
             raise ValueError(CONFIG_ERROR) from None
         public = {"id": hashlib.sha256(raw + b"\x00" + name.encode("utf-8")).hexdigest(),
-                  "name": name, **{key: connection[key] for key in ("host", "port", "user")}}
+                  "name": name, **{key: connection[key] for key in ("host", "port", "user", "dsn") if key in connection}}
         database = values.get("database", "").strip()
         if database:
             if len(database) > 255:
@@ -210,7 +211,7 @@ def decrypt_connection(profile_id: str, path: Path | None = None) -> dict:
         connection = connection_data({**metadata, "password": password})
     except (ValueError, TypeError, UnicodeError):
         raise ValueError(DECRYPT_ERROR) from None
-    result = {"connection": {key: connection[key] for key in ("host", "port", "user", "password")},
+    result = {"connection": {key: connection[key] for key in ("host", "port", "user", "password", "dsn") if key in connection},
               "profile_name": metadata["name"]}
     if "database" in metadata:
         result["database"] = metadata["database"]
@@ -242,7 +243,7 @@ def prepare_connection(connection: dict, path: Path | None = None) -> dict:
     validated = connection_data(connection)
     if any(char in validated["user"] for char in "\r\n"):
         raise ValueError("사용자 이름에는 줄바꿈을 사용할 수 없습니다.")
-    data = {key: validated[key] for key in ("host", "port", "user", "password")}
+    data = {key: validated[key] for key in ("host", "port", "user", "password", "dsn") if key in validated}
     # Corrupt user data must not block a manual login or be overwritten. Use
     # default metadata; the eventual save still rejects this file.
     try:
@@ -322,9 +323,13 @@ def _saved_result(name: str, path: Path | None) -> dict:
     return {"saved": True, "profile_id": profile["id"], "profile_name": name}
 
 
+def _connection_identity(connection: dict) -> tuple:
+    return tuple(connection[key] for key in ("host", "port", "user")) + (connection.get("dsn", ""),)
+
+
 def _canonical_name(connection: dict, profiles: list[dict], existing: dict | None) -> str:
     """Use host-account, escaping INI delimiters and resolving endpoint collisions."""
-    identity = tuple(connection[key] for key in ("host", "port", "user"))
+    identity = _connection_identity(connection)
     digest = hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
     base = f"{connection['host']}-{connection['user']}"
     base = base.replace("%", "%25").replace("[", "%5B").replace("]", "%5D")
@@ -367,15 +372,15 @@ def save_connection(prepared: dict, path: Path | None = None) -> dict:
         if document["settings"] != prepared["settings"]:
             raise ValueError(SAVE_ERROR)
         connection = prepared["connection"]
-        identity = tuple(connection[key] for key in ("host", "port", "user"))
+        identity = _connection_identity(connection)
         existing = next((item["public"] for item in document["profiles"]
-                         if tuple(item["public"][key] for key in ("host", "port", "user")) == identity), None)
+                         if _connection_identity(item["public"]) == identity), None)
         if existing is None and len(document["profiles"]) >= MAX_PROFILES:
             raise ValueError(SAVE_ERROR)
         name = _canonical_name(connection, document["profiles"], existing)
         original = (_rename_section(document["text"], existing["name"], name)
                     if existing else document["text"])
-        values = {key: connection[key] for key in ("host", "port", "user")}
+        values = {key: connection[key] for key in ("host", "port", "user", "dsn") if key in connection}
         values["password"] = prepared["ciphertext"]
         text = _update_section(original, name, values)
         text = _update_section(text, "preferences", {"last_profile": name})

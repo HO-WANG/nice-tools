@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import hashlib
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -32,6 +33,17 @@ def sanitized_error(result, *secrets):
     return result["detail"]
 
 
+def data_source_checks(odbc):
+    sources = odbc.get("data_sources")
+    assert isinstance(sources, list), "Missing native ODBC DSN discovery metadata"
+    for source in sources:
+        assert isinstance(source, dict) and set(source) == {"name", "driver"}, "Unexpected DSN metadata fields"
+        assert isinstance(source["name"], str) and source["name"], "Invalid DSN name metadata"
+        assert isinstance(source["driver"], str) and source["driver"], "Invalid DSN driver metadata"
+    assert len({source["name"] for source in sources}) == len(sources), "Duplicate DSN discovery entries"
+    return sources
+
+
 def ase_checks(base):
     with urllib.request.urlopen(f"{base}/api/ase/status", timeout=30) as response:
         assert response.headers["Cache-Control"] == "no-store"
@@ -46,6 +58,7 @@ def ase_checks(base):
     assert '접속 정보가 만료' in sanitized_error(missing_session), 'All-owner object search did not reach session validation'
     assert isinstance(status.get("available"), bool), status
     assert "FreeTDS" not in str(status), "Obsolete native driver remains in client status"
+    data_source_checks(status["odbc"])
     print("ASE HTTP smoke: ODBC/SAP BCP discovery and optional-owner session validation passed.")
 
 
@@ -101,11 +114,16 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         assert (clients / 'bcp.exe').is_file(), 'Missing external developer BCP console fixture'
         client_section = f'[sap_client]\nbcp_path = {clients / "bcp.exe"}\n\n'
     invalid_driver = 'NiceToolsFixtureMissingDriver-65046'
+    existing_sources = data_source_checks(json_request(base, '/api/ase/status')['odbc'])
+    invalid_dsn = 'NiceToolsMissingDSN-' + hashlib.sha256(str(directory).encode()).hexdigest()[:8]
+    assert invalid_dsn not in {source['name'] for source in existing_sources}, 'The isolated invalid DSN unexpectedly exists'
     config = (client_section + f'[odbc]\ndriver = {invalid_driver}\n\n'
               '[jasypt]\nalgorithm = PBEWithMD5AndDES\niterations = 1000\n'
               'salt_generator = random\niv_generator = none\noutput_type = base64\n\n'
               '[패키지 검사 서버]\nhost = fixture.internal\nport = 5000\n'
-              f'user = smoke\npassword = {encrypted}\ndatabase = fixture_db\n')
+              f'user = smoke\npassword = {encrypted}\ndatabase = fixture_db\n\n'
+              '[패키지 검사 DSN]\nhost = fixture.internal\nport = 5000\n'
+              f'user = smoke\npassword = {encrypted}\ndatabase = fixture_db\ndsn = {invalid_dsn}\n')
     created = False
     try:
         with location.open('x', encoding='utf-8', newline='\n') as output:
@@ -116,13 +134,17 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         rendered = json.dumps(profiles, ensure_ascii=False)
         assert not any(value in rendered for value in (encrypted, encrypted[4:-1], password, fixed_key))
         assert profiles['odbc'] == {'driver': invalid_driver}
-        assert len(profiles['profiles']) == 1
-        profile = profiles['profiles'][0]
+        assert len(profiles['profiles']) == 2
+        profile = next(item for item in profiles['profiles'] if item['name'] == '패키지 검사 서버')
         assert set(profile) == {'id', 'name', 'host', 'port', 'user', 'database'}
         assert profile['name'] == '패키지 검사 서버' and profile['database'] == 'fixture_db'
+        dsn_profile = next(item for item in profiles['profiles'] if item['name'] == '패키지 검사 DSN')
+        assert set(dsn_profile) == {'id', 'name', 'host', 'port', 'user', 'database', 'dsn'}
+        assert dsn_profile['name'] == '패키지 검사 DSN' and dsn_profile['dsn'] == invalid_dsn
         status = json_request(base, '/api/ase/status')
         odbc = status['odbc']
         assert isinstance(odbc['drivers'], list) and odbc['available'] is False
+        data_source_checks(odbc)
         if require_odbc:
             assert odbc['module_available'] is True, 'The actual pyodbc native extension did not load'
             assert odbc['version'] == '5.3.0', 'The pinned native pyodbc extension did not load'
@@ -134,19 +156,25 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
                               'user': 'other', 'password': password}, 400)
         assert 'ODBC' in sanitized_error(manual, password), 'Manual login did not reach native ODBC validation'
+        dsn_refused = json_request(base, '/api/ase/connect', {'profile_id': dsn_profile['id']}, 400)
+        assert 'DSN' in sanitized_error(dsn_refused, password, fixed_key, encrypted, encrypted[4:-1]), 'Saved DSN did not reach native DSN validation'
+        dsn_manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
+                                  'user': 'other', 'password': password, 'dsn': invalid_dsn}, 400)
+        assert 'DSN' in sanitized_error(dsn_manual, password), 'Manual DSN did not reach native DSN validation'
         assert location.read_text(encoding='utf-8-sig') == config, 'A failed login persisted a new profile'
         if executable is not None:
             from verify_bundle import odbc_worker_checks
-            odbc_worker_checks(executable, directory, password, require_odbc)
+            odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn)
         # A legacy ciphertext encrypted with another key must fail before ODBC.
         location.write_text(config.replace(encrypted, bad_cipher), encoding='utf-8')
-        stale = json_request(base, '/api/ase/profiles')['profiles'][0]
+        stale = next(item for item in json_request(base, '/api/ase/profiles')['profiles'] if item['name'] == '패키지 검사 서버')
         wrong = json_request(base, '/api/ase/connect', {'profile_id': stale['id']}, 400)
         assert '복호화' in sanitized_error(wrong, password, fixed_key, incompatible_key, bad_cipher, bad_cipher[4:-1])
     finally:
         if created:
             location.unlink()
-    print('ASE EXE smoke: fixed-key profile decryption, native ODBC discovery/invalid-driver errors, failed-login nonpersistence and incompatible-ciphertext handling passed; no live ASE login tested.')
+    target = 'actual Windows EXE' if require_odbc else 'development process'
+    print(f'ASE {target} smoke: fixed-key profiles, real pyodbc driver/DSN discovery and invalid-driver/DSN errors, failed-login nonpersistence and incompatible-ciphertext handling passed; no live ASE login tested.')
 
 
 def encoding_checks(base):

@@ -118,10 +118,18 @@ def _connection(raw):
         value = raw.get(key)
         if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value) or (key == "user" and not value):
             raise AseClientError("The ASE login settings are invalid.")
-    return {"host": host, "port": _id(raw.get("port", 5000), "port", 1, 65535),
-            "user": raw["user"], "password": raw["password"],
-            "login_timeout": _id(raw.get("login_timeout", 15), "login timeout", 1),
-            "query_timeout": _id(raw.get("query_timeout", 60), "query timeout", 1)}
+    result = {"host": host, "port": _id(raw.get("port", 5000), "port", 1, 65535),
+              "user": raw["user"], "password": raw["password"],
+              "login_timeout": _id(raw.get("login_timeout", 15), "login timeout", 1),
+              "query_timeout": _id(raw.get("query_timeout", 60), "query timeout", 1)}
+    if "dsn" in raw:
+        dsn = raw["dsn"]
+        if (not isinstance(dsn, str) or len(dsn) > 255
+                or any(ord(char) < 32 or ord(char) == 127 for char in dsn)):
+            raise AseClientError("The ODBC DSN must be text up to 255 characters without controls.")
+        if dsn.strip():
+            result["dsn"] = dsn.strip()
+    return result
 
 
 def _has_error(text):

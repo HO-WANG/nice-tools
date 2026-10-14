@@ -13,7 +13,7 @@ import threading
 import json
 from pathlib import Path
 
-from smoke import main as smoke_main
+from smoke import data_source_checks, main as smoke_main
 
 
 def validate_windows_x64(path: Path):
@@ -95,15 +95,19 @@ def worker_request(executable, payload, directory, expect_error=False):
     return results[0]
 
 
-def odbc_worker_checks(executable, directory, password, require_odbc):
+def odbc_worker_checks(executable, directory, password, require_odbc, invalid_dsn):
     """Load real frozen pyodbc; never simulate catalog success without ASE."""
     connection = {"host": "fixture.internal", "port": 5000, "user": "smoke", "password": password}
     status = worker_request(executable, {"operation": "status", "connection": connection}, directory)
+    data_source_checks(status["odbc"])
     if require_odbc:
         assert status["odbc"]["module_available"] is True, "Frozen worker could not import native pyodbc"
         assert status["odbc"]["version"] == "5.3.0", "Frozen worker did not load pinned native pyodbc"
     events = worker_request(executable, {"operation": "databases", "connection": connection}, directory, expect_error=True)
     assert any("ODBC" in event.get("detail", "") for event in events), "Worker did not report invalid ODBC driver"
+    dsn_connection = {**connection, "dsn": invalid_dsn}
+    dsn_events = worker_request(executable, {"operation": "databases", "connection": dsn_connection}, directory, expect_error=True)
+    assert any("DSN" in event.get("detail", "") for event in dsn_events), "Frozen worker lost the selected DSN"
     target = Path(directory) / "한글 preserved.bcp"
     target.write_bytes(b"existing destination\n")
     stage = Path(directory) / ".nice-tools-smoke-out.bcp"
@@ -111,15 +115,18 @@ def odbc_worker_checks(executable, directory, password, require_odbc):
     obj = {"database": "fixture_db", "owner": "dbo", "owner_id": 7, "id": 42, "name": "orders", "kind": "U"}
     columns = [{"position": 1, "name": "id", "type_id": 56, "type_name": "int", "length": 4,
                 "precision": 0, "scale": 0, "nullable": False, "identity": False}]
-    worker_request(executable, {"operation": "transfer", "connection": connection, "object": obj,
+    transfer_events = worker_request(executable, {"operation": "transfer", "connection": dsn_connection, "object": obj,
                    "path": str(target), "stage_path": str(stage), "defer_publish": True,
                    "columns": columns, "options": {"direction": "out", "encoding": "utf-8"},
                    "out_target_fingerprint": {"exists": True, "size": target.stat().st_size,
                                               "mtime_ns": target.stat().st_mtime_ns}}, directory, expect_error=True)
+    if status.get("bcp_available") is True:
+        assert any("DSN" in event.get("detail", "") for event in transfer_events), "Fresh transfer schema check lost the selected DSN"
     assert target.read_bytes() == b"existing destination\n", "ODBC schema failure replaced an existing export"
     assert not stage.exists(), "ODBC schema failure retained reserved staging"
     target.unlink()
-    print("Frozen ODBC worker smoke: native extension/discovery, sanitized missing-driver errors and export preservation passed; no live ASE transfer tested.")
+    target = "Frozen Windows" if require_odbc else "Development"
+    print(f"{target} ODBC worker smoke: real native extension/driver/DSN discovery, sanitized invalid-DSN errors and export preservation passed; no live ASE transfer tested.")
 
 
 def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path | None = None):

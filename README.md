@@ -147,6 +147,7 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
 
 1. PC에 **64비트 SAP ASE ODBC 드라이버**가 설치되어 있는지 확인합니다. 파일 전송에는 SAP `bcp.exe`도 준비합니다.
    왼쪽 **ASE / BCP** 메뉴에서 **직접 입력**을 선택하고 호스트, 포트(기본 5000), 사용자와 DB 비밀번호로 연결합니다.
+   기존 ODBC 설정을 사용하려면 선택 사항인 **DSN** 목록에서 등록된 SAP ASE DSN을 선택합니다.
    성공한 접속 정보를 암호화해 자동 저장합니다. 이미 저장된 서버는 선택 후 **연결**을 누릅니다.
    접속 정보 암호화·복호화는 앱의 고정 키 `nice1234!!`를 사용하며 키 입력창은 없습니다.
 2. 데이터베이스를 선택합니다. 소유자는 기본 **전체 소유자**이며 선택하지 않아도 됩니다.
@@ -252,7 +253,16 @@ OUT → IN과 문자셋·IDENTITY·LOB·날짜의 행 수와 내용을 확인하
 ODBC 드라이버는 Windows에 등록된 SAP ASE 드라이버에서 자동 선택합니다.
 여러 드라이버 중 원하는 버전을 쓰려면 `[odbc] driver`에 **64비트 ODBC 관리자에 표시된 드라이버 이름**을 지정합니다.
 아래 드라이버 이름은 예시입니다. 실제 등록 이름과 일치해야 하며 명시한 이름이 없으면 연결을 거절합니다.
-DSN을 따로 만들 필요 없이 호스트·포트·사용자·비밀번호로 연결합니다.
+DSN을 생략하면 기존처럼 호스트·포트·사용자·비밀번호로 연결합니다.
+
+PC의 기존 ODBC 설정을 사용할 때는 **DSN** 목록에서 선택하거나 서버 구역에 `dsn = ASE_UAT`처럼 지정합니다.
+목록은 앱과 같은 비트수인 Windows 64비트의 사용자·시스템 DSN 중 등록된 SAP ASE 드라이버를 사용하는 항목입니다.
+DSN 이름은 실제 PC의 등록 이름과 일치해야 합니다. 선택한 DSN이 없거나 지원되지 않으면 다른 방식으로 대체하지 않습니다.
+DSN 연결은 `DSN`과 화면의 서버 주소·포트·계정·비밀번호만 전달합니다. 드라이버·문자셋·기본 DB·기타 연결 설정은
+DSN에서 읽습니다. 서버 주소·포트·계정·비밀번호는 화면 값으로 명시하여 BCP 대상과 일치시킵니다.
+실제 드라이버는 DSN에서 선택합니다. 전역 `[odbc] driver`도 지정했다면 DSN에 등록된 드라이버 이름과 일치해야 하며
+다르면 연결을 거절합니다. `DRIVER`, `DATABASE`, `CHARSET` 값은 연결 문자열에 추가하지 않습니다.
+DSN 선택도 접속 성공 시 프로필에 저장하며, `database` 항목은 연결 후 화면에서 먼저 선택할 DB를 뜻합니다.
 
 BCP는 `PATH`, 이어서 `SYBASE`·`SYBASE_OCS`에서 찾습니다. 직접 지정하려면 `[sap_client] bcp_path`를 설정합니다.
 실제 `bcp.exe`의 절대 경로를 쓰며 공백이 있어도 따옴표를 붙이지 않습니다.
@@ -279,6 +289,8 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 database = appdb
+# Optional: use an existing registered SAP ASE DSN.
+# dsn = ASE_UAT
 
 [preferences]
 last_profile = ase-dev.example.internal-bcp_user
@@ -288,7 +300,7 @@ last_profile = ase-dev.example.internal-bcp_user
 Jasypt 도구에서 DB 비밀번호를 원문, `nice1234!!`를 비밀번호로 넣고 기본 MD5/DES 설정으로 Encrypt하여
 나온 `ENC(...)` 전체를 `password`에 붙여 넣습니다. 평문 DB 비밀번호를 파일에 쓰지 않습니다.
 `PASTE_JASYPT_RESULT_HERE`는 자리 표시자이며 실제 암호문으로 교체해야 합니다.
-서버 구역에는 `host`, `port`, `user`, `password`가 필수이고 `database`는 선택 사항입니다.
+서버 구역에는 `host`, `port`, `user`, `password`가 필수이고 `database`, `dsn`은 선택 사항입니다.
 `[preferences] last_profile`은 마지막 성공한 서버 구역 이름이며 앱이 갱신합니다.
 
 `[jasypt]` 설정은 모든 서버 비밀번호에 공통 적용됩니다. 생략하면 MD5/DES, 반복 1,000회,
@@ -388,7 +400,7 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 업로드 요청도 검증하며 Windows x64 PE 헤더를 확인합니다.
 서로 다른 인코딩의 동일 텍스트와 10 MiB 이후 CP949 한글 diff를 확인합니다.
 Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개 및 MD5/DES 기본값도 실제 EXE에서 검사합니다.
-ASE는 실제 EXE에서 `pyodbc` 5.3.0의 네이티브 확장과 드라이버 목록 조회, 미등록 드라이버의 오류,
+ASE는 실제 EXE에서 `pyodbc` 5.3.0의 네이티브 확장과 드라이버·사용자/시스템 DSN 목록 조회, 미등록 드라이버·DSN의 오류,
 고정 키 프로필의 해석·복호화와 연결 실패 시 미저장, 격리 worker의 스키마 실패 시 기존 OUT 파일 보존을 확인합니다.
 Windows native 소스 검사는 개발용 BCP PE 클라이언트로 콘솔 비밀번호 입력과 프로세스 제어를 확인합니다.
 성공한 ODBC 조회·프로필 저장·IN/OUT과 취소 제어는 소스 mock 검사로 확인하며
