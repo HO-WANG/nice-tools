@@ -323,6 +323,10 @@ class _WindowsConsole:
                 raise OSError("SAP 콘솔 프로세스 속성을 설정하지 못했습니다.")
             startup = StartupInfoEx()
             startup.StartupInfo.cb = ctypes.sizeof(startup)
+            # Match Microsoft's Terminal ConPTY launcher: explicitly NULL standard
+            # handles prevent a redirected parent (or GUI worker) from supplying
+            # its capture pipes instead of the newly attached console's handles.
+            startup.StartupInfo.dwFlags = 0x00000100  # STARTF_USESTDHANDLES
             startup.lpAttributeList = ctypes.cast(attributes, ctypes.c_void_p)
             command = ctypes.create_unicode_buffer(windows_command_line(argv))
             # CREATE_SUSPENDED + EXTENDED_STARTUPINFO_PRESENT: no client code or
@@ -393,19 +397,9 @@ class _WindowsConsole:
         if not available.value:
             if self.poll() is not None:
                 self._start_console_close()
-                closing = self._console_close_thread
-                if closing is not None and not closing.is_alive():
-                    # The final flush may have arrived between the first empty
-                    # Peek and completed ClosePseudoConsole. Drain it before EOF.
-                    # A valid but empty pipe need not report BROKEN_PIPE here.
-                    if not self.kernel.PeekNamedPipe(self.output, None, 0, None, ctypes.byref(available), None):
-                        if ctypes.get_last_error() in (109, 232):
-                            return None
-                        raise OSError("SAP 콘솔 출력을 확인하지 못했습니다.")
-                    if not available.value:
-                        return None
-            if not available.value:
-                return b""
+            # On Windows 11 24H2 ClosePseudoConsole returns before conhost's final
+            # output. Only a broken pipe proves the entire terminal stream ended.
+            return b""
         buffer = ctypes.create_string_buffer(min(available.value, 8192))
         received = wintypes.DWORD()
         if not self.kernel.ReadFile(self.output, buffer, len(buffer), ctypes.byref(received), None):

@@ -9,6 +9,7 @@ from collections import deque
 import math
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -16,8 +17,36 @@ import threading
 
 
 def annotation(message):
-    encoded = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-    print("::error::" + encoded, flush=True)
+    # GitHub truncates a single public annotation around 4 KiB. Keep each part
+    # below that limit so a traceback cannot hide the final failed-test summary.
+    parts = []
+    current = []
+    size = 0
+    for character in message:
+        escaped = {"%": "%25", "\r": "%0D", "\n": "%0A"}.get(character, character)
+        width = len(escaped.encode("utf-8"))
+        if size + width > 2800:
+            parts.append("".join(current))
+            current = []
+            size = 0
+        current.append(escaped)
+        size += width
+    if current:
+        parts.append("".join(current))
+    for index, part in enumerate(parts, start=1):
+        prefix = f"Diagnostic {index}/{len(parts)}: " if len(parts) > 1 else ""
+        print("::error::" + prefix + part, flush=True)
+
+
+def terminate(process, guard):
+    if guard is not None:
+        guard.terminate()
+    elif os.name == "nt":
+        # Job creation may fail before the suspended child has an owner. Kill
+        # that exact process and preserve the original setup failure.
+        process.kill()
+    else:
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 def run(timeout, pytest_args):
@@ -60,13 +89,15 @@ def run(timeout, pytest_args):
             exit_code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
-            if guard is not None:
-                guard.terminate()
-            else:
-                os.killpg(process.pid, signal.SIGKILL)
+            terminate(process, guard)
             process.wait(timeout=10)
             exit_code = 1
         reader.join(timeout=5)
+        if exit_code:
+            summary = [line for line in list(tail) if line.startswith(("FAILED ", "ERROR "))
+                       or re.search(r"\b\d+ (?:failed|passed|skipped)\b.*\bin [0-9.]+s\b", line)]
+            if summary:
+                annotation("Source test summary:\n" + "".join(summary))
         if timed_out:
             annotation(f"Source tests exceeded {timeout:g} seconds. Last captured output:\n" + "".join(tail))
         elif exit_code:
@@ -76,7 +107,7 @@ def run(timeout, pytest_args):
         if guard is not None:
             guard.close()
         elif process.poll() is None:
-            os.killpg(process.pid, signal.SIGKILL)
+            terminate(process, guard)
         process.wait(timeout=10)
         if reader is not None:
             reader.join(timeout=5)

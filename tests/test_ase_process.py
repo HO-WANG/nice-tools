@@ -322,7 +322,10 @@ def finished_console(peeks, final_bytes=b""):
 
         def PeekNamedPipe(self, handle, buffer, length, read, available, left):
             self.peek_calls += 1
-            available._obj.value = self.peeks.pop(0)
+            count = self.peeks.pop(0)
+            if count is None:
+                return False
+            available._obj.value = count
             return True
 
         def ReadFile(self, handle, buffer, length, received, overlapped):
@@ -343,15 +346,42 @@ def finished_console(peeks, final_bytes=b""):
     return console
 
 
-def test_finished_console_returns_eof_even_when_empty_reader_pipe_stays_open():
+def test_finished_console_keeps_waiting_while_empty_reader_pipe_stays_open():
     console = finished_console([0, 0])
-    assert console.read() is None
+    assert console.read() == b""
+    assert console.read() == b""
     assert console.kernel.peek_calls == 2
 
 
-def test_finished_console_rechecks_pipe_for_final_flush_before_eof():
+def test_finished_console_drains_late_flush_before_broken_pipe_eof(monkeypatch):
+    from nice_tools import ase_process
+
+    monkeypatch.setattr(ase_process.ctypes, "get_last_error", lambda: 109, raising=False)
     final = b"3 rows copied.\n"
-    console = finished_console([0, len(final), 0, 0], final)
+    console = finished_console([0, len(final), None], final)
+    assert console.read() == b""
     assert console.read() == final
     assert console.read() is None
-    assert console.kernel.peek_calls == 4
+    assert console.kernel.peek_calls == 3
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Requires Windows parent with redirected standard handles")
+def test_windows_owned_console_does_not_inherit_redirected_parent_stdio(tmp_path):
+    import subprocess
+
+    argv = client(tmp_path, "pw=password()\nprint('MATCH:' + str(pw == 'private'), flush=True)\n")
+    parent_code = (
+        "import json; from nice_tools.ase_process import run_client; "
+        "result=run_client(" + repr(argv) + ", 'private', timeout=8); "
+        "print(json.dumps(result))"
+    )
+    parent = subprocess.run(
+        [sys.executable, "-c", parent_code], input="", stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, encoding="utf-8", timeout=15,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    assert parent.returncode == 0, parent.stderr
+    result = json.loads(parent.stdout)
+    assert result["returncode"] == 0
+    assert "Password:" in result["stdout"]
+    assert "MATCH:True" in result["stdout"]
