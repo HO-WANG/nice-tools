@@ -1,6 +1,7 @@
 """Loopback-only JSON boundary for ASE database and local-file operations."""
 
 from urllib.parse import urlsplit
+import asyncio
 import json
 
 from fastapi import APIRouter, Request
@@ -11,6 +12,38 @@ from .ase_jobs import manager, object_data
 
 router = APIRouter(prefix="/api/ase")
 HEADERS = {"Cache-Control": "no-store"}
+
+
+def _discard_connected_session(task):
+    try:
+        result = task.result()
+    except (Exception, asyncio.CancelledError):
+        # Retrieve late failures so cancelled requests cannot leave unhandled
+        # task errors, including errors whose details contain credentials.
+        return
+    try:
+        manager.disconnect(result["session"])
+    except Exception:
+        # The session may already have been removed by shutdown/another cleanup.
+        # Preserve the original request error or cancellation without logging.
+        pass
+
+
+async def _connect_for_request(request, connection):
+    task = asyncio.create_task(run_in_threadpool(manager.connect, connection))
+    try:
+        result = await asyncio.shield(task)
+        if await request.is_disconnected():
+            raise ValueError("접속 요청이 종료되었습니다. 다시 접속하세요.")
+        return result
+    except asyncio.CancelledError:
+        # Native work continues in its thread. Own its eventual session until
+        # completion, including cancellation during the disconnect check.
+        task.add_done_callback(_discard_connected_session)
+        raise
+    except Exception:
+        _discard_connected_session(task)
+        raise
 
 
 def local_request(request, mutation=True):
@@ -38,6 +71,22 @@ async def status(request: Request):
         return JSONResponse({"available": False, "detail": "ASE 드라이버 상태를 확인하지 못했습니다."}, headers=HEADERS)
 
 
+@router.get("/profiles")
+async def profiles(request: Request):
+    try:
+        local_request(request, mutation=False)
+        from .ase_profiles import public_profiles
+
+        result = await run_in_threadpool(public_profiles)
+        return JSONResponse(result, headers=HEADERS)
+    except PermissionError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=403, headers=HEADERS)
+    except ValueError as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=400, headers=HEADERS)
+    except OSError:
+        return JSONResponse({"detail": "연결 설정 파일을 읽지 못했습니다."}, status_code=400, headers=HEADERS)
+
+
 @router.post("/{operation}")
 async def operation(request: Request, operation: str):
     try:
@@ -49,7 +98,18 @@ async def operation(request: Request, operation: str):
             raise ValueError("입력 형식이 올바르지 않습니다.")
         session = data.get("session")
         if operation == "connect":
-            result = await run_in_threadpool(manager.connect, data)
+            if "profile_id" in data:
+                if set(data) - {"profile_id", "master_password"}:
+                    raise ValueError("저장된 서버는 선택한 설정과 Jasypt 키로 연결하세요.")
+                from .ase_profiles import decrypt_connection
+
+                selected = await run_in_threadpool(decrypt_connection, data.get("profile_id"), data.get("master_password"))
+                result = await _connect_for_request(request, selected["connection"])
+                result["profile_name"] = selected["profile_name"]
+                if selected.get("database"):
+                    result["database"] = selected["database"]
+            else:
+                result = await _connect_for_request(request, data)
         elif operation in ("owners", "objects"):
             database = data.get("database")
             if not isinstance(database, str) or not database or "\x00" in database or len(database) > 255:

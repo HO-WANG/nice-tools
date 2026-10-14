@@ -132,7 +132,7 @@ def file_diff(path: str, left: bytes | None, right: bytes | None, options: Compa
         try:
             contents.append(normalize_lines(content, options) if content is not None else [])
         except UnicodeDecodeError:
-            raise ValueError(f"{label}: UTF-8로 읽을 수 없습니다.") from None
+            raise ValueError(f"{label}: 텍스트 인코딩을 인식할 수 없습니다.") from None
         except ValueError as exc:
             raise ValueError(f"{label}: {exc}") from None
     old, new = contents

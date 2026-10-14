@@ -53,7 +53,7 @@
                 <label class="folder-card" for="right-folder"><svg><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="right-name">폴더를 선택하세요</strong><span class="folder-detail" id="right-detail">내 PC에서 비교할 폴더 선택</span></span><span class="folder-select">선택</span></label>
               </div>
             </div>
-            <p class="panel-footnote">UTF-8 텍스트 · 합계 1,000개 · 파일 크기 제한 없음 · 파일은 내 PC에서 처리됩니다</p>
+            <p class="panel-footnote">인코딩 자동 감지 · 합계 1,000개 · 파일 크기 제한 없음 · 파일은 내 PC에서 처리됩니다</p>
           </section>
           <section class="panel" aria-labelledby="options-title">
             <div class="section-heading"><h2 id="options-title">비교 옵션</h2><button class="text-button" type="button" id="reset-options">초기화</button></div>
@@ -99,12 +99,12 @@
           <section class="panel" aria-labelledby="jasypt-settings-title">
             <div class="section-heading"><h2 id="jasypt-settings-title">암호화 설정</h2><button id="jasypt-clear" class="text-button" type="button">모두 지우기</button></div>
             <div class="settings-grid">
-              <div class="field"><label for="jasypt-algorithm">알고리즘</label><select id="jasypt-algorithm"><option value="PBEWITHHMACSHA512ANDAES_256">PBEWITHHMACSHA512ANDAES_256 (AES-256)</option><option value="PBEWithMD5AndDES">PBEWithMD5AndDES (기존 설정 호환)</option></select></div>
+              <div class="field"><label for="jasypt-algorithm">알고리즘</label><select id="jasypt-algorithm"><option value="PBEWITHHMACSHA512ANDAES_256">PBEWITHHMACSHA512ANDAES_256 (AES-256)</option><option value="PBEWithMD5AndDES" selected>PBEWithMD5AndDES (기존 설정 호환)</option></select></div>
               <div class="field"><label for="jasypt-password">비밀번호</label><div class="password-wrap"><input id="jasypt-password" type="password" required autocomplete="off" spellcheck="false" aria-describedby="jasypt-password-note"><button id="jasypt-show-password" class="secondary-button" type="button" aria-pressed="false">보기</button></div><small id="jasypt-password-note">ASCII 영문·숫자·기호·스페이스 · Java SunJCE 호환</small></div>
               <div class="field"><label for="jasypt-iterations">키 생성 반복 횟수</label><input id="jasypt-iterations" type="number" min="1" max="1000000" step="1" value="1000" required inputmode="numeric"></div>
               <div class="field"><label for="jasypt-output-type">암호문 형식</label><select id="jasypt-output-type"><option value="base64">Base64</option><option value="hexadecimal">Hexadecimal</option></select></div>
               <div class="field"><label for="jasypt-salt">Salt 생성기</label><select id="jasypt-salt"><option value="random">RandomSaltGenerator</option><option value="zero">ZeroSaltGenerator</option></select></div>
-              <div class="field"><label for="jasypt-iv">IV 생성기</label><select id="jasypt-iv"><option value="random">RandomIvGenerator</option><option value="none" id="jasypt-no-iv" disabled>NoIvGenerator</option></select></div>
+              <div class="field"><label for="jasypt-iv">IV 생성기</label><select id="jasypt-iv"><option value="random">RandomIvGenerator</option><option value="none" id="jasypt-no-iv" selected>NoIvGenerator</option></select></div>
             </div>
             <p class="panel-footnote">복호화할 때는 암호화한 서비스의 비밀번호와 설정을 동일하게 맞춰 주세요.</p>
           </section>
@@ -127,11 +127,18 @@
         <form id="ase-connect-form" autocomplete="off">
           <section class="panel" aria-labelledby="ase-connection-title">
             <div class="section-heading"><h2 id="ase-connection-title">서버 연결</h2><button id="ase-disconnect" class="text-button" type="button" disabled>연결 해제</button></div>
+            <div class="ase-profile-controls">
+              <div class="field"><label for="ase-profile">설정 파일의 서버</label><select id="ase-profile" aria-describedby="ase-profile-help ase-profile-path ase-profile-jasypt"><option value="">직접 입력</option></select></div>
+              <button id="ase-profile-reload" class="secondary-button" type="button">설정 파일 다시 읽기</button>
+            </div>
+            <p id="ase-profile-help" class="ase-note" role="status" aria-live="polite">설정 파일을 확인하는 중입니다.</p>
+            <p id="ase-profile-path" class="ase-note ase-profile-detail" hidden></p>
+            <p id="ase-profile-jasypt" class="ase-note ase-profile-detail" hidden></p>
             <div class="ase-connection-grid">
               <div class="field"><label for="ase-host">호스트</label><input id="ase-host" type="text" placeholder="서버 IP 또는 이름" autocomplete="off" spellcheck="false" required></div>
               <div class="field"><label for="ase-port">포트</label><input id="ase-port" type="number" min="1" max="65535" step="1" value="5000" inputmode="numeric" required></div>
               <div class="field"><label for="ase-user">사용자</label><input id="ase-user" type="text" autocomplete="off" spellcheck="false" required></div>
-              <div class="field"><label for="ase-password">비밀번호</label><input id="ase-password" type="password" autocomplete="off" spellcheck="false"></div>
+              <div class="field"><label for="ase-password" id="ase-password-label">DB 비밀번호</label><input id="ase-password" type="password" autocomplete="off" spellcheck="false"></div>
               <button id="ase-connect" class="primary-button" type="submit" disabled>연결</button>
             </div>
             <p class="panel-footnote" id="ase-connection-note">연결 정보는 브라우저에 저장하지 않습니다.</p>
@@ -177,6 +184,15 @@
         <section id="ase-job" class="panel" aria-labelledby="ase-job-title" aria-busy="false" hidden>
           <div class="section-heading"><h2 id="ase-job-title">실행 상태</h2><button id="ase-cancel" class="secondary-button" type="button" hidden>실행 취소</button></div>
           <p id="ase-job-status" class="ase-job-status" role="status" aria-live="polite"></p>
+          <div id="ase-out-statistics" hidden>
+            <dl class="ase-out-statistics" aria-label="BCP OUT 완료 통계">
+              <div><dt>내보낸 행</dt><dd id="ase-stat-rows"></dd></div>
+              <div><dt>총 소요 시간</dt><dd id="ase-stat-elapsed"></dd></div>
+              <div><dt>평균 처리 속도</dt><dd id="ase-stat-rate"></dd></div>
+              <div><dt>파일 크기</dt><dd id="ase-stat-bytes"></dd><dd id="ase-stat-bytes-exact" class="ase-stat-detail"></dd></div>
+            </dl>
+            <p id="ase-out-statistics-note" class="ase-note">작업 시작부터 파일 저장 완료까지 측정합니다. 평균 처리 속도는 내보낸 행 수 ÷ 총 소요 시간입니다.</p>
+          </div>
           <p id="ase-job-warning" class="ase-warning" hidden></p>
           <ol id="ase-job-events" class="ase-job-events" aria-label="실행 내역"></ol>
         </section>

@@ -84,6 +84,34 @@ def test_legacy_algorithm_defaults_to_no_iv_like_jasypt(client, monkeypatch):
     assert response.json()['result'] == case['ciphertext']
 
 
+def test_omitted_settings_match_real_java_legacy_ciphertext(client, monkeypatch):
+    cases = json.loads(REFERENCE.read_text(encoding='utf-8'))['cases']
+    case = next(case for case in cases if case['algorithm'] == 'PBEWithMD5AndDES' and case['salt_generator'] == 'random' and case['iv_generator'] == 'none' and case['output_type'] == 'base64')
+    module = importlib.import_module('nice_tools.jasypt')
+    salt = base64.b64decode(case['ciphertext'])[:8]
+
+    def fixed_salt(size):
+        assert size == 8
+        return salt
+
+    monkeypatch.setattr(module.secrets, 'token_bytes', fixed_salt)
+    config = {'text': case['text'], 'password': case['password']}
+    encrypted = client.post('/api/jasypt', json=config | {'operation': 'encrypt'})
+    assert encrypted.status_code == 200
+    assert encrypted.json() == {'result': case['ciphertext']}
+    decrypted = client.post('/api/jasypt', json=config | {'operation': 'decrypt', 'text': case['ciphertext']})
+    assert decrypted.status_code == 200
+    assert decrypted.json() == {'result': case['text']}
+    assert encrypted.headers['cache-control'] == decrypted.headers['cache-control'] == 'no-store'
+
+
+def test_explicit_aes_defaults_to_random_iv(client):
+    case = json.loads(REFERENCE.read_text(encoding='utf-8'))['cases'][0]
+    response = client.post('/api/jasypt', json={'operation': 'decrypt', 'algorithm': case['algorithm'], 'text': case['ciphertext'], 'password': case['password']})
+    assert response.status_code == 200
+    assert response.json() == {'result': case['text']}
+
+
 @pytest.mark.parametrize('changes', [
     {'password': ''}, {'password': '한글'}, {'password': 'key\t'}, {'password': None},
     {'text': None}, {'text': '\ud800'}, {'password': '\ud800'}, {'operation': 'unknown'},

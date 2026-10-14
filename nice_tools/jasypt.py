@@ -18,8 +18,8 @@ def validate_payload(payload: dict) -> dict:
     allowed = {"operation", "text", "password", "algorithm", "iterations", "salt_generator", "iv_generator", "output_type", "wrap_enc"}
     if not isinstance(payload, dict) or set(payload) - allowed:
         raise ValueError("지원하는 JSON 입력 항목을 확인하세요.")
-    config = {"algorithm": AES_ALGORITHM, "iterations": 1000, "salt_generator": "random",
-              "iv_generator": "random", "output_type": "base64", "wrap_enc": False, **payload}
+    config = {"algorithm": DES_ALGORITHM, "iterations": 1000, "salt_generator": "random",
+              "iv_generator": "none", "output_type": "base64", "wrap_enc": False, **payload}
     if config.get("operation") not in ("encrypt", "decrypt"):
         raise ValueError("암호화 또는 복호화 작업을 선택하세요.")
     if not isinstance(config.get("text"), str):

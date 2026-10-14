@@ -1,0 +1,25 @@
+# Copy this file beside nice-tools.exe as ase-connections.txt (UTF-8).
+# Replace each ENC(...) placeholder with the Jasypt tool's encrypted result.
+# Enter the Jasypt master key in the UI; never write it or plaintext passwords here.
+# Comments must occupy their own lines. Settings apply to all server sections.
+
+[jasypt]
+algorithm = PBEWithMD5AndDES
+iterations = 1000
+salt_generator = random
+iv_generator = none
+output_type = base64
+
+[Development ASE]
+host = ase-dev.example.internal
+port = 5000
+user = bcp_user
+password = ENC(PASTE_JASYPT_RESULT_HERE)
+database = appdb
+
+[Test ASE]
+host = ase-test.example.internal
+port = 5000
+user = bcp_user
+password = ENC(PASTE_JASYPT_RESULT_HERE)
+# database is optional.

@@ -39,6 +39,11 @@
     get("jasypt-decrypt-note").hidden = !decrypt;
     get("jasypt-submit-label").textContent = busy ? (decrypt ? "복호화 중…" : "암호화 중…") : (decrypt ? "Decrypt · 복호화" : "Encrypt · 암호화");
   }
+  function updateAlgorithm() {
+    const aes = get("jasypt-algorithm").value === "PBEWITHHMACSHA512ANDAES_256";
+    get("jasypt-no-iv").disabled = aes;
+    get("jasypt-iv").value = aes ? "random" : "none";
+  }
   function setBusy(value) {
     busy = value;
     for (const input of inputs) input.disabled = value;
@@ -58,11 +63,7 @@
   }
   for (const input of inputs) input.addEventListener("input", clearResult);
   for (const id of ["jasypt-encrypt", "jasypt-decrypt"]) get(id).addEventListener("change", updateMode);
-  get("jasypt-algorithm").addEventListener("change", () => {
-    const aes = get("jasypt-algorithm").value === "PBEWITHHMACSHA512ANDAES_256";
-    get("jasypt-no-iv").disabled = aes;
-    get("jasypt-iv").value = aes ? "random" : "none";
-  });
+  get("jasypt-algorithm").addEventListener("change", updateAlgorithm);
   get("jasypt-show-password").addEventListener("click", () => {
     const visible = get("jasypt-password").type === "password";
     get("jasypt-password").type = visible ? "text" : "password";
@@ -77,7 +78,7 @@
     get("jasypt-password").type = "password";
     get("jasypt-show-password").textContent = "보기";
     get("jasypt-show-password").setAttribute("aria-pressed", "false");
-    get("jasypt-no-iv").disabled = true;
+    updateAlgorithm();
     updateMode();
   });
   form.addEventListener("submit", async (event) => {
@@ -135,5 +136,6 @@
       feedback("자동 복사가 지원되지 않습니다. 선택된 결과를 Ctrl+C로 복사하세요.");
     }
   });
+  updateAlgorithm();
   updateMode();
 })();

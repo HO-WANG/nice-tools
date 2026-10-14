@@ -78,3 +78,19 @@ def test_one_sided_files_are_reported_without_decoding(core):
     result = core.compare_directories({"a.bin": b"\xff"}, {}, core.CompareOptions())
     assert result["summary"]["left_only"] == 1
     assert result["summary"]["error"] == 0
+
+
+@pytest.mark.parametrize("encoding", ["cp949", "euc-kr", "utf-16", "utf-32"])
+def test_identical_text_in_different_encodings_compares_equal(core, encoding):
+    text = "내부망 파일 비교\n설정 값 확인\n"
+    result = core.compare_directories({"a.txt": text.encode(encoding)}, {"a.txt": text.encode()}, core.CompareOptions())
+    assert result["summary"]["same"] == 1
+    assert result["summary"]["error"] == 0
+
+
+def test_normalization_options_apply_after_legacy_decoding(core):
+    left = "X가 나Y\nX다 라Y".encode("cp949")
+    right = "Q다라R\nQ가나R".encode("utf-16")
+    options = core.CompareOptions(sort_lines=True, ignore_whitespace=True, ignore_start=1, ignore_end=1)
+    result = core.compare_directories({"a.txt": left}, {"a.txt": right}, options)
+    assert result["summary"]["same"] == 1

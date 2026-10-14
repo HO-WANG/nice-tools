@@ -87,9 +87,17 @@ py -3.12 -m venv .venv
 글자 수는 Unicode 코드 포인트 기준이며, 한글과 이모지도 바이트로 자르지 않습니다.
 앞·뒤 제외 범위가 겹치면 해당 줄은 빈 문자열이 됩니다.
 
-UTF-8과 UTF-8 BOM을 지원합니다. CRLF, LF, CR은 동일한 줄바꿈으로 처리하며
-마지막 줄 끝의 줄바꿈 유무는 무시합니다. 중간의 빈 줄은 비교 대상입니다.
-UTF-8로 해석할 수 없거나 NUL 문자가 포함된 파일은 읽기 오류로 표시합니다.
+각 파일의 인코딩을 자동 감지합니다. UTF-8, BOM이 있는 UTF-8·UTF-16·UTF-32와
+한글 CP949/EUC-KR, 일본어 Shift-JIS/CP932, 서유럽 Windows-1252 등의 텍스트를 처리합니다.
+양쪽 파일의 인코딩이 달라도 해석한 글자가 같으면 동일하게 비교합니다.
+BOM이 없는 UTF-16·UTF-32는 바이트 배열에서 충분한 근거가 있을 때 감지합니다.
+짧은 파일이나 여러 인코딩으로 해석 가능한 파일은 자동 감지가 모호할 수 있습니다.
+이런 파일은 UTF-8 또는 BOM이 있는 Unicode로 저장하면 명확하게 비교할 수 있습니다.
+감지에는 일부 구간을 사용해도 최종 해석·검증·비교와 diff는 **파일 전체**에 적용하며,
+해석할 수 없는 바이트를 임의의 문자로 바꾸거나 건너뛰지 않습니다.
+올바른 텍스트로 읽을 수 없거나 해석 후 NUL 문자가 포함된 파일은 읽기 오류로 표시합니다.
+CRLF, LF, CR은 동일한 줄바꿈으로 처리하며 마지막 줄 끝의 줄바꿈 유무는 무시합니다.
+중간의 빈 줄은 비교 대상입니다.
 한쪽에만 있는 파일은 내용 해석 없이 존재 상태를 표시합니다.
 
 파일과 업로드 요청에 고정된 크기 제한을 두지 않습니다.
@@ -111,13 +119,14 @@ UTF-8로 해석할 수 없거나 NUL 문자가 포함된 파일은 읽기 오류
 
 | 입력 | 지원 값 / 대응하는 Jasypt 설정 |
 | --- | --- |
-| 알고리즘 | `PBEWITHHMACSHA512ANDAES_256` (기본), `PBEWithMD5AndDES` |
+| 알고리즘 | `PBEWithMD5AndDES` (기본), `PBEWITHHMACSHA512ANDAES_256` |
 | 비밀번호 | `password`: ASCII 영문·숫자·기호·스페이스. Java SunJCE와 동일한 문자 조건을 사용합니다. |
 | 키 생성 반복 횟수 | `keyObtentionIterations`: 기본 1,000, 입력 범위 1~1,000,000 |
 | Salt 생성기 | `org.jasypt.salt.RandomSaltGenerator` (기본), `org.jasypt.salt.ZeroSaltGenerator` |
 | IV 생성기 | `org.jasypt.iv.RandomIvGenerator` (AES 기본), `org.jasypt.iv.NoIvGenerator` (MD5/DES 기본) |
 | 암호문 형식 | `stringOutputType`: `base64` (기본), `hexadecimal` |
 
+처음 열거나 **모두 지우기**를 누르면 MD5/DES와 NoIvGenerator가 선택됩니다.
 AES에는 RandomIvGenerator가 필요합니다. 알고리즘을 바꾸면 IV 기본값도 변경됩니다.
 SunJCE / Java Jasypt 1.9.3의 두 알고리즘과 salt·IV 포맷을 지원하며,
 다른 알고리즘·provider·사용자 정의 생성기는 지원 범위에 포함하지 않습니다.
@@ -132,7 +141,8 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
 
 ## ASE / BCP
 
-1. 왼쪽 **ASE / BCP** 메뉴를 열고 호스트, 포트(기본 5000), 사용자와 비밀번호를 입력해 연결합니다.
+1. 왼쪽 **ASE / BCP** 메뉴에서 설정 파일의 서버를 선택하고 **Jasypt 복호화 키**를 입력해 연결합니다.
+   설정 파일이 없으면 **직접 입력**을 선택해 호스트, 포트(기본 5000), 사용자와 DB 비밀번호로 연결할 수 있습니다.
 2. 데이터베이스와 소유자를 선택합니다. 이름 검색과 종류 필터로 오브젝트를 찾고,
    선택하여 컬럼의 순서·자료형·NULL·IDENTITY 정보를 확인합니다.
 3. **OUT** 또는 **IN**을 선택하고 파일 인코딩, 컬럼/행 구분자와 배치 행 수를 설정합니다.
@@ -140,6 +150,13 @@ salt/IV·암호문 형식을 암호화한 서비스와 동일하게 맞춰야 �
    OUT은 저장할 위치를 지정합니다. 파일을 브라우저에 업로드하지 않습니다.
 5. **실행 내용 확인**에서 대상·설정을 확인합니다. IN은 전체 파일을 검사하고 첫 20행을 보여 줍니다.
 6. **BCP 시작**을 누릅니다. 상태와 처리 행 수를 확인하며, 필요하면 **취소**합니다.
+
+OUT이 완료되면 **내보낸 행 수·전체 소요 시간·초당 평균 행 수·결과 파일 크기**를 표시합니다.
+전체 소요 시간은 작업 시작부터 최종 파일 저장 완료까지이며 작업 프로세스 시작, ASE 접속,
+테이블 구조 재확인과 실제 내보내기를 포함합니다. 초당 평균 행 수는 완료된 행 수를 이 시간으로 나눈 값입니다.
+시간 측정에는 시스템 시각 변경의 영향을 받지 않는 타이머를 사용합니다.
+빈 결과는 0행으로 표시하며 측정 시간이 0이면 처리 속도를 `측정 불가`로 표시합니다.
+실패하거나 취소한 작업에는 완료 통계를 표시하지 않습니다.
 
 테이블은 IN/OUT, 뷰는 OUT을 지원합니다. 프로시저는 탐색만 가능합니다.
 **IN은 기존 데이터에 행을 추가합니다. 삭제·TRUNCATE를 실행하지 않습니다.**
@@ -173,14 +190,62 @@ FreeTDS는 문자 값의 끝 공백을 제거할 수 있어 해당 값이 있으
 
 EXE에는 FreeTDS 1.5.19, GNU libiconv와 OpenSSL을 포함하며 TDS 5.0으로 ASE에 접속합니다.
 SAP 클라이언트, ODBC 드라이버, 별도 `bcp.exe` 설치는 필요 없습니다.
-접속 정보는 실행 중 메모리에만 유지하고, 비밀번호를 명령행·파일·로그·브라우저 저장소에 남기지 않습니다.
+설정 파일에는 접속 정보와 암호화된 DB 비밀번호를 보관합니다. 복호화 키와 평문 DB 비밀번호는
+실행 중 메모리에서만 사용하며 명령행·파일·로그·브라우저 저장소에 남기지 않습니다.
 데이터가 이동하는 범위는 **사용자 PC와 입력한 ASE 서버 사이**입니다.
 서버 네트워크 접근과 계정의 조회/BCP 권한, DB의 bulk-copy 설정은 기존 사내 설정을 사용합니다.
+
+현재 포함된 연결 방식은 FreeTDS입니다. jConnect는 Java JDBC 드라이버이므로 별도의 Java 런타임과
+JAR 통합, BCP 파일 처리 구현·검증을 추가하면 지원할 수 있으며 현재 EXE에는 포함되어 있지 않습니다.
 
 소스·브라우저 검사와 Windows DLL/EXE 실행 검증은 실제 ASE 왕복 테스트를 대신하지 않습니다.
 현재 개발 환경에 ASE 서버가 없어 실제 서버의 문자셋, IDENTITY, LOB와 날짜 데이터를
 IN/OUT하여 검증하지 못했습니다. 운영 데이터에 사용하기 전에 사내 ASE의 테스트 테이블에서
 같은 설정으로 OUT → IN과 행 수·내용을 확인하세요.
+
+### ASE 연결 설정 파일
+
+실행 파일과 **같은 폴더**에 `ase-connections.txt`를 UTF-8로 저장합니다. UTF-8 BOM도 허용합니다.
+실행한 작업 폴더나 EXE의 임시 압축 해제 폴더에서 찾지 않습니다.
+소스로 실행할 때는 저장소 루트의 파일을 읽습니다.
+배포 ZIP에는 EXE 한 개를 유지하며 이 설정 파일은 사용자가 자신의 서버 정보로 만듭니다.
+저장소의 [`ase-connections.example.txt`](ase-connections.example.txt)를 복사해 시작할 수 있습니다.
+
+1. **Jasypt 암호화** 도구에서 DB 비밀번호를 원문으로 넣고, 별도로 정한 복호화 키를 비밀번호에 입력합니다.
+2. 기본 `PBEWithMD5AndDES`, 반복 1,000회, random salt, NoIvGenerator, base64 설정을 사용하고
+   **ENC(...)로 감싸기**를 선택하여 Encrypt합니다.
+3. 결과를 아래 `password` 값에 붙여 넣습니다. 복호화 키와 평문 DB 비밀번호는 파일에 쓰지 않습니다.
+4. **ASE / BCP → 설정 파일 다시 읽기**를 누르고 서버를 선택합니다.
+   **Jasypt 복호화 키**에 암호화할 때 사용한 키를 입력하여 연결합니다. 연결 성공 후 입력창의 키를 지웁니다.
+
+```ini
+[jasypt]
+algorithm = PBEWithMD5AndDES
+iterations = 1000
+salt_generator = random
+iv_generator = none
+output_type = base64
+
+[개발 ASE]
+host = ase-dev.example.internal
+port = 5000
+user = bcp_user
+password = ENC(PASTE_JASYPT_RESULT_HERE)
+database = appdb
+```
+
+`PASTE_JASYPT_RESULT_HERE`는 예시 자리 표시자입니다. 실제 Encrypt 결과의 `ENC(...)` 전체로 교체하세요.
+서버마다 새 `[서버 이름]` 구역을 추가하며 `host`, `port`, `user`, `password`는 필수입니다.
+`database`는 선택 사항으로 연결 후 처음 선택할 DB를 지정합니다.
+`[jasypt]` 설정은 파일의 모든 서버 비밀번호에 공통 적용되며 암호화할 때의 설정과 같아야 합니다.
+이 구역을 생략하면 위 MD5/DES 기본값을 사용합니다. AES 암호문에는
+`algorithm = PBEWITHHMACSHA512ANDAES_256`과 `iv_generator = random`을 지정합니다.
+지원하는 값은 salt `random`/`zero`, IV `none`/`random`, 암호문 형식 `base64`/`hexadecimal`입니다.
+
+주석은 별도 줄에서 `#` 또는 `;`로 시작합니다. 값 뒤에 주석을 붙이지 마세요.
+중복 항목, `[DEFAULT]`, 알 수 없는 항목과 평문 `password`는 거절합니다.
+파일이 없거나 읽기에 실패하면 직접 입력으로 연결할 수 있습니다. 파일을 수정한 뒤에는 목록을 다시 읽으세요.
+설정 파일의 호스트·계정·DB 이름은 평문이므로 파일 접근 권한은 사용자 PC에서 관리합니다.
 
 ## 테스트와 실행 확인
 
@@ -256,19 +321,23 @@ PyInstaller는 대상 OS에서 실행해야 합니다. Windows 릴리스는 Wind
 `scripts/verify_bundle.py`는 파일 하나만 있는 별도 폴더(공백·한글 경로)에서 EXE를 실행하고
 화면/정적 파일, 실제 비교 API와 파일별 diff API를 검사합니다. 큰 파일의 끝부분 차이와 diff, 54 MiB
 업로드 요청도 검증하며 Windows x64 PE 헤더를 확인합니다.
-Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개도 실제 EXE에서 검사합니다.
+서로 다른 인코딩의 동일 텍스트와 10 MiB 이후 CP949 한글 diff를 확인합니다.
+Jasypt의 AES/DES, Base64/Hex와 salt·IV 조합 12개 및 MD5/DES 기본값도 실제 EXE에서 검사합니다.
 ASE는 EXE의 실제 worker에서 모든 네이티브 함수의 로드와 접속 거절 오류·비밀번호 비노출을 검사합니다.
+격리 폴더에 만든 암호화 설정 파일의 위치, 키 오류와 복호화 후 네이티브 접속 시도도 확인하고 파일을 지웁니다.
 Windows 소스 검사에는 입력 파일의 읽기 공유 잠금도 포함됩니다. ASE 전송 성공은 서버가 있어야 검증할 수 있습니다.
 
 ## 구조와 도구 추가
 
 - `nice_tools/comparison.py`: 텍스트 정규화와 디렉토리 비교
+- `nice_tools/text_encoding.py`: 전체 파일을 엄격히 해석하는 인코딩 자동 감지
 - `nice_tools/diff.py`: 선택한 파일의 unified diff, 줄 번호와 주변 문맥
 - `nice_tools/jasypt.py`: Java Jasypt 호환 문자열 암호화·복호화
 - `nice_tools/ase_native.py`: FreeTDS DB-Library 연결·카탈로그·문자형 BCP
 - `nice_tools/ase_files.py`: 스트리밍 파일 검사와 미리보기
 - `nice_tools/ase_worker.py`, `ase_picker.py`: 격리 프로세스와 Windows 파일 선택
 - `nice_tools/ase_api.py`, `ase_jobs.py`: 로컬 API, 메모리 접속·확인·취소 작업
+- `nice_tools/ase_profiles.py`: EXE 옆의 암호화된 ASE 연결 설정 읽기
 - `scripts/build_ase_native.ps1`: 네이티브 라이브러리 빌드·체크섬·배포 자료
 - `nice_tools/uploads.py`: 업로드·경로·옵션 검증
 - `nice_tools/limits.py`: 비교할 파일 개수 정책

@@ -14,7 +14,7 @@ analysis = Analysis(
     [str(root / "desktop_entry.py")],
     pathex=[str(root)],
     binaries=native_binaries,
-    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + native_data + copy_metadata("rapidfuzz") + copy_metadata("pycryptodome"),
+    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + native_data + copy_metadata("rapidfuzz") + copy_metadata("pycryptodome") + copy_metadata("charset-normalizer"),
     hiddenimports=[
         "uvicorn.logging",
         "uvicorn.loops.asyncio",
@@ -24,7 +24,7 @@ analysis = Analysis(
         "nice_tools.ase_native",
         "nice_tools.ase_picker",
         "nice_tools.ase_files",
-    ] + collect_submodules("rapidfuzz"),
+    ] + collect_submodules("rapidfuzz") + collect_submodules("charset_normalizer"),
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

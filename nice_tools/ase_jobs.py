@@ -6,6 +6,7 @@ import atexit
 import copy
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -237,7 +238,9 @@ class AseManager:
             if not payload:
                 raise ValueError("파일과 대상을 다시 확인하세요. 확인 결과는 한 번만 사용할 수 있습니다.")
             payload = copy.deepcopy(payload)
+            started_at = None
             if payload["options"]["direction"] == "out":
+                started_at = time.monotonic()
                 fd, stage = tempfile.mkstemp(prefix=".nice-tools-", suffix=".bcp", dir=Path(payload["path"]).parent)
                 os.close(fd)
                 payload.update({"stage_path": stage, "defer_publish": True})
@@ -250,6 +253,8 @@ class AseManager:
                     session["jobs"].pop(old)
             job = {"job": job_token, "state": "running", "phase": "starting", "message": "전송 준비 중", "events": [],
                    "cancelled": False, "process": None}
+            if started_at is not None:
+                job["started_at"] = started_at
             session["jobs"][job_token] = job
             thread = threading.Thread(target=self._run_job, args=(token, session, job, payload), daemon=True)
             job["thread"] = thread
@@ -288,17 +293,38 @@ class AseManager:
                 raise ValueError(error or "전송 프로세스가 정상적으로 완료되지 않았습니다.")
             with self.lock:
                 if not job["cancelled"]:
+                    public_result = {"rows": result.get("rows"), "path": payload["path"], "direction": payload["options"]["direction"]}
                     if payload["options"]["direction"] == "out":
+                        rows = result.get("rows")
+                        if isinstance(rows, bool) or not isinstance(rows, int) or rows < 0:
+                            raise ValueError("내보낸 행 수를 확인하지 못해 결과를 저장하지 않았습니다.")
+                        try:
+                            rate_rows = float(rows)
+                        except OverflowError:
+                            raise ValueError("내보낸 행 수를 확인하지 못해 결과를 저장하지 않았습니다.") from None
                         if target_fingerprint(payload["path"]) != payload["out_target_fingerprint"]:
                             raise ValueError("대상 파일이 변경되어 결과를 저장하지 않았습니다.")
+                        # Capture the completed stage size before publishing so
+                        # later user edits cannot alter the export statistics.
+                        bytes_written = Path(payload["stage_path"]).stat().st_size
                         os.replace(payload["stage_path"], payload["path"])
+                        elapsed = max(0.0, time.monotonic() - job["started_at"])
+                        job["elapsed_seconds"] = elapsed
+                        rate = rate_rows / elapsed if elapsed > 0 else None
+                        public_result["statistics"] = {
+                            "elapsed_seconds": elapsed,
+                            "rows_per_second": rate if rate is None or math.isfinite(rate) else None,
+                            "bytes_written": bytes_written,
+                        }
                     job.update({"state": "succeeded", "phase": "done", "message": "전송 완료", "rows": result.get("rows"),
-                                "result": {"rows": result.get("rows"), "path": payload["path"], "direction": payload["options"]["direction"]}})
+                                "result": public_result})
         except (OSError, ValueError, TypeError, KeyError) as exc:
             with self.lock:
                 if not job["cancelled"]:
                     detail = self._redact(str(exc), payload["connection"]) if isinstance(exc, ValueError) else "전송을 완료하지 못했습니다. 대상과 파일 상태를 확인하세요."
                     job.update({"state": "failed", "phase": "done", "message": error or detail})
+                    if "started_at" in job:
+                        job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
         finally:
             if process:
                 if process.poll() is None:
@@ -318,6 +344,8 @@ class AseManager:
                 job["process"] = None
                 if job["cancelled"]:
                     job.update({"state": "cancelled", "phase": "done", "message": "전송 취소됨"})
+                    if "started_at" in job:
+                        job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
                 # Transfer payload no longer needs its password reference.
                 payload.clear()
 
@@ -327,7 +355,7 @@ class AseManager:
             job = session["jobs"].get(job_token) if isinstance(job_token, str) else None
             if not job:
                 raise ValueError("전송 작업을 찾을 수 없습니다.")
-            return copy.deepcopy({key: value for key, value in job.items() if key not in ("cancelled", "process", "thread")})
+            return copy.deepcopy({key: value for key, value in job.items() if key not in ("cancelled", "process", "thread", "started_at")})
 
     def cancel(self, token, job_token):
         session = self._session(token)

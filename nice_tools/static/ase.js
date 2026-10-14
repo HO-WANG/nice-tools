@@ -7,6 +7,7 @@
     available: false, session: null, databases: [], owners: [], objects: [], object: null,
     columns: [], columnsLoaded: false, file: null, path: "", review: null,
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
+    profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null,
   };
   const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password"];
   const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity"];
@@ -14,6 +15,8 @@
   const direction = () => get("ase-in").checked ? "in" : "out";
   const active = () => Boolean(state.job);
   const locked = () => active() || ["connect", "start", "disconnect", "cancel"].includes(state.busy);
+  const profileLocked = () => active() || ["start", "disconnect", "cancel"].includes(state.busy);
+  const selectedProfile = () => state.profiles.find((profile) => profile.id === state.profileId);
   const transferable = () => state.columnsLoaded && state.object && (state.object.kind === "U" || (state.object.kind === "V" && direction() === "out"));
   const stale = () => new DOMException("요청이 변경되었습니다.", "AbortError");
 
@@ -25,7 +28,9 @@
 
   async function api(endpoint, payload, generation = state.generation) {
     const controller = new AbortController();
-    state.controllers.add(controller);
+    // A completed connect may create a server session even after the UI changes.
+    // Keep its response available so the abandoned session can be released.
+    if (endpoint !== "connect") state.controllers.add(controller);
     try {
       const response = await fetch(`/api/ase/${endpoint}`, {
         method: payload === undefined ? "GET" : "POST",
@@ -34,9 +39,12 @@
         ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
       });
       const data = await response.json();
-      if (generation !== state.generation || controller.signal.aborted) throw stale();
-      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "요청을 처리할 수 없습니다.");
+      if (generation !== state.generation || controller.signal.aborted) {
+        if (endpoint === "connect" && response.ok && typeof data?.session === "string") await releaseSession(data.session);
+        throw stale();
+      }
       if (!data || typeof data !== "object") throw new Error("서버 응답을 확인할 수 없습니다.");
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "요청을 처리할 수 없습니다.");
       return data;
     } catch (error) {
       if (generation !== state.generation || controller.signal.aborted) throw stale();
@@ -45,6 +53,17 @@
       throw error;
     } finally {
       state.controllers.delete(controller);
+    }
+  }
+
+  async function releaseSession(session) {
+    try {
+      await fetch("/api/ase/disconnect", {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Nice-Tools": "ase", "Cache-Control": "no-store" },
+        cache: "no-store", credentials: "same-origin", body: JSON.stringify({ session }),
+      });
+    } catch {
+      // Cleanup must never restore stale UI state or expose connection details.
     }
   }
 
@@ -68,6 +87,11 @@
     get("ase-sample").hidden = true;
   }
 
+  function clearStatistics() {
+    get("ase-out-statistics").hidden = true;
+    for (const id of ["ase-stat-rows", "ase-stat-elapsed", "ase-stat-rate", "ase-stat-bytes", "ase-stat-bytes-exact"]) get(id).textContent = "";
+  }
+
   function reset(level) {
     nextGeneration();
     clearReview();
@@ -76,6 +100,7 @@
     get("ase-job").hidden = true;
     get("ase-job-status").textContent = "";
     get("ase-job-events").replaceChildren();
+    clearStatistics();
     feedback();
     if (level === "connection") {
       state.session = null;
@@ -113,6 +138,88 @@
       option.value = String(choice[key]);
       option.textContent = String(choice.name);
       select.append(option);
+    }
+  }
+
+  function invalidateProfileRead() {
+    state.profileGeneration += 1;
+    state.profileController?.abort();
+    state.profileController = null;
+    if (state.profileLoading) get("ase-profile-help").textContent = "연결 정보가 변경되었습니다. 설정 파일 다시 읽기로 서버 목록을 갱신할 수 있습니다.";
+    state.profileLoading = false;
+  }
+
+  function applyProfile(id) {
+    const wasProfile = Boolean(state.profileId);
+    state.profileId = state.profiles.some((profile) => profile.id === id) ? id : "";
+    const profile = selectedProfile();
+    get("ase-profile").value = state.profileId;
+    get("ase-password").value = "";
+    if (profile) {
+      get("ase-host").value = profile.host;
+      get("ase-port").value = String(profile.port);
+      get("ase-user").value = profile.user;
+    } else if (wasProfile) {
+      get("ase-host").value = "";
+      get("ase-port").value = "5000";
+      get("ase-user").value = "";
+    }
+    render();
+  }
+
+  async function clearConnection() {
+    const session = state.session;
+    reset("connection");
+    get("ase-password").value = "";
+    get("ase-connection-note").textContent = "연결 정보와 복호화 키는 브라우저에 저장하지 않습니다.";
+    if (session) await perform("disconnect", (generation) => api("disconnect", { session }, generation));
+  }
+
+  async function loadProfiles() {
+    state.profileController?.abort();
+    const controller = new AbortController();
+    state.profileController = controller;
+    const profileGeneration = ++state.profileGeneration;
+    const generation = state.generation;
+    const current = () => profileGeneration === state.profileGeneration && generation === state.generation && !controller.signal.aborted;
+    state.profileLoading = true;
+    get("ase-profile-help").textContent = "설정 파일을 확인하는 중입니다.";
+    get("ase-profile-help").dataset.tone = "info";
+    render();
+    try {
+      const response = await fetch("/api/ase/profiles", {
+        method: "GET", headers: { "Content-Type": "application/json", "X-Nice-Tools": "ase", "Cache-Control": "no-store" },
+        cache: "no-store", credentials: "same-origin", signal: controller.signal,
+      });
+      const data = await response.json();
+      if (!current()) throw stale();
+      if (!data || typeof data !== "object") throw new Error("설정 파일 응답을 확인할 수 없습니다.");
+      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "설정 파일을 읽을 수 없습니다. 직접 입력으로 연결할 수 있습니다.");
+      if (!Array.isArray(data.profiles) || !data.profiles.every((profile) => profile &&
+        ["id", "name", "host", "user"].every((key) => typeof profile[key] === "string" && profile[key]) &&
+        Number.isInteger(profile.port) && profile.port >= 1 && profile.port <= 65535)) throw new Error("설정 파일의 서버 목록을 확인할 수 없습니다. 직접 입력으로 연결할 수 있습니다.");
+      state.profiles = data.profiles.map(({ id, name, host, port, user, database }) => ({ id, name, host, port, user, ...(typeof database === "string" ? { database } : {}) }));
+      setChoices("ase-profile", state.profiles, "직접 입력", "id");
+      applyProfile(state.profiles.some((profile) => profile.id === state.profileId) ? state.profileId : state.profiles[0]?.id || "");
+      get("ase-profile-path").textContent = typeof data.path === "string" ? `설정 파일: ${data.path}` : "";
+      get("ase-profile-path").hidden = !get("ase-profile-path").textContent;
+      get("ase-profile-help").textContent = !data.exists ? "EXE와 같은 폴더의 ase-connections.txt에 서버를 추가하거나 직접 입력으로 연결하세요." : state.profiles.length ? `설정 파일에서 ${state.profiles.length.toLocaleString()}개 서버를 읽었습니다. 변경한 파일은 다시 읽기를 눌러 반영하세요.` : "설정 파일에 서버가 없습니다. 서버를 추가하거나 직접 입력으로 연결하세요.";
+      const settings = data.jasypt;
+      get("ase-profile-jasypt").textContent = settings && typeof settings.algorithm === "string" && Number.isInteger(settings.iterations) ? `Jasypt: ${settings.algorithm} · 반복 ${settings.iterations.toLocaleString()}회 · 복호화 키는 연결할 때 입력하며 저장하지 않습니다.` : "";
+      get("ase-profile-jasypt").hidden = !get("ase-profile-jasypt").textContent;
+    } catch (error) {
+      if (current() && error.name !== "AbortError") {
+        const message = error instanceof SyntaxError || error instanceof TypeError ? "설정 파일 응답을 받지 못했습니다. 직접 입력으로 연결할 수 있습니다." : error.message;
+        get("ase-profile-help").textContent = message;
+        get("ase-profile-help").dataset.tone = "error";
+        feedback(message, true);
+      }
+    } finally {
+      if (profileGeneration === state.profileGeneration) {
+        state.profileLoading = false;
+        state.profileController = null;
+        render();
+      }
     }
   }
 
@@ -161,6 +268,13 @@
     const isLocked = locked();
     const canTransfer = transferable();
     for (const id of connectionIds) get(id).disabled = Boolean(state.session) || Boolean(state.busy);
+    const profile = selectedProfile();
+    for (const id of ["ase-host", "ase-port", "ase-user"]) get(id).readOnly = Boolean(profile);
+    get("ase-password").required = Boolean(profile);
+    get("ase-password-label").textContent = profile ? "Jasypt 복호화 키" : "DB 비밀번호";
+    get("ase-profile").disabled = profileLocked();
+    get("ase-profile-reload").disabled = profileLocked();
+    get("ase-profile-reload").textContent = state.profileLoading ? "설정 파일 읽는 중…" : "설정 파일 다시 읽기";
     get("ase-connect").disabled = !state.available || Boolean(state.session) || Boolean(state.busy);
     get("ase-connect").textContent = state.busy === "connect" ? "연결 중…" : state.session ? "연결됨" : "연결";
     get("ase-disconnect").disabled = !state.session || state.busy === "disconnect";
@@ -215,27 +329,62 @@
   get("ase-connect-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (state.session || state.busy || !state.available || !event.currentTarget.reportValidity()) return;
+    const profile = selectedProfile();
+    const payload = profile ? { profile_id: profile.id, master_password: get("ase-password").value } : {
+      host: get("ase-host").value.trim(), port: Number(get("ase-port").value),
+      user: get("ase-user").value.trim(), password: get("ase-password").value,
+    };
+    invalidateProfileRead();
     reset("connection");
+    get("ase-password").value = "";
+    const generation = state.generation;
+    let defaultDatabase = "";
     await perform("connect", async (generation) => {
-      const data = await api("connect", {
-        host: get("ase-host").value.trim(), port: Number(get("ase-port").value),
-        user: get("ase-user").value.trim(), password: get("ase-password").value,
-      }, generation);
-      if (!data.session || !Array.isArray(data.databases)) throw new Error("연결 응답을 확인할 수 없습니다.");
+      const data = await api("connect", payload, generation);
+      if (!data.session || !Array.isArray(data.databases)) {
+        if (typeof data.session === "string") await releaseSession(data.session);
+        throw new Error("연결 응답을 확인할 수 없습니다.");
+      }
       state.session = data.session;
       state.databases = data.databases;
       get("ase-password").value = "";
       setChoices("ase-database", state.databases, "DB 선택", "name");
-      get("ase-connection-note").textContent = "연결되었습니다. DB와 소유자를 선택하세요. 비밀번호는 입력창에서 지웠습니다.";
+      defaultDatabase = typeof data.database === "string" ? data.database : profile?.database || "";
+      get("ase-connection-note").textContent = `${profile ? `${typeof data.profile_name === "string" ? data.profile_name : profile.name}에 ` : ""}연결되었습니다. DB와 소유자를 선택하세요. ${profile ? "복호화 키" : "비밀번호"}는 입력창에서 지웠습니다.`;
       feedback("서버에 연결되었습니다.");
     });
+    if (generation === state.generation && state.session && state.databases.some((database) => database.name === defaultDatabase)) {
+      get("ase-database").value = defaultDatabase;
+      await loadOwners();
+    }
   });
 
   for (const id of connectionIds) get(id).addEventListener("input", () => {
-    if (!state.session && !state.busy) reset("connection");
+    if (state.session || state.busy || profileLocked()) return;
+    invalidateProfileRead();
+    if (id !== "ase-password") get("ase-password").value = "";
+    reset("connection");
   });
 
-  get("ase-database").addEventListener("change", async () => {
+  get("ase-profile").addEventListener("change", async () => {
+    if (profileLocked()) {
+      get("ase-profile").value = state.profileId;
+      return;
+    }
+    const id = get("ase-profile").value;
+    invalidateProfileRead();
+    await clearConnection();
+    applyProfile(id);
+  });
+
+  get("ase-profile-reload").addEventListener("click", async () => {
+    if (profileLocked()) return;
+    invalidateProfileRead();
+    await clearConnection();
+    await loadProfiles();
+  });
+
+  async function loadOwners() {
     if (locked()) return;
     reset("database");
     const database = get("ase-database").value;
@@ -246,7 +395,9 @@
       setChoices("ase-owner", state.owners, "소유자 선택", "id");
       if (!state.owners.length) feedback("선택할 소유자가 없습니다.");
     });
-  });
+  }
+
+  get("ase-database").addEventListener("change", loadOwners);
 
   get("ase-owner").addEventListener("change", async () => {
     if (locked()) return;
@@ -394,8 +545,27 @@
     });
   });
 
+  function showStatistics(data) {
+    clearStatistics();
+    const result = data.result;
+    const statistics = result?.statistics;
+    if (data.state !== "succeeded" || result?.direction !== "out" || !statistics) return;
+    const { elapsed_seconds: elapsed, rows_per_second: rate, bytes_written: bytes } = statistics;
+    if (!Number.isSafeInteger(result.rows) || result.rows < 0 || !Number.isFinite(elapsed) || elapsed < 0 || !Number.isSafeInteger(bytes) || bytes < 0 || (rate !== null && (!Number.isFinite(rate) || rate < 0))) return;
+    const number = (value, digits = 2) => value.toLocaleString("ko-KR", { maximumFractionDigits: digits });
+    get("ase-stat-rows").textContent = `${number(result.rows, 0)}행`;
+    get("ase-stat-elapsed").textContent = elapsed > 0 && elapsed < 0.01 ? "0.01초 미만" : `${elapsed.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}초`;
+    get("ase-stat-rate").textContent = rate === null ? "측정 불가" : rate > 0 && rate < 0.01 ? "0.01행/초 미만" : `${number(rate)}행/초`;
+    const units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    const unit = bytes === 0 ? 0 : Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    get("ase-stat-bytes").textContent = `${number(bytes / (1024 ** unit))} ${units[unit]}`;
+    get("ase-stat-bytes-exact").textContent = `${number(bytes, 0)} 바이트`;
+    get("ase-out-statistics").hidden = false;
+  }
+
   function showJob(data) {
     state.jobStatus = data;
+    showStatistics(data);
     get("ase-job").hidden = false;
     const names = { running: "실행 중", succeeded: "완료", failed: "실패", cancelled: "취소됨" };
     const rows = Number.isFinite(data.rows) ? ` · ${data.rows.toLocaleString()}행` : "";
@@ -442,6 +612,7 @@
   get("ase-start").addEventListener("click", async () => {
     if (!state.review || locked() || state.busy) return;
     const review = state.review;
+    clearStatistics();
     await perform("start", async (generation) => {
       try {
         const data = await api("jobs", { session: state.session, review }, generation);
@@ -501,4 +672,5 @@
 
   render();
   checkRuntime();
+  loadProfiles();
 })();

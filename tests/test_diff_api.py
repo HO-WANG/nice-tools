@@ -46,6 +46,14 @@ def test_diff_uses_the_same_four_options_as_comparison():
     assert response.json()["lines"] == []
 
 
+def test_diff_decodes_legacy_and_unicode_files_before_showing_changes():
+    with TestClient(app) as client:
+        response = diff_request(client, "공통 줄\n이전 내용\n끝".encode("cp949"), "공통 줄\n새로운 내용\n끝".encode("utf-16"))
+    assert response.status_code == 200
+    changed = [line["text"] for line in response.json()["lines"] if line["kind"] in ("delete", "add")]
+    assert changed == ["이전 내용", "새로운 내용"]
+
+
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_one_sided_diff_including_empty_files(side):
     with TestClient(app) as client:

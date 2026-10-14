@@ -72,7 +72,8 @@ def verify(path: Path, allow_non_windows: bool = False):
                 lines.append(line)
                 match = re.search(r"http://127\.0\.0\.1:\d+", line)
                 if match:
-                    smoke_main(["--url", match.group(), "--large-files"] + (["--require-ase"] if not allow_non_windows else []))
+                    smoke_main(["--url", match.group(), "--large-files", "--config-folder", directory]
+                               + (["--require-ase"] if not allow_non_windows else []))
                     break
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")

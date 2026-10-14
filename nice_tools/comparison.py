@@ -1,6 +1,7 @@
 """HTTP와 독립적인 텍스트 파일 비교 규칙."""
 
 from dataclasses import dataclass
+from .text_encoding import decode_text
 
 
 @dataclass(frozen=True)
@@ -19,7 +20,7 @@ class CompareOptions:
 
 
 def normalize_lines(content: bytes, options: CompareOptions) -> list[str]:
-    text = content.decode("utf-8-sig")
+    text = decode_text(content)
     if "\0" in text:
         raise ValueError("NUL 문자를 포함하여 텍스트 파일로 읽을 수 없습니다.")
     if not text:
@@ -55,7 +56,7 @@ def compare_directories(
                 try:
                     normalized.append(normalize_lines(content, options))
                 except UnicodeDecodeError:
-                    errors.append(f"{label}: UTF-8로 읽을 수 없습니다.")
+                    errors.append(f"{label}: 텍스트 인코딩을 인식할 수 없습니다.")
                 except ValueError as exc:
                     errors.append(f"{label}: {exc}")
             if errors:
