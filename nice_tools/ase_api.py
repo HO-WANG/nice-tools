@@ -14,19 +14,45 @@ router = APIRouter(prefix="/api/ase")
 HEADERS = {"Cache-Control": "no-store"}
 
 
-def _discard_connected_session(task):
+_SESSION_CLEANUPS = set()
+
+
+async def _disconnect_session(session):
     try:
-        result = task.result()
-    except (Exception, asyncio.CancelledError):
-        # Retrieve late failures so cancelled requests cannot leave unhandled
-        # task errors, including errors whose details contain credentials.
-        return
-    try:
-        manager.disconnect(result["session"])
+        await run_in_threadpool(manager.disconnect, session)
     except Exception:
-        # The session may already have been removed by shutdown/another cleanup.
-        # Preserve the original request error or cancellation without logging.
+        # Shutdown/other cleanup may have already removed the session. ODBC
+        # driver errors are never logged or surfaced from background cleanup.
         pass
+
+
+def _cleanup_finished(task):
+    _SESSION_CLEANUPS.discard(task)
+    try:
+        task.result()
+    except (Exception, asyncio.CancelledError):
+        pass
+
+
+def _schedule_disconnect(session):
+    task = asyncio.create_task(_disconnect_session(session))
+    _SESSION_CLEANUPS.add(task)
+    task.add_done_callback(_cleanup_finished)
+    return task
+
+
+def _connected_session(task):
+    try:
+        return task.result()["session"]
+    except (Exception, asyncio.CancelledError):
+        # Consume failures after HTTP cancellation without retaining secrets.
+        return None
+
+
+def _discard_connected_session(task):
+    session = _connected_session(task)
+    if session is not None:
+        _schedule_disconnect(session)
 
 
 async def _connect_for_request(request, connection):
@@ -39,10 +65,17 @@ async def _connect_for_request(request, connection):
     except asyncio.CancelledError:
         # CLI work continues in its thread. Own its eventual session until
         # completion, including cancellation during the disconnect check.
-        task.add_done_callback(_discard_connected_session)
+        if task.done():
+            session = _connected_session(task)
+            if session is not None:
+                await asyncio.shield(_schedule_disconnect(session))
+        else:
+            task.add_done_callback(_discard_connected_session)
         raise
     except Exception:
-        _discard_connected_session(task)
+        session = _connected_session(task)
+        if session is not None:
+            await asyncio.shield(_schedule_disconnect(session))
         raise
 
 
@@ -102,18 +135,18 @@ async def operation(request: Request, operation: str):
                                        save_connection, SAVE_ERROR)
 
             if "profile_id" in data:
-                if set(data) - {"profile_id", "master_password"}:
-                    raise ValueError("저장된 서버는 선택한 설정과 Jasypt 키로 연결하세요.")
-                selected = await run_in_threadpool(decrypt_connection, data.get("profile_id"), data.get("master_password"))
+                if set(data) - {"profile_id"}:
+                    raise ValueError("저장된 서버의 접속 프로필을 선택하세요.")
+                selected = await run_in_threadpool(decrypt_connection, data.get("profile_id"))
                 result = await _connect_for_request(request, selected["connection"])
                 result["profile_name"] = selected["profile_name"]
                 if selected.get("database"):
                     result["database"] = selected["database"]
                 save_function, save_arguments = remember_connection, (data.get("profile_id"),)
             else:
-                if set(data) - {"host", "port", "user", "password", "master_password"}:
-                    raise ValueError("접속 정보와 저장용 Jasypt 키를 입력하세요.")
-                prepared = await run_in_threadpool(prepare_connection, data, data.get("master_password"))
+                if set(data) - {"host", "port", "user", "password"}:
+                    raise ValueError("서버 주소·포트·사용자·DB 비밀번호를 입력하세요.")
+                prepared = await run_in_threadpool(prepare_connection, data)
                 result = await _connect_for_request(request, prepared["connection"])
                 save_function, save_arguments = save_connection, (prepared,)
             try:
@@ -127,10 +160,7 @@ async def operation(request: Request, operation: str):
                 if await request.is_disconnected():
                     raise ValueError("접속 요청이 종료되었습니다. 다시 접속하세요.")
             except (asyncio.CancelledError, ValueError):
-                try:
-                    manager.disconnect(result["session"])
-                except Exception:
-                    pass
+                await asyncio.shield(_schedule_disconnect(result["session"]))
                 raise
         elif operation in ("owners", "objects"):
             database = data.get("database")

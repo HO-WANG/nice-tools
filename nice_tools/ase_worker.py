@@ -1,8 +1,8 @@
 """Isolated ASE operations with a single-request newline JSON protocol.
 
 Credentials arrive over stdin for isolated file transfers. Catalog and preview
-operations can run in the application thread while SAP clients remain child
-processes registered for cancellation.
+operations reuse the application's ODBC session; BCP remains a child process
+owned by the transfer worker's cancellation group.
 """
 
 from __future__ import annotations
@@ -132,12 +132,12 @@ def _input_guard(path: Path):
         library.CloseHandle(handle)
 
 
-def _preview(payload: dict, emit: Callable, register=None) -> dict:
+def _preview(payload: dict, emit: Callable, catalog=None) -> dict:
     direction = _direction(payload)
     path = _path(payload.get("path"))
     files = _module("ase_files")
     options = files.parse_options(payload.get("options", {}))
-    metadata = _module("ase_cli").run_operation({**payload, "operation": "columns"}, emit, register=register)
+    metadata = (catalog or _module("ase_odbc").run_operation)({**payload, "operation": "columns"}, emit=emit)
     if not isinstance(metadata, dict) or not isinstance(metadata.get("columns"), list):
         raise ValueError("ASE did not return valid object metadata.")
     result = {**metadata, "path": str(path), "warnings": []}
@@ -195,7 +195,7 @@ def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
                 stage.unlink(missing_ok=True)
 
 
-def execute(payload: dict, emit: Callable | None = None, register=None) -> dict:
+def execute(payload: dict, emit: Callable | None = None, register=None, catalog=None) -> dict:
     """Execute one operation; SAP errors propagate for protocol sanitization."""
     if not isinstance(payload, dict):
         raise ValueError("Worker request must be a JSON object.")
@@ -206,7 +206,7 @@ def execute(payload: dict, emit: Callable | None = None, register=None) -> dict:
     if operation == "pick":
         return _module("ase_picker").pick_file(payload.get("direction"), payload.get("suggested_name"))
     if operation == "preview":
-        return _preview(payload, emit, register=register)
+        return _preview(payload, emit, catalog=catalog)
     if operation == "transfer":
         direction = _direction(payload)
         payload = {**payload, "options": {**payload["options"], "direction": direction}}
@@ -217,7 +217,7 @@ def execute(payload: dict, emit: Callable | None = None, register=None) -> dict:
             _check_input(path, payload.get("fingerprint"))
             return _module("ase_cli").run_operation(payload, emit, register=register)
     if operation in CATALOG_OPERATIONS:
-        return _module("ase_cli").run_operation(payload, emit, register=register)
+        return (catalog or _module("ase_odbc").run_operation)(payload, emit=emit)
     raise ValueError("Unknown ASE worker operation.")
 
 

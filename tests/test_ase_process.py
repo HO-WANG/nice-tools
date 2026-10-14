@@ -224,31 +224,22 @@ def test_windows_owns_descendants_spawned_before_password_prompt(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "nt" or not os.environ.get("NICE_TOOLS_SAP_TEST_CLIENTS"), reason="Requires compiled Windows console fixtures")
-@pytest.mark.parametrize("tool", ["isql", "bcp"])
-def test_windows_native_console_password_and_complete_exit_output(tmp_path, tool):
+def test_windows_native_console_password_and_complete_exit_output(tmp_path):
     folder = Path(os.environ["NICE_TOOLS_SAP_TEST_CLIENTS"])
-    executable = folder / (tool + ".exe")
+    executable = folder / "bcp.exe"
     assert executable.is_file(), "The CI console fixture must exist."
     fixture_password = "fixture-db-password-never-log!42"
     handles = []
     output_file = tmp_path / "한글 output.txt"
-    if tool == "isql":
-        script = tmp_path / "한글 query.sql"
-        script.write_text("select name from master..sysdatabases\ngo\nexit\n", encoding="utf-8")
-        argv = [str(executable), "-J", "utf8", "-z", "us_english", "-i", str(script), "-o", str(output_file)]
-    else:
-        argv = [str(executable), "fixture_db.dbo.orders", "out", str(output_file), "-c", "-J", "utf8", "-t", "\t", "-r", "\n", "-T", "2147483647"]
+    argv = [str(executable), "fixture_db.dbo.orders", "out", str(output_file), "-c", "-J", "utf8", "-t", "\t", "-r", "\n", "-T", "2147483647"]
     chunks = []
     result = run(argv, fixture_password, on_output=chunks.append, register=handles.append, timeout=10)
     assert result["returncode"] == 0
     assert fixture_password not in result["stdout"]
     assert fixture_password not in "".join(chunks)
     assert handles[0].poll() == 0
-    if tool == "isql":
-        assert "~NT~D|5|fixture_db|~END~" in output_file.read_text(encoding="utf-8")
-    else:
-        assert "3 rows copied." in result["stdout"]
-        assert output_file.read_bytes() == b"1\n2\n3\n"
+    assert "3 rows copied." in result["stdout"]
+    assert output_file.read_bytes() == b"1\n2\n3\n"
 
 
 def test_worker_resume_helper_is_inert_off_windows():

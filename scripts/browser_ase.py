@@ -16,9 +16,10 @@ from playwright.sync_api import expect, sync_playwright
 
 SESSION = "session-1"
 PASSWORD = "browser-only-password-7!"
-MASTER_PASSWORD = "browser-only-master-key-9!"
+FIXED_PROFILE_KEY = "nice1234!!"
 PROFILE_PATH = r"C:\nice-tools\ase-connections.txt"
-CLIENT_PATHS = {"isql_path": r"C:\SAP\OCS-16_0\bin\isql.exe", "bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
+CLIENT_PATHS = {"bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
+ODBC = {"driver": "Adaptive Server Enterprise", "drivers": ["Adaptive Server Enterprise"]}
 PROFILES = [
     {"id": "main", "name": "운영 ASE", "host": "ase.saved.internal", "port": 5001, "user": "saved_user", "database": "db1"},
     {"id": "hostile", "name": '<img src=x onerror="window.__aseXss=true">', "host": "ase.backup.internal", "port": 5002, "user": "backup_user", "database": "missing_db"},
@@ -66,6 +67,7 @@ class ASEMock:
     delay_connect: bool = False
     delay_start: bool = False
     runtime_available: bool = True
+    bcp_available: bool = True
     pending_profiles: list = field(default_factory=list)
     pending_connects: list = field(default_factory=list)
     pending_starts: list = field(default_factory=list)
@@ -76,18 +78,19 @@ class ASEMock:
     completed_bcp_statistics: dict | None = None
     terminal_state: str = "succeeded"
     owners_override: list | None = None
-    timings: dict | None = field(default_factory=lambda: {"client_seconds": 0.6, "total_seconds": 0.75})
+    timings: dict | None = field(default_factory=lambda: {"login_seconds": 0.1, "query_seconds": 0.5, "total_seconds": 0.75})
     last_profile_id: str = ""
     auto_save: bool = False
     fail_save: bool = False
     fail_connect: bool = False
     replace_profile_after_save: bool | str = False
+    legacy_profile: bool = False
 
     def timed(self, payload):
         return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
 
     def profile_response(self):
-        return {"path": PROFILE_PATH, "exists": self.profiles_exist, "profiles": self.profiles, "jasypt": JASYPT, "clients": CLIENT_PATHS, "last_profile_id": self.last_profile_id}
+        return {"path": PROFILE_PATH, "exists": self.profiles_exist, "profiles": self.profiles, "jasypt": JASYPT, "clients": CLIENT_PATHS, "odbc": ODBC, "last_profile_id": self.last_profile_id}
 
     def respond(self, route, payload, status=200):
         route.fulfill(status=status, json=payload, headers={"Cache-Control": "no-store"})
@@ -116,12 +119,13 @@ class ASEMock:
         try:
             assert not parsed.query, "ASE request has a query string"
             assert PASSWORD not in request.url, "Password leaked into URL"
-            assert MASTER_PASSWORD not in request.url, "Master key leaked into URL"
+            assert FIXED_PROFILE_KEY not in request.url, "Fixed profile key must not be sent by the browser"
+            assert "master_password" not in (payload or {}), "ASE profile key must not be supplied by the browser"
             assert headers.get("cache-control") == "no-store", "ASE request must disable caching"
             assert headers.get("x-nice-tools") == "ase", "ASE request is missing its browser-origin guard"
             if endpoint == "status":
                 assert request.method == "GET"
-                return self.respond(route, {"available": self.runtime_available, "backend": "SAP CLI", "detail": "ready" if self.runtime_available else "SAP isql.exe / bcp.exe를 찾을 수 없습니다.", "platform": "win32", **(CLIENT_PATHS if self.runtime_available else {})})
+                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": ODBC, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
             if endpoint == "profiles":
                 assert request.method == "GET"
                 if self.delay_profiles:
@@ -141,20 +145,21 @@ class ASEMock:
                     return self.respond(route, {"detail": "서버에 연결하지 못했습니다."}, status=400)
                 response = self.timed({"session": SESSION, "databases": [{"id": 1, "name": "db1"}, {"id": 2, "name": "db2"}]})
                 if "profile_id" in payload:
-                    assert set(payload) == {"profile_id", "master_password"}
-                    assert payload["master_password"] == MASTER_PASSWORD
+                    assert set(payload) == {"profile_id"}
+                    if self.legacy_profile:
+                        return self.respond(route, {"detail": "저장된 비밀번호를 복호화할 수 없습니다. 직접 입력으로 접속해 다시 저장하세요."}, status=400)
                     profile = next(profile for profile in self.profiles if profile["id"] == payload["profile_id"])
                     self.last_profile_id = profile["id"]
                     response.update({"profile_id": profile["id"], "profile_name": profile["name"], "database": profile.get("database")})
                 else:
                     assert payload in [
-                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD, "master_password": MASTER_PASSWORD},
-                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": "", "master_password": MASTER_PASSWORD},
+                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD},
+                        {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": ""},
                     ]
                     if self.fail_save:
                         response.update({"saved": False, "save_warning": HOSTILE_ERROR})
                     elif self.auto_save:
-                        saved = {"id": "saved-new", "name": "tester@ase.example.internal:5000", "host": payload["host"], "port": payload["port"], "user": payload["user"]}
+                        saved = {"id": "saved-new", "name": f"{payload['host']}-{payload['user']}", "host": payload["host"], "port": payload["port"], "user": payload["user"]}
                         self.profiles = [profile for profile in self.profiles if profile["id"] != saved["id"]] + [saved]
                         self.profiles_exist = True
                         self.last_profile_id = saved["id"]
@@ -179,7 +184,7 @@ class ASEMock:
             assert payload.get("session") == SESSION
             assert "password" not in payload and "master_password" not in payload and "host" not in payload and "user" not in payload, "Credentials must only be sent to connect"
             assert PASSWORD not in str(payload), "Credentials leaked into a later API request"
-            assert MASTER_PASSWORD not in str(payload), "Master key leaked into a later API request"
+            assert FIXED_PROFILE_KEY not in str(payload), "Fixed profile key must not be sent by the browser"
             if endpoint == "owners":
                 assert set(payload) == {"session", "database"}
                 if self.delay_owners and payload["database"] == "db1":
@@ -320,8 +325,8 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#jasypt-tool")).to_be_hidden()
     expect(page.locator("#current-tool")).to_have_text(tool_title)
     expect(page.locator("#ase-password")).to_have_attribute("type", "password")
-    expect(page.locator("#ase-master-password")).to_have_attribute("type", "password")
-    expect(page.locator("#ase-client-paths")).to_contain_text(CLIENT_PATHS["isql_path"])
+    assert page.locator("#ase-master-password, #ase-master-key-field").count() == 0
+    expect(page.locator("#ase-odbc-driver")).to_contain_text(ODBC["driver"])
     expect(page.locator("#ase-client-paths")).to_contain_text(CLIENT_PATHS["bcp_path"])
     assert len(mock.endpoint_calls("profiles")) == 1, "ASE must load saved profiles during initialization"
     expect(page.locator("#ase-profile")).to_have_value("")
@@ -331,15 +336,16 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-password")).to_have_value("")
     expect(page.locator("#ase-catalog-timings")).to_be_visible()
     expect(page.locator("#ase-catalog-timings")).to_contain_text("서버 연결 · 총 0.75초")
-    expect(page.locator("#ase-catalog-timings")).to_contain_text("CLI 실행 0.60초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("조회 0.50초")
     expect(page.locator("#ase-catalog-timings")).to_contain_text("앱 준비 0.15초")
-    assert "로그인" not in page.locator("#ase-catalog-timings").inner_text()
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("로그인 0.10초")
+    assert "CLI" not in page.locator("#ase-catalog-timings").inner_text()
+    mock.timings = {"login_seconds": 0, "query_seconds": 0.5, "total_seconds": 0.75}
     page.locator("#ase-database").select_option("db1")
     expect(page.locator("#ase-owner")).to_be_enabled()
     assert not mock.endpoint_calls("owners"), "DB selection must remain local until Search"
@@ -398,19 +404,19 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-object-body button")).to_have_count(4)
 
     # Missing and invalid timing payloads must not retain prior measurements.
-    for timings in (None, {"total_seconds": -1}, {"total_seconds": HOSTILE_SAMPLE}, {"total_seconds": 0.5, "client_seconds": "0.1"}, {"total_seconds": 1, "client_seconds": -0.1}):
+    for timings in (None, {"total_seconds": -1}, {"total_seconds": HOSTILE_SAMPLE}, {"total_seconds": 0.5, "query_seconds": "0.1"}, {"total_seconds": 1, "login_seconds": -0.1}):
         mock.timings = timings
         select_table(page)
         expect(page.locator("#ase-catalog-timings")).to_be_hidden()
-    mock.timings = {"client_seconds": 0.6, "total_seconds": 0.75}
+    mock.timings = {"login_seconds": 0, "query_seconds": 0.5, "total_seconds": 0.75}
     select_table(page)
     expect(page.locator("#ase-catalog-timings")).to_contain_text("컬럼 조회")
-    expect(page.locator("#ase-catalog-timings")).to_contain_text("CLI 실행 0.60초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("조회 0.50초")
     assert page.locator("#ase-catalog-timings svg").count() == 0
-    mock.timings = {"client_seconds": 0.15, "total_seconds": 5.0}
+    mock.timings = {"login_seconds": 0, "query_seconds": 0.15, "total_seconds": 5.0}
     select_table(page)
     expect(page.locator("#ase-catalog-timings")).to_contain_text("앱 준비 4.85초")
-    mock.timings = {"client_seconds": 0.6, "total_seconds": 0.75}
+    mock.timings = {"login_seconds": 0, "query_seconds": 0.5, "total_seconds": 0.75}
 
     # User tables import/export, views export, and procedures remain browse-only.
     select_table(page)
@@ -700,7 +706,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
 
 
 def validate_profiles(page, url):
-    """Exercise public profiles, master-key lifetime, fallback, and races in the real UI."""
+    """Exercise public profiles, password-free saved login, fallback, and races in the real UI."""
     mock = ASEMock(profiles=list(PROFILES), profiles_exist=True)
     errors, console = [], []
     page.on("pageerror", lambda error: errors.append(str(error)))
@@ -724,17 +730,14 @@ def validate_profiles(page, url):
     expect(page.locator("#ase-user")).to_have_value("saved_user")
     for selector in ("#ase-host", "#ase-port", "#ase-user"):
         expect(page.locator(selector)).to_have_attribute("readonly", "")
-    expect(page.locator("#ase-password-label")).to_have_text("Jasypt 복호화 키")
+    expect(page.locator("#ase-password-field")).to_be_hidden()
+    expect(page.locator("#ase-password")).to_be_disabled()
     expect(page.locator("#ase-profile-jasypt")).to_contain_text("PBEWithMD5AndDES")
     expect(page.locator("#ase-profile-jasypt")).to_contain_text("1,000")
-    page.locator("#ase-connect").click()
-    assert not mock.endpoint_calls("connect"), "Profile connection requires its master key"
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-profile").select_option("hostile")
     expect(page.locator("#ase-password")).to_have_value("")
     expect(page.locator("#ase-host")).to_have_value("ase.backup.internal")
     page.locator("#ase-profile").select_option("main")
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-password")).to_have_value("")
     expect(page.locator("#ase-database")).to_have_value("db1")
@@ -760,7 +763,6 @@ def validate_profiles(page, url):
 
     # An unknown configured database leaves normal DB selection available.
     page.locator("#ase-profile").select_option("hostile")
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-database")).to_have_value("")
@@ -775,7 +777,6 @@ def validate_profiles(page, url):
     page.locator("#ase-password").fill(PASSWORD)
     page.locator("#ase-host").fill("ase.example.internal")
     expect(page.locator("#ase-password")).to_have_value("")
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     assert mock.endpoint_calls("connect")[-1]["payload"]["password"] == ""
@@ -784,7 +785,6 @@ def validate_profiles(page, url):
 
     # A malformed file reports literal text and keeps direct entry available.
     page.locator("#ase-profile").select_option("main")
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     mock.fail_profiles = True
     page.locator("#ase-profile-reload").click()
     expect(page.locator("#ase-password")).to_have_value("")
@@ -801,7 +801,6 @@ def validate_profiles(page, url):
     page.locator("#ase-profile-reload").click()
     page.wait_for_timeout(30)
     assert mock.pending_profiles
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-profile").select_option("hostile")
     route, response = mock.pending_profiles.pop()
     mock.respond(route, response)
@@ -825,7 +824,6 @@ def validate_profiles(page, url):
 
     # Reloading during connect abandons its late session without reviving the key.
     mock.delay_connect = True
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     page.wait_for_timeout(30)
     assert mock.pending_connects
@@ -833,7 +831,6 @@ def validate_profiles(page, url):
     expect(page.locator("#ase-connect")).to_be_enabled()
     # A new connection can browse while the abandoned request still completes.
     mock.delay_owners = True
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_have_value("db1")
     focus_owner(page)
@@ -859,7 +856,6 @@ def validate_profiles(page, url):
     page.locator("#ase-profile-reload").click()
     expect(page.locator("#ase-profile option[value='hostile']")).to_have_count(1)
     mock.delay_connect = True
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     page.wait_for_timeout(30)
     assert mock.pending_connects
@@ -893,7 +889,7 @@ def validate_profiles(page, url):
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
     assert page.evaluate("window.__aseStorageWrites") == []
     assert page.evaluate("window.__aseXss") is False
-    assert all(PASSWORD not in message and MASTER_PASSWORD not in message for message in console)
+    assert all(PASSWORD not in message and FIXED_PROFILE_KEY not in message for message in console)
     assert not mock.violations, mock.violations
     assert not errors, errors
 
@@ -902,22 +898,22 @@ def validate_profiles(page, url):
     page.reload(wait_until="networkidle")
     expect(page.locator("#ase-profile")).to_have_value("main")
     expect(page.locator("#ase-connect")).to_be_disabled()
-    expect(page.locator("#ase-runtime")).to_contain_text("SAP isql.exe / bcp.exe를 찾을 수 없습니다.")
+    expect(page.locator("#ase-runtime")).to_contain_text("SAP ASE ODBC 드라이버를 찾을 수 없습니다.")
 
-    # A delayed initial file read must not overwrite manual fields or a newly typed key.
+    # A delayed initial file read must not overwrite manual fields or a newly typed DB password.
     mock.runtime_available = True
     mock.delay_profiles = True
     page.reload(wait_until="domcontentloaded")
     page.locator('a[data-tool="ase-tool"]').click()
     page.locator("#ase-host").fill("manual.changed.internal")
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
+    page.locator("#ase-password").fill(PASSWORD)
     assert mock.pending_profiles
     route, response = mock.pending_profiles.pop()
     mock.respond(route, response)
     page.wait_for_timeout(100)
     expect(page.locator("#ase-profile")).to_have_value("")
     expect(page.locator("#ase-host")).to_have_value("manual.changed.internal")
-    expect(page.locator("#ase-password")).to_have_value(MASTER_PASSWORD)
+    expect(page.locator("#ase-password")).to_have_value(PASSWORD)
     assert not mock.violations, mock.violations
     assert not errors, errors
 
@@ -940,21 +936,18 @@ def validate_saved_connections(page, url):
     page.goto(url, wait_until="networkidle")
     page.locator('a[data-tool="ase-tool"]').click()
     expect(page.locator("#ase-profile")).to_have_value("hostile")
-    expect(page.locator("#ase-master-key-field")).to_be_hidden()
+    assert page.locator("#ase-master-key-field").count() == 0
     page.locator("#ase-profile").select_option("")
-    expect(page.locator("#ase-master-key-field")).to_be_visible()
+    expect(page.locator("#ase-password-field")).to_be_visible()
     page.locator("#ase-host").fill("ase.example.internal")
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
     page.locator("#ase-connect").click()
-    assert not mock.endpoint_calls("connect"), "Manual connections must receive an encryption key before login"
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
-    page.locator("#ase-connect").click()
     expect(page.locator("#ase-profile")).to_have_value("saved-new")
+    expect(page.locator("#ase-profile option:checked")).to_contain_text("ase.example.internal-tester")
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-password")).to_have_value("")
-    expect(page.locator("#ase-master-password")).to_have_value("")
     expect(page.locator("#ase-feedback")).to_contain_text("저장")
     assert not mock.endpoint_calls("disconnect"), "Refreshing saved profiles must preserve the newly opened session"
     page.locator("#ase-database").select_option("db1")
@@ -970,10 +963,9 @@ def validate_saved_connections(page, url):
     page.locator('a[data-tool="ase-tool"]').click()
     expect(page.locator("#ase-profile")).to_have_value("saved-new")
     expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
-    page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
-    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new", "master_password": MASTER_PASSWORD}
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new"}
     page.locator("#ase-disconnect").click()
 
     # A file write error keeps the successful login usable and shows only safe text.
@@ -982,7 +974,6 @@ def validate_saved_connections(page, url):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     mock.fail_save = True
     profiles_before = len(mock.endpoint_calls("profiles"))
     page.locator("#ase-connect").click()
@@ -990,23 +981,20 @@ def validate_saved_connections(page, url):
     expect(page.locator("#ase-feedback")).to_contain_text(HOSTILE_ERROR)
     assert not page.locator("#ase-feedback script").count()
     expect(page.locator("#ase-password")).to_have_value("")
-    expect(page.locator("#ase-master-password")).to_have_value("")
     assert len(mock.endpoint_calls("profiles")) == profiles_before
     page.locator("#ase-disconnect").click()
 
     mock.fail_connect = True
     page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-feedback")).to_contain_text("서버에 연결하지 못했습니다.")
     expect(page.locator("#ase-database")).to_be_disabled()
     expect(page.locator("#ase-password")).to_have_value("")
-    expect(page.locator("#ase-master-password")).to_have_value("")
     assert len(mock.endpoint_calls("profiles")) == profiles_before, "Failed login must not refresh or save a profile"
     assert mock.last_profile_id == "saved-new"
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
     assert page.evaluate("window.__aseStorageWrites") == []
-    assert all(PASSWORD not in message and MASTER_PASSWORD not in message for message in console)
+    assert all(PASSWORD not in message and FIXED_PROFILE_KEY not in message for message in console)
     assert not mock.violations, mock.violations
     assert not errors, errors
 
@@ -1021,7 +1009,6 @@ def validate_saved_profile_race(page, url, retain_profile=False):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-profile")).to_have_value("rotated-profile" if retain_profile else "")
@@ -1035,6 +1022,69 @@ def validate_saved_profile_race(page, url, retain_profile=False):
     assert not mock.violations, mock.violations
 
 
+def validate_legacy_profile(page, url):
+    """Old user-key profiles give a re-save path without asking for an encryption key."""
+    mock = ASEMock(profiles=[PROFILES[0]], profiles_exist=True, legacy_profile=True, auto_save=True)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-password-field")).to_be_hidden()
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-feedback")).to_contain_text("직접 입력으로 접속해 다시 저장")
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "main"}
+    expect(page.locator("#ase-database")).to_be_disabled()
+    page.locator("#ase-profile").select_option("")
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-profile")).to_have_value("saved-new")
+    expect(page.locator("#ase-feedback")).to_contain_text("저장")
+    page.locator("#ase-disconnect").click()
+    mock.legacy_profile = False
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new"}
+    assert page.locator("#ase-master-password, #ase-master-key-field").count() == 0
+    assert FIXED_PROFILE_KEY not in page.locator("#ase-tool").inner_text()
+    page.locator('a[data-tool="jasypt-tool"]').click()
+    page.locator("#jasypt-password").fill("independent-custom-key")
+    expect(page.locator("#jasypt-password")).to_have_value("independent-custom-key")
+    assert not mock.violations, mock.violations
+
+
+def validate_driver_status(page, url):
+    """ODBC catalog access remains useful when the installed BCP tool is missing."""
+    mock = ASEMock(bcp_available=False)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-odbc-driver")).to_contain_text(ODBC["driver"])
+    expect(page.locator("#ase-bcp-runtime")).to_contain_text("bcp.exe")
+    expect(page.locator("#ase-connect")).to_be_enabled()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    select_table(page)
+    expect(page.locator("#ase-column-body")).to_contain_text("varchar(255)")
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    expect(page.locator("#ase-preview")).to_be_disabled()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    expect(page.locator("#ase-transfer-note")).to_contain_text("bcp.exe")
+    assert not mock.endpoint_calls("pick-file")
+    mock.runtime_available = False
+    page.reload(wait_until="networkidle")
+    expect(page.locator("#ase-connect")).to_be_disabled()
+    expect(page.locator("#ase-runtime")).to_contain_text("ODBC 드라이버")
+    assert not mock.violations, mock.violations
+
+
 def validate_removed_owner(page, url):
     """A full owner refresh must invalidate a now-missing selected owner's review."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
@@ -1045,7 +1095,6 @@ def validate_removed_owner(page, url):
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
     page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-master-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     page.locator("#ase-database").select_option("db1")
@@ -1078,9 +1127,11 @@ def main():
         validate_saved_connections(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url, retain_profile=True)
+        validate_legacy_profile(context.new_page(), args.url)
+        validate_driver_status(context.new_page(), args.url)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP client paths and CLI/app timings, saved manual connections and last-profile selection, master-key lifetime, removed owner invalidation, job locks, total/CLI OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale responses, SAP ODBC driver/BCP paths and persistent-connection timings, saved manual connections and last-profile selection, fixed-key profile contract, removed owner invalidation, job locks, total/CLI OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

@@ -1,13 +1,19 @@
 # Copy this file beside nice-tools.exe as ase-connections.txt (UTF-8).
 # New successful connections are saved automatically with encrypted passwords.
+# Saved connection names use server-address-account; collisions receive a suffix.
 # Manual examples below require actual Jasypt ciphertext instead of placeholders.
-# Enter the Jasypt master key in the UI; never write it or plaintext passwords here.
+# ASE profiles always use the fixed Jasypt password nice1234!!; no key input UI.
+# Never write plaintext DB passwords here.
 # Comments must occupy their own lines. Settings apply to all server sections.
 # Optional explicit SAP paths; omit this section to use PATH/SYBASE/SYBASE_OCS.
 
 [sap_client]
-isql_path = C:\SAP\OCS-16_0\bin\isql.exe
 bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
+
+# Optional: exact SAP ASE driver name from the Windows 64-bit ODBC administrator.
+# Remove this section to select a registered SAP ASE driver automatically.
+[odbc]
+driver = Adaptive Server Enterprise
 
 [jasypt]
 algorithm = PBEWithMD5AndDES
@@ -16,14 +22,14 @@ salt_generator = random
 iv_generator = none
 output_type = base64
 
-[Development ASE]
+[ase-dev.example.internal-bcp_user]
 host = ase-dev.example.internal
 port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 database = appdb
 
-[Test ASE]
+[ase-test.example.internal-bcp_user]
 host = ase-test.example.internal
 port = 5000
 user = bcp_user
@@ -32,4 +38,4 @@ password = ENC(PASTE_JASYPT_RESULT_HERE)
 
 [preferences]
 # Updated automatically after a successful connection.
-last_profile = Development ASE
+last_profile = ase-dev.example.internal-bcp_user

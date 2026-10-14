@@ -1,4 +1,4 @@
-"""Memory-only ASE sessions and isolated, cancellable worker processes."""
+"""Persistent ASE ODBC sessions and isolated, cancellable BCP workers."""
 
 from __future__ import annotations
 
@@ -87,6 +87,7 @@ class AseManager:
         self.processes = {}
         self.worker_jobs = {}
         self.closed = False
+        self.pending_adapters = set()
 
     @staticmethod
     def _redact(text, connection):
@@ -105,20 +106,6 @@ class AseManager:
                 raise ValueError("접속 정보가 만료되었습니다. 다시 접속하세요.")
             session["touched"] = time.monotonic()
             return session
-
-    def _register_client(self, token=None):
-        """Register a SAP process until its runner invokes the returned cleanup."""
-        def register(process):
-            with self.lock:
-                if self.closed or (token is not None and token not in self.sessions):
-                    process.kill()
-                    raise ValueError("접속 요청이 취소되었습니다.")
-                self.processes[process] = token
-            def cleanup():
-                with self.lock:
-                    self.processes.pop(process, None)
-            return cleanup
-        return register
 
     def _terminate(self, process):
         """Kill the owned process tree, including children of a finished worker."""
@@ -184,22 +171,33 @@ class AseManager:
                 self.processes.pop(process, None)
             raise
 
-    def _invoke_direct(self, payload, session=None):
-        """Run SAP CLI operations without booting another one-file executable."""
-        from . import ase_cli
+    @staticmethod
+    def _close_adapter(adapter):
+        if adapter is None:
+            return
+        # Cancel outside the adapter's query lock, then close after the active
+        # cursor releases it. Continue cleanup if the driver reports an error.
+        with contextlib.suppress(Exception):
+            adapter.cancel()
+        with contextlib.suppress(Exception):
+            adapter.close()
+
+    def _invoke_direct(self, payload, session=None, adapter=None):
+        """Reuse the owning session's ODBC connection for catalogs/preview."""
         from .ase_worker import execute
         started_at = time.monotonic()
         with self.lock:
             if self.closed:
                 raise ValueError("접속 요청이 취소되었습니다.")
+        if adapter is None:
+            adapter = self._session(session)["adapter"]
         try:
-            register = self._register_client(session)
             if payload["operation"] == "preview":
-                result = execute(payload, register=register)
+                result = execute(payload, catalog=adapter.run_operation)
             else:
-                result = ase_cli.run_operation(payload, register=register)
+                result = adapter.run_operation(payload)
             if not isinstance(result, dict):
-                raise ValueError("SAP 클라이언트의 응답을 읽지 못했습니다.")
+                raise ValueError("ASE ODBC 응답을 읽지 못했습니다.")
             if isinstance(result.get("timings"), dict):
                 result["timings"] = {**result["timings"], "total_seconds": max(0.0, time.monotonic() - started_at)}
             return result
@@ -235,25 +233,53 @@ class AseManager:
         return {**client_status(), "platform": sys.platform}
 
     def connect(self, payload):
+        from . import ase_odbc
         connection = connection_data(payload)
-        result = self._invoke_direct({"operation": "databases", "connection": connection})
-        with self.lock:
-            if self.closed:
-                raise ValueError("접속 요청이 취소되었습니다.")
-            # Expire idle sessions; active transfers keep their owning session.
-            now = time.monotonic()
-            expired = [token for token, item in self.sessions.items()
-                       if now - item["touched"] > 3600 and not self._running(item)]
-            for token in expired:
-                self.sessions.pop(token, None)
-            if len(self.sessions) >= 16:
-                raise ValueError("접속이 너무 많습니다. 사용하지 않는 접속을 해제하세요.")
-            token = secrets.token_urlsafe(32)
-            self.sessions[token] = {"connection": connection, "files": {}, "reviews": {}, "jobs": {}, "touched": now}
-        public = {"session": token, "databases": result.get("databases", [])}
-        if isinstance(result.get("timings"), dict):
-            public["timings"] = result["timings"]
-        return public
+        started_at = time.monotonic()
+        adapter = None
+        expired_adapters = []
+        try:
+            with self.lock:
+                if self.closed:
+                    raise ValueError("접속 요청이 취소되었습니다.")
+            adapter = ase_odbc.OdbcSession(connection)
+            with self.lock:
+                if self.closed:
+                    raise ValueError("접속 요청이 취소되었습니다.")
+                # Own the adapter before it logs in or starts setup queries so
+                # shutdown can cancel an initial query and close late handles.
+                self.pending_adapters.add(adapter)
+            adapter.open()
+            result = self._invoke_direct({"operation": "databases", "connection": connection}, adapter=adapter)
+            with self.lock:
+                if self.closed:
+                    raise ValueError("접속 요청이 취소되었습니다.")
+                # Expire idle sessions; active transfers keep their owner.
+                now = time.monotonic()
+                expired = [token for token, item in self.sessions.items()
+                           if now - item["touched"] > 3600 and not self._running(item)]
+                for token in expired:
+                    item = self.sessions.pop(token)
+                    expired_adapters.append(item.get("adapter"))
+                if len(self.sessions) >= 16:
+                    raise ValueError("접속이 너무 많습니다. 사용하지 않는 접속을 해제하세요.")
+                token = secrets.token_urlsafe(32)
+                self.sessions[token] = {"connection": connection, "adapter": adapter, "files": {}, "reviews": {}, "jobs": {}, "touched": now}
+                self.pending_adapters.discard(adapter)
+            public = {"session": token, "databases": result.get("databases", [])}
+            if isinstance(result.get("timings"), dict):
+                public["timings"] = {**result["timings"], "total_seconds": max(0.0, time.monotonic() - started_at)}
+            adapter = None  # Ownership moved to the registered session.
+            return public
+        except (ValueError, OSError) as error:
+            raise ValueError(self._redact(error, connection)) from None
+        finally:
+            if adapter is not None:
+                with self.lock:
+                    self.pending_adapters.discard(adapter)
+                self._close_adapter(adapter)
+            for expired in expired_adapters:
+                self._close_adapter(expired)
 
     def catalog(self, token, operation, **parameters):
         session = self._session(token)
@@ -485,11 +511,15 @@ class AseManager:
                 if owner == token:
                     self._terminate(process)
             self.sessions.pop(token, None)
+        self._close_adapter(session.get("adapter"))
         return {"ok": True}
 
     def close(self):
         with self.lock:
             self.closed = True
+            adapters = [session.get("adapter") for session in self.sessions.values()]
+            adapters.extend(self.pending_adapters)
+            self.pending_adapters.clear()
             threads = []
             for session in self.sessions.values():
                 for job in session["jobs"].values():
@@ -501,6 +531,8 @@ class AseManager:
             for process in processes:
                 self._terminate(process)
             self.sessions.clear()
+        for adapter in adapters:
+            self._close_adapter(adapter)
         for process in processes:
             try:
                 process.wait(timeout=5)

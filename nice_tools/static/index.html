@@ -122,8 +122,10 @@
         </section>
       </section>
       <section id="ase-tool" aria-labelledby="ase-title" hidden>
-        <div class="page-heading"><h1 id="ase-title">Sybase ASE</h1><p>PC의 SAP isql로 DB 객체를 조회하고, SAP bcp로 텍스트 파일을 내보내거나 추가합니다.</p></div>
-        <p id="ase-runtime" class="feedback" role="status" aria-live="polite">SAP 클라이언트를 확인하는 중입니다.</p>
+        <div class="page-heading"><h1 id="ase-title">Sybase ASE</h1><p>SAP ASE ODBC로 DB 객체를 조회하고, PC의 SAP bcp로 텍스트 파일을 내보내거나 추가합니다.</p></div>
+        <p id="ase-runtime" class="feedback" role="status" aria-live="polite">SAP ASE ODBC 드라이버를 확인하는 중입니다.</p>
+        <p id="ase-odbc-driver" class="ase-client-paths" hidden></p>
+        <p id="ase-bcp-runtime" class="feedback" role="status" aria-live="polite" hidden></p>
         <p id="ase-client-paths" class="ase-client-paths" hidden></p>
         <form id="ase-connect-form" autocomplete="off">
           <section class="panel" aria-labelledby="ase-connection-title">
@@ -139,15 +141,14 @@
               <div class="field"><label for="ase-host">호스트</label><input id="ase-host" type="text" placeholder="서버 IP 또는 이름" autocomplete="off" spellcheck="false" required></div>
               <div class="field"><label for="ase-port">포트</label><input id="ase-port" type="number" min="1" max="65535" step="1" value="5000" inputmode="numeric" required></div>
               <div class="field"><label for="ase-user">사용자</label><input id="ase-user" type="text" autocomplete="off" spellcheck="false" required></div>
-              <div class="field"><label for="ase-password" id="ase-password-label">DB 비밀번호</label><input id="ase-password" type="password" autocomplete="off" spellcheck="false"></div>
+              <div class="field" id="ase-password-field"><label for="ase-password" id="ase-password-label">DB 비밀번호</label><input id="ase-password" type="password" autocomplete="off" spellcheck="false"></div>
               <button id="ase-connect" class="primary-button" type="submit" disabled>연결</button>
             </div>
-            <div id="ase-master-key-field" class="field ase-master-key-field"><label for="ase-master-password">저장용 Jasypt 키</label><input id="ase-master-password" type="password" autocomplete="off" spellcheck="false" aria-describedby="ase-master-key-help" required><p id="ase-master-key-help">접속에 성공하면 DB 비밀번호를 이 키로 암호화해 설정 파일에 저장합니다. 다음 연결에도 같은 키를 입력하세요. 키는 저장하지 않습니다.</p></div>
-            <p class="panel-footnote" id="ase-connection-note">성공한 연결 정보와 암호화된 DB 비밀번호는 EXE 옆 설정 파일에 저장합니다. 비밀번호와 Jasypt 키는 브라우저에 저장하지 않습니다.</p>
+            <p class="panel-footnote" id="ase-connection-note">성공한 연결 정보와 암호화된 DB 비밀번호는 EXE 옆 설정 파일에 저장합니다. 저장한 서버는 비밀번호를 다시 입력하지 않고 연결할 수 있습니다.</p>
           </section>
         </form>
         <p id="ase-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
-        <p id="ase-catalog-timings" class="ase-catalog-timings" role="status" aria-live="polite" title="CLI 실행은 isql 프로세스 시작부터 종료까지이며 로그인과 조회를 포함합니다. 앱 준비는 총시간에서 CLI 실행 시간을 제외한 값입니다." hidden></p>
+        <p id="ase-catalog-timings" class="ase-catalog-timings" role="status" aria-live="polite" title="서버 연결 시 ODBC 로그인과 조회 시간을 측정합니다. 이후 조회는 같은 연결을 사용합니다. 앱 준비는 총시간에서 측정한 로그인·조회 시간을 제외한 값입니다." hidden></p>
         <section id="ase-browser" class="panel" aria-labelledby="ase-browser-title" aria-busy="false">
           <div class="section-heading"><h2 id="ase-browser-title">DB 객체</h2><span id="ase-object-count" class="section-note">연결 후 선택할 수 있습니다.</span></div>
           <div class="ase-browser-controls">

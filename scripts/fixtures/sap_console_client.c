@@ -1,6 +1,6 @@
 /* Developer-only external PE fixtures. Not SAP clients or a database emulator.
  * Read the password from the console without echo to verify Windows ConPTY.
- * Deterministic catalogue/file responses exercise the application's integration.
+ * Deterministic file responses exercise BCP process integration; no database.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -62,43 +62,6 @@ static int authenticate(int argc, wchar_t **argv) {
     return 0;
 }
 
-static int isql(int argc, wchar_t **argv) {
-    const wchar_t *input_path = option(argc, argv, L"-i"), *output_path = option(argc, argv, L"-o");
-    FILE *input, *output;
-    char query[131072];
-    size_t length;
-    int object_id = 42;
-    const char *name = "orders";
-    if (!input_path || !output_path || !option(argc, argv, L"-J") || !option(argc, argv, L"-z")) return 4;
-    if (wcscmp(option(argc, argv, L"-J"), L"utf8") || wcscmp(option(argc, argv, L"-z"), L"us_english")) return 4;
-    input = _wfopen(input_path, L"rb");
-    if (!input) return 4;
-    length = fread(query, 1, sizeof(query) - 1, input);
-    query[length] = 0;
-    fclose(input);
-    if (strstr(query, "fixture-db-password") || strstr(query, "fixture-master")) return 4;
-    output = _wfopen(output_path, L"wb");
-    if (!output) return 4;
-    fputs("~NTBEGIN~\n~NT~V|Adaptive Server Enterprise/16.0|~END~\n", output);
-    if (strstr(query, "sysdatabases")) {
-        fputs("~NT~D|5|fixture_db|~END~\n", output);
-    } else if (strstr(query, "syscolumns")) {
-        if (strstr(query, "o.id = 43")) { object_id = 43; name = "cancel_me"; }
-        if (strstr(query, "o.id = 44")) { object_id = 44; name = "fail_me"; }
-        fprintf(output, "~NT~O|%d|7|dbo|%s|U|~END~\n", object_id, name);
-        fputs("~NT~C|1|id|56|int|4|0|0|0|0|~END~\n", output);
-    } else if (strstr(query, "sysusers") && strstr(query, "GROUP BY")) {
-        fputs("~NT~W|7|dbo|~END~\n", output);
-    } else {
-        fputs("~NT~O|42|7|dbo|orders|U|~END~\n", output);
-        fputs("~NT~O|43|7|dbo|cancel_me|U|~END~\n", output);
-        fputs("~NT~O|44|7|dbo|fail_me|U|~END~\n", output);
-    }
-    fputs("~NTEND~\n", output);
-    fclose(output);
-    return 0;
-}
-
 static int bcp(int argc, wchar_t **argv) {
     FILE *data;
     int rows = 0, character;
@@ -136,5 +99,5 @@ int wmain(int argc, wchar_t **argv) {
     audit(argc, argv, name);
     status = authenticate(argc, argv);
     if (status) return status;
-    return _wcsicmp(name, L"isql.exe") == 0 ? isql(argc, argv) : bcp(argc, argv);
+    return _wcsicmp(name, L"bcp.exe") == 0 ? bcp(argc, argv) : 4;
 }

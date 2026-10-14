@@ -4,12 +4,12 @@
   const get = (id) => document.getElementById(id);
   if (!get("ase-tool")) return;
   const state = {
-    available: false, session: null, databases: [], owners: [], ownersLoaded: false, objects: [], searched: false, object: null,
+    available: false, bcpAvailable: false, session: null, databases: [], owners: [], ownersLoaded: false, objects: [], searched: false, object: null,
     columns: [], columnsLoaded: false, file: null, path: "", review: null,
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
-    profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {},
+    profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "",
   };
-  const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password", "ase-master-password"];
+  const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password"];
   const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity"];
   const kindNames = { U: "테이블", V: "뷰", P: "프로시저" };
   const direction = () => get("ase-in").checked ? "in" : "out";
@@ -17,7 +17,7 @@
   const locked = () => active() || ["connect", "start", "disconnect", "cancel"].includes(state.busy);
   const profileLocked = () => active() || ["start", "disconnect", "cancel"].includes(state.busy);
   const selectedProfile = () => state.profiles.find((profile) => profile.id === state.profileId);
-  const transferable = () => state.columnsLoaded && state.object && (state.object.kind === "U" || (state.object.kind === "V" && direction() === "out"));
+  const transferable = () => state.bcpAvailable && state.columnsLoaded && state.object && (state.object.kind === "U" || (state.object.kind === "V" && direction() === "out"));
   const stale = () => new DOMException("요청이 변경되었습니다.", "AbortError");
 
   function feedback(message = "", error = false) {
@@ -28,17 +28,25 @@
 
   function clearSecrets() {
     get("ase-password").value = "";
-    get("ase-master-password").value = "";
+  }
+
+  function showOdbcDriver(odbc, configured = false) {
+    const driver = odbc && typeof odbc.driver === "string" ? odbc.driver : "";
+    if (configured) state.configuredDriver = driver;
+    else state.odbcDriver = driver;
+    const selected = state.odbcDriver || state.configuredDriver;
+    get("ase-odbc-driver").textContent = selected ? `ODBC 드라이버${state.odbcDriver ? "" : " (설정)"}: ${selected}` : "";
+    get("ase-odbc-driver").hidden = !selected;
   }
 
   function showClientPaths(paths, configured = false) {
     const values = {};
     if (paths && typeof paths === "object") {
-      for (const key of ["isql_path", "bcp_path"]) if (typeof paths[key] === "string" && paths[key]) values[key] = paths[key];
+      if (typeof paths.bcp_path === "string" && paths.bcp_path) values.bcp_path = paths.bcp_path;
     }
     if (configured) state.configuredPaths = values;
     else state.clientPaths = values;
-    get("ase-client-paths").textContent = [["isql", "isql_path"], ["bcp", "bcp_path"]]
+    get("ase-client-paths").textContent = [["bcp", "bcp_path"]]
       .filter(([, key]) => state.clientPaths[key] || state.configuredPaths[key])
       .map(([name, key]) => `${name}${state.clientPaths[key] ? "" : " (설정)"}: ${state.clientPaths[key] || state.configuredPaths[key]}`).join("\n");
     get("ase-client-paths").hidden = !get("ase-client-paths").textContent;
@@ -121,13 +129,15 @@
     clearTimings();
     const timings = data.timings;
     if (!timings || !Number.isFinite(timings.total_seconds) || timings.total_seconds < 0) return;
-    if ("client_seconds" in timings && (!Number.isFinite(timings.client_seconds) || timings.client_seconds < 0)) return;
+    const phases = ["login_seconds", "query_seconds"];
+    if (phases.some((key) => key in timings && (!Number.isFinite(timings[key]) || timings[key] < 0))) return;
+    const measured = phases.reduce((sum, key) => sum + (timings[key] || 0), 0);
+    if (!Number.isFinite(measured)) return;
     const seconds = (value) => `${value.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}초`;
     const parts = [`${label} · 총 ${seconds(timings.total_seconds)}`];
-    if (Number.isFinite(timings.client_seconds)) {
-      parts.push(`CLI 실행 ${seconds(timings.client_seconds)}`);
-      parts.push(`앱 준비 ${seconds(Math.max(0, timings.total_seconds - timings.client_seconds))}`);
-    }
+    if (Number.isFinite(timings.login_seconds)) parts.push(timings.login_seconds === 0 ? "연결 재사용" : `로그인 ${seconds(timings.login_seconds)}`);
+    if (Number.isFinite(timings.query_seconds)) parts.push(`조회 ${seconds(timings.query_seconds)}`);
+    if (phases.every((key) => Number.isFinite(timings[key]))) parts.push(`앱 준비 ${seconds(Math.max(0, timings.total_seconds - measured))}`);
     get("ase-catalog-timings").textContent = parts.join(" · ");
     get("ase-catalog-timings").hidden = false;
   }
@@ -216,7 +226,7 @@
     const session = state.session;
     reset("connection");
     clearSecrets();
-    get("ase-connection-note").textContent = "성공한 연결 정보는 암호화된 비밀번호와 함께 설정 파일에 저장합니다. Jasypt 키는 저장하지 않습니다.";
+    get("ase-connection-note").textContent = "성공한 연결 정보는 암호화된 비밀번호와 함께 설정 파일에 저장합니다. 저장한 서버는 비밀번호를 다시 입력하지 않고 연결할 수 있습니다.";
     if (session) await perform("disconnect", (generation) => api("disconnect", { session }, generation));
   }
 
@@ -256,12 +266,13 @@
       }
       applyProfile(profileId, { preserveConnection: preserveSession });
       showClientPaths(data.clients, true);
+      showOdbcDriver(data.odbc, true);
       get("ase-profile-path").textContent = typeof data.path === "string" ? `설정 파일: ${data.path}` : "";
       get("ase-profile-path").hidden = !get("ase-profile-path").textContent;
       get("ase-profile-help").textContent = !data.exists ? "EXE와 같은 폴더의 ase-connections.txt에 성공한 연결을 자동 저장합니다. 처음에는 직접 입력으로 연결하세요." : state.profiles.length ? `설정 파일에서 ${state.profiles.length.toLocaleString()}개 서버를 읽었습니다. 다음 실행에는 마지막으로 성공한 서버가 선택됩니다.` : "설정 파일에 서버가 없습니다. 직접 입력으로 연결하면 성공한 정보를 저장합니다.";
       if (preserveSession && !profileId) get("ase-profile-help").textContent = "연결 중인 서버와 일치하는 설정을 확인할 수 없어 직접 입력으로 표시합니다. 현재 연결은 유지됩니다.";
       const settings = data.jasypt;
-      get("ase-profile-jasypt").textContent = settings && typeof settings.algorithm === "string" && Number.isInteger(settings.iterations) ? `Jasypt: ${settings.algorithm} · 반복 ${settings.iterations.toLocaleString()}회 · 복호화 키는 연결할 때 입력하며 저장하지 않습니다.` : "";
+      get("ase-profile-jasypt").textContent = settings && typeof settings.algorithm === "string" && Number.isInteger(settings.iterations) ? `ASE 연결 파일: ${settings.algorithm} · 반복 ${settings.iterations.toLocaleString()}회 · 앱의 고정 키로 자동 복호화합니다. Jasypt 도구의 키 입력은 별도입니다.` : "";
       get("ase-profile-jasypt").hidden = !get("ase-profile-jasypt").textContent;
       if (!preserveSession) await checkRuntime();
       return true;
@@ -328,11 +339,10 @@
     for (const id of connectionIds) get(id).disabled = Boolean(state.session) || Boolean(state.busy);
     const profile = selectedProfile();
     for (const id of ["ase-host", "ase-port", "ase-user"]) get(id).readOnly = Boolean(profile);
-    get("ase-password").required = Boolean(profile);
-    get("ase-password-label").textContent = profile ? "Jasypt 복호화 키" : "DB 비밀번호";
-    get("ase-master-key-field").hidden = Boolean(profile);
-    get("ase-master-password").required = !profile;
-    get("ase-master-password").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
+    get("ase-password").required = false;
+    get("ase-password").disabled = Boolean(profile) || Boolean(state.session) || Boolean(state.busy);
+    get("ase-password-field").hidden = Boolean(profile);
+    get("ase-password-field").parentElement.classList.toggle("has-saved-profile", Boolean(profile));
     get("ase-profile").disabled = profileLocked();
     get("ase-profile-reload").disabled = profileLocked();
     get("ase-profile-reload").textContent = state.profileLoading ? "설정 파일 읽는 중…" : "설정 파일 다시 읽기";
@@ -346,8 +356,8 @@
     get("ase-search").disabled = !databaseSelected || isLocked;
     get("ase-search-button").disabled = !databaseSelected || isLocked || Boolean(state.busy);
     get("ase-search-button").textContent = state.busy === "objects" ? "검색 중…" : "검색";
-    get("ase-out").disabled = !state.columnsLoaded || !["U", "V"].includes(state.object?.kind) || isLocked;
-    get("ase-in").disabled = !state.columnsLoaded || state.object?.kind !== "U" || isLocked;
+    get("ase-out").disabled = !state.bcpAvailable || !state.columnsLoaded || !["U", "V"].includes(state.object?.kind) || isLocked;
+    get("ase-in").disabled = !state.bcpAvailable || !state.columnsLoaded || state.object?.kind !== "U" || isLocked;
     for (const id of optionIds) get(id).disabled = !canTransfer || isLocked || (id === "ase-keep-identity" && direction() !== "in");
     get("ase-crlf").disabled = !canTransfer || isLocked;
     get("ase-batch-size").disabled = !canTransfer || isLocked || direction() !== "in";
@@ -355,14 +365,14 @@
     get("ase-pick-file").textContent = state.busy === "picker" ? "선택 창 열림…" : "파일 선택";
     get("ase-preview").disabled = !canTransfer || !state.file || Boolean(state.busy) || isLocked;
     get("ase-preview").textContent = state.busy === "preview" ? "확인 중…" : "실행 내용 확인";
-    get("ase-start").disabled = !state.review || Boolean(state.busy) || isLocked;
+    get("ase-start").disabled = !state.bcpAvailable || !state.review || Boolean(state.busy) || isLocked;
     get("ase-start").textContent = state.busy === "start" ? "시작 중…" : direction() === "in" ? "BCP IN · 행 추가 시작" : "BCP OUT 시작";
     get("ase-identity-options").hidden = direction() !== "in";
     get("ase-append-warning").hidden = direction() !== "in";
     get("ase-path").textContent = state.path || "파일을 선택하세요.";
     get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 파일";
     get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. OUT은 성공했을 때만 대상 파일을 교체합니다.";
-    get("ase-transfer-note").textContent = state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
+    get("ase-transfer-note").textContent = !state.bcpAvailable ? "DB 객체는 조회할 수 있습니다. 파일 전송을 사용하려면 SAP bcp.exe를 설치하거나 ase-connections.txt의 [sap_client]에 bcp 경로를 지정하세요." : state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
     get("ase-ready-note").textContent = active() ? "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다." : state.review ? "확인한 내용으로 BCP를 실행할 수 있습니다." : "객체와 파일을 선택한 뒤 실행 내용을 확인하세요.";
     get("ase-cancel").hidden = !active();
     get("ase-cancel").disabled = ["cancel", "disconnect"].includes(state.busy);
@@ -394,9 +404,9 @@
     event.preventDefault();
     if (state.session || state.busy || !state.available || !event.currentTarget.reportValidity()) return;
     const profile = selectedProfile();
-    const payload = profile ? { profile_id: profile.id, master_password: get("ase-password").value } : {
+    const payload = profile ? { profile_id: profile.id } : {
       host: get("ase-host").value.trim(), port: Number(get("ase-port").value),
-      user: get("ase-user").value.trim(), password: get("ase-password").value, master_password: get("ase-master-password").value,
+      user: get("ase-user").value.trim(), password: get("ase-password").value,
     };
     invalidateProfileRead();
     reset("connection");
@@ -415,7 +425,7 @@
       setChoices("ase-database", state.databases, "DB 선택", "name");
       defaultDatabase = typeof data.database === "string" ? data.database : profile?.database || "";
       showTimings("서버 연결", data);
-      get("ase-connection-note").textContent = `${profile ? `${typeof data.profile_name === "string" ? data.profile_name : profile.name}에 ` : ""}연결되었습니다. DB를 선택하고 검색을 누르세요. 비밀번호와 Jasypt 키는 입력창에서 지웠습니다.`;
+      get("ase-connection-note").textContent = `${profile ? `${typeof data.profile_name === "string" ? data.profile_name : profile.name}에 ` : ""}연결되었습니다. DB를 선택하고 검색을 누르세요. 비밀번호는 입력창에서 지웠습니다.`;
       const refreshed = typeof data.profile_id === "string" ? await loadProfiles({ preferredId: data.profile_id, preserveSession: true }) : true;
       if (generation !== state.generation) throw stale();
       if (data.saved === false) feedback(`서버에 연결되었지만 연결 정보를 저장하지 못했습니다. ${typeof data.save_warning === "string" ? data.save_warning : "설정 파일의 쓰기 권한을 확인하세요."}`, true);
@@ -430,7 +440,7 @@
   for (const id of connectionIds) get(id).addEventListener("input", () => {
     if (state.session || state.busy || profileLocked()) return;
     invalidateProfileRead();
-    if (!["ase-password", "ase-master-password"].includes(id)) clearSecrets();
+    if (id !== "ase-password") clearSecrets();
     reset("connection");
   });
 
@@ -708,7 +718,7 @@
   }
 
   get("ase-start").addEventListener("click", async () => {
-    if (!state.review || locked() || state.busy) return;
+    if (!state.bcpAvailable || !state.review || locked() || state.busy) return;
     const review = state.review;
     clearStatistics();
     await perform("start", async (generation) => {
@@ -743,7 +753,7 @@
     const wasIn = direction() === "in";
     reset("connection");
     clearSecrets();
-    get("ase-connection-note").textContent = "저장된 서버를 선택하고 Jasypt 키를 입력하면 다시 연결할 수 있습니다. 키는 저장하지 않습니다.";
+    get("ase-connection-note").textContent = "저장된 서버를 선택하면 비밀번호를 다시 입력하지 않고 연결할 수 있습니다.";
     await perform("disconnect", async (generation) => {
       if (job) {
         try { await api("cancel", { session, job }, generation); }
@@ -759,11 +769,18 @@
       const response = await fetch("/api/ase/status", { method: "GET", headers: { "Content-Type": "application/json", "X-Nice-Tools": "ase", "Cache-Control": "no-store" }, cache: "no-store", credentials: "same-origin" });
       const data = await response.json();
       state.available = response.ok && data.available === true;
-      get("ase-runtime").textContent = state.available ? "SAP 클라이언트 사용 가능 · 조회 isql / 전송 bcp" : typeof data.detail === "string" ? data.detail : "SAP isql.exe와 bcp.exe를 찾을 수 없습니다. ase-connections.txt의 [sap_client]에 경로를 지정하세요.";
+      state.bcpAvailable = response.ok && data.bcp_available === true;
+      get("ase-runtime").textContent = state.available ? "SAP ASE ODBC 사용 가능 · 연결을 유지하며 DB 객체를 조회합니다." : typeof data.detail === "string" ? data.detail : "SAP ASE 64비트 ODBC 드라이버를 찾을 수 없습니다. 드라이버를 설치하거나 ase-connections.txt의 [odbc]에 드라이버 이름을 지정하세요.";
+      showOdbcDriver(data.odbc);
       showClientPaths(data);
       get("ase-runtime").dataset.tone = state.available ? "info" : "error";
+      get("ase-bcp-runtime").hidden = state.bcpAvailable;
+      get("ase-bcp-runtime").dataset.tone = "error";
+      get("ase-bcp-runtime").textContent = typeof data.bcp_detail === "string" && data.bcp_detail !== "ready" ? data.bcp_detail : "SAP bcp.exe를 찾을 수 없습니다. DB 객체 조회는 사용할 수 있으며, 파일 전송에는 SAP bcp 설치 또는 경로 설정이 필요합니다.";
     } catch {
-      get("ase-runtime").textContent = "ASE 실행 환경을 확인하지 못했습니다. 프로그램을 다시 실행하세요.";
+      state.available = false;
+      state.bcpAvailable = false;
+      get("ase-runtime").textContent = "SAP ASE ODBC 실행 환경을 확인하지 못했습니다. 프로그램을 다시 실행하세요.";
       get("ase-runtime").dataset.tone = "error";
     }
     render();

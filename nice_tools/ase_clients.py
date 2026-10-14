@@ -1,4 +1,4 @@
-"""Locate the PC's installed SAP Open Client utilities without invoking them."""
+"""Discover ASE ODBC and the PC's installed SAP BCP independently."""
 
 from __future__ import annotations
 
@@ -7,8 +7,8 @@ from pathlib import Path
 import shutil
 
 CLIENT_ERROR = (
-    "SAP 클라이언트의 isql.exe와 bcp.exe를 찾을 수 없습니다. SAP Open Client 설치 후 "
-    "PATH 또는 ase-connections.txt의 [sap_client] isql_path·bcp_path를 확인하세요."
+    "SAP bcp.exe를 찾을 수 없습니다. 파일 IN/OUT에는 SAP Open Client 설치 후 "
+    "PATH 또는 ase-connections.txt의 [sap_client] bcp_path를 확인하세요."
 )
 
 
@@ -50,12 +50,12 @@ def _sap_directories() -> list[Path]:
 
 
 def client_config() -> dict:
-    """Resolve each fixed SAP tool; explicit broken paths never fall back."""
+    """Resolve BCP only; explicit broken paths never fall back."""
     from .ase_profiles import client_settings
 
     configured = client_settings()
     result = {}
-    for name in ('isql', 'bcp'):
+    for name in ('bcp',):
         key = name + '_path'
         if key in configured:
             resolved = _valid_tool(configured[key], name)
@@ -72,9 +72,24 @@ def client_config() -> dict:
     return result
 
 
+def _odbc_status() -> dict:
+    from .ase_odbc import odbc_status
+    return odbc_status()
+
+
 def client_status() -> dict:
-    """Discovery is cheap and never starts the application worker or a SAP tool."""
+    """Missing BCP disables transfers without disabling ODBC browsing."""
     try:
-        return {'available': True, 'detail': '설치된 SAP isql / bcp 사용', **client_config()}
+        odbc = _odbc_status()
+    except (ImportError, ValueError, OSError, RuntimeError):
+        odbc = {'available': False, 'detail': 'SAP ASE ODBC 드라이버 상태를 확인하지 못했습니다.', 'drivers': []}
+    result = {'available': bool(odbc.get('available')), 'odbc': odbc,
+              'detail': odbc.get('detail', 'SAP ASE ODBC 드라이버를 확인하세요.'), 'bcp_available': False}
+    try:
+        result.update(client_config(), bcp_available=True)
     except (ValueError, OSError, RuntimeError):
-        return {'available': False, 'detail': CLIENT_ERROR}
+        result['bcp_detail'] = CLIENT_ERROR
+    if result['available']:
+        result['detail'] = ('pyodbc 조회 / SAP bcp 파일 전송 사용 가능' if result['bcp_available']
+                            else 'pyodbc 조회 가능 · 파일 전송에는 SAP bcp.exe가 필요합니다.')
+    return result

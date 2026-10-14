@@ -21,7 +21,7 @@ $Compiler = Get-Command cl.exe -CommandType Application -ErrorAction Stop | Sele
 $Source = Join-Path $PSScriptRoot "fixtures\sap_console_client.c"
 Push-Location $Output
 try {
-    foreach ($Tool in @("isql", "bcp")) {
+    foreach ($Tool in @("bcp")) {
         $CompileOutput = & $Compiler.Source /nologo /W4 /WX /O2 /MT /utf-8 /D_CRT_SECURE_NO_WARNINGS $Source "/Fe:$Tool.exe" "/Fo:$Tool.obj" 2>&1
         $CompileExit = $LASTEXITCODE
         $CompileOutput | ForEach-Object { Write-Host $_ }
@@ -32,5 +32,5 @@ try {
             throw "Could not compile the $Tool console fixture."
         }
     }
-    Write-Host "Built disposable external isql.exe and bcp.exe console fixtures (not SAP)."
+    Write-Host "Built disposable external bcp.exe console fixture (not SAP)."
 } finally { Pop-Location }

@@ -25,6 +25,7 @@ def client(monkeypatch, operation=None, status=None):
         run_operation=(lambda payload, emit=None, register=None: operation(payload, emit)) if operation else (lambda payload, emit=None, register=None: {}),
     )
     monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", module)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_odbc", module)
     return module
 
 
@@ -414,28 +415,27 @@ def test_worker_real_module_uses_stdin_json_for_status():
     assert isinstance(records[0]["result"]["available"], bool)
 
 
-def test_catalog_cli_receives_parent_process_registration(worker, monkeypatch):
-    handles = []
-    registration = lambda handle: handles.append(handle)
-    client_handle = object()
+def test_catalog_uses_odbc_without_a_cli_process(worker, monkeypatch):
+    calls = []
     def run(payload, emit=None, register=None):
-        assert payload["operation"] == "databases"
-        register(client_handle)
+        calls.append(payload["operation"])
         return {"databases": []}
-    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", SimpleNamespace(run_operation=run))
-    assert worker.execute({"operation": "databases"}, register=registration) == {"databases": []}
-    assert handles == [client_handle]
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", None)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_odbc", SimpleNamespace(run_operation=run))
+    assert worker.execute({"operation":"databases"}) == {"databases": []}
+    assert calls == ["databases"]
 
 
-def test_preview_cli_receives_parent_process_registration(worker, monkeypatch, tmp_path):
+def test_preview_uses_injected_persistent_odbc_catalog(worker, monkeypatch, tmp_path):
     source = tmp_path / "data.txt"
     source.write_bytes(b"1\n")
-    registration = lambda handle: None
-    def run(payload, emit=None, register=None):
-        assert register is registration
-        assert payload["operation"] == "columns"
+    calls = []
+    def run(payload, emit=None):
+        calls.append(payload["operation"])
         return {"columns": []}
-    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", SimpleNamespace(run_operation=run))
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_cli", None)
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_odbc", None)
     monkeypatch.setitem(sys.modules, "nice_tools.ase_files", SimpleNamespace(parse_options=lambda options: options))
-    result = worker.execute({"operation": "preview", "options": {"direction": "out"}, "path": str(source)}, register=registration)
+    result = worker.execute({"operation":"preview", "options":{"direction":"out"}, "path":str(source)}, catalog=run)
     assert result["columns"] == []
+    assert calls == ["columns"]

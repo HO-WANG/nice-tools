@@ -1,4 +1,4 @@
-"""Read encrypted ASE profiles beside the executable without storing keys."""
+"""Read encrypted ASE profiles beside the executable using the configured fixed key."""
 
 from __future__ import annotations
 
@@ -16,11 +16,14 @@ from .ase_jobs import connection_data
 
 
 FILENAME = "ase-connections.txt"
+# Explicit user requirement: ASE profiles use this fixed key, independently
+# of the standalone Jasypt tool, which retains custom passwords.
+PROFILE_PASSWORD = "nice1234!!"
 # This bounds configuration metadata, independently of comparison/BCP files.
 MAX_CONFIG_BYTES = 1024 * 1024
 MAX_PROFILES = 100
 JASYPT_FIELDS = ("algorithm", "iterations", "salt_generator", "iv_generator", "output_type")
-RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences"}
+RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences", "odbc"}
 CLIENT_FIELDS = {"isql_path", "bcp_path"}
 SAVE_ERROR = "접속은 성공했지만 연결 정보를 저장하지 못했습니다. 설정 파일의 형식·권한과 변경 여부를 확인하세요."
 _SAVE_LOCK = threading.RLock()
@@ -32,7 +35,7 @@ CONFIG_ERROR = (
 )
 READ_ERROR = "ase-connections.txt를 읽을 수 없습니다. 파일 위치·권한과 UTF-8 형식을 확인하세요."
 PROFILE_ERROR = "접속 프로필이 없거나 파일이 변경되었습니다. 프로필 목록을 새로 불러오세요."
-DECRYPT_ERROR = "ASE 비밀번호를 복호화할 수 없습니다. 마스터 비밀번호와 Jasypt 설정을 확인하세요."
+DECRYPT_ERROR = "ASE 비밀번호를 복호화할 수 없습니다. 이전 키로 저장한 프로필은 DB 비밀번호를 다시 입력해 접속하고 저장하세요. Jasypt 설정도 확인하세요."
 
 
 def configuration_path() -> Path:
@@ -76,6 +79,9 @@ def _client_settings(values: dict) -> dict:
         raise ValueError(CONFIG_ERROR)
     result = {}
     for key, value in values.items():
+        if key == "isql_path":
+            # Legacy metadata is retained on disk but no longer selects a tool.
+            continue
         value = value.strip()
         if not value:
             continue
@@ -87,6 +93,15 @@ def _client_settings(values: dict) -> dict:
             raise ValueError(CONFIG_ERROR)
         result[key] = value
     return result
+
+
+def _odbc_settings(values: dict) -> dict:
+    if set(values) - {"driver"}:
+        raise ValueError(CONFIG_ERROR)
+    driver = values.get("driver", "").strip()
+    if any(char in driver for char in "\r\n\x00") or len(driver) > 255:
+        raise ValueError(CONFIG_ERROR)
+    return {"driver": driver} if driver else {}
 
 
 def _read_raw(location: Path) -> bytes | None:
@@ -129,11 +144,12 @@ def _load(path: Path | None) -> dict:
     raw = _read_raw(location)
     if raw is None:
         return {"path": location, "raw": None, "text": "", "exists": False,
-                "settings": _settings({}), "profiles": [], "clients": {}, "last_profile": ""}
+                "settings": _settings({}), "profiles": [], "clients": {}, "odbc": {}, "last_profile": ""}
     text, parser = _parse_raw(raw)
     names = parser.sections()
     settings = _settings(dict(parser["jasypt"]) if parser.has_section("jasypt") else {})
     clients = _client_settings(dict(parser["sap_client"]) if parser.has_section("sap_client") else {})
+    odbc = _odbc_settings(dict(parser["odbc"]) if parser.has_section("odbc") else {})
     preferences = dict(parser["preferences"]) if parser.has_section("preferences") else {}
     if (set(preferences) - {"last_profile"} or any("\r" in value or "\n" in value
                                                 for value in preferences.values())):
@@ -168,7 +184,7 @@ def _load(path: Path | None) -> dict:
             public["database"] = database
         profiles.append({"public": public, "ciphertext": ciphertext})
     return {"path": location, "raw": raw, "text": text, "exists": True, "settings": settings,
-            "profiles": profiles, "clients": clients, "last_profile": preferences.get("last_profile", "")}
+            "profiles": profiles, "clients": clients, "odbc": odbc, "last_profile": preferences.get("last_profile", "")}
 
 
 def public_profiles(path: Path | None = None) -> dict:
@@ -177,11 +193,11 @@ def public_profiles(path: Path | None = None) -> dict:
     profiles = [item["public"] for item in document["profiles"]]
     selected = next((item["id"] for item in profiles if item["name"] == document["last_profile"]), None)
     return {"path": str(document["path"]), "exists": document["exists"], "profiles": profiles,
-            "jasypt": document["settings"], "clients": document["clients"], "last_profile_id": selected}
+            "jasypt": document["settings"], "clients": document["clients"], "odbc": document["odbc"], "last_profile_id": selected}
 
 
-def decrypt_connection(profile_id: str, master_password: str, path: Path | None = None) -> dict:
-    """Decrypt one current choice using a caller-provided, memory-only master key."""
+def decrypt_connection(profile_id: str, path: Path | None = None) -> dict:
+    """Decrypt one current choice using the fixed ASE profile key."""
     document = _load(path)
     settings, profiles = document["settings"], document["profiles"]
     selected = next((item for item in profiles if item["public"]["id"] == profile_id), None)
@@ -190,7 +206,7 @@ def decrypt_connection(profile_id: str, master_password: str, path: Path | None 
     metadata = selected["public"]
     try:
         password = jasypt.transform({"operation": "decrypt", "text": selected["ciphertext"],
-                                     "password": master_password, **settings})
+                                     "password": PROFILE_PASSWORD, **settings})
         connection = connection_data({**metadata, "password": password})
     except (ValueError, TypeError, UnicodeError):
         raise ValueError(DECRYPT_ERROR) from None
@@ -212,20 +228,29 @@ def client_settings(path: Path | None = None) -> dict:
     return _client_settings(dict(parser["sap_client"]) if parser.has_section("sap_client") else {})
 
 
-def prepare_connection(connection: dict, master_password: str, path: Path | None = None) -> dict:
+def odbc_settings(path: Path | None = None) -> dict:
+    """Read optional ODBC driver selection independently of ordinary profiles."""
+    raw = _read_raw(_profile_path(path))
+    if raw is None:
+        return {}
+    _, parser = _parse_raw(raw)
+    return _odbc_settings(dict(parser["odbc"]) if parser.has_section("odbc") else {})
+
+
+def prepare_connection(connection: dict, path: Path | None = None) -> dict:
     """Validate and encrypt before login, without creating or modifying any file."""
     validated = connection_data(connection)
     if any(char in validated["user"] for char in "\r\n"):
         raise ValueError("사용자 이름에는 줄바꿈을 사용할 수 없습니다.")
     data = {key: validated[key] for key in ("host", "port", "user", "password")}
-    # Corrupt user data must not block a manual login or be overwritten. Validate
-    # the entered key using defaults; the eventual save still rejects this file.
+    # Corrupt user data must not block a manual login or be overwritten. Use
+    # default metadata; the eventual save still rejects this file.
     try:
         settings = _load(path)["settings"]
     except ValueError:
         settings = _settings({})
     ciphertext = jasypt.transform({"operation": "encrypt", "text": data["password"],
-                                  "password": master_password, "wrap_enc": True, **settings})
+                                  "password": PROFILE_PASSWORD, "wrap_enc": True, **settings})
     return {"connection": data, "ciphertext": ciphertext, "settings": settings}
 
 
@@ -297,6 +322,44 @@ def _saved_result(name: str, path: Path | None) -> dict:
     return {"saved": True, "profile_id": profile["id"], "profile_name": name}
 
 
+def _canonical_name(connection: dict, profiles: list[dict], existing: dict | None) -> str:
+    """Use host-account, escaping INI delimiters and resolving endpoint collisions."""
+    identity = tuple(connection[key] for key in ("host", "port", "user"))
+    digest = hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
+    base = f"{connection['host']}-{connection['user']}"
+    base = base.replace("%", "%25").replace("[", "%5B").replace("]", "%5D")
+    if len(base) > 255:
+        base = base[:242] + "-" + digest
+    occupied = {item["public"]["name"] for item in profiles
+                if existing is None or item["public"]["name"] != existing["name"]}
+    if base not in occupied:
+        return base
+    suffix = f"-{connection['port']}"
+    candidate = base[:255 - len(suffix)] + suffix
+    if candidate not in occupied:
+        return candidate
+    suffix += "-" + digest
+    candidate = base[:255 - len(suffix)] + suffix
+    counter = 1
+    while candidate in occupied:
+        counter += 1
+        numbered = suffix + f"-{counter}"
+        candidate = base[:255 - len(numbered)] + numbered
+    return candidate
+
+
+def _rename_section(text: str, old_name: str, new_name: str) -> str:
+    if old_name == new_name:
+        return text
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.strip() == f"[{old_name}]":
+            ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+            lines[index] = f"[{new_name}]{ending}"
+            return "".join(lines)
+    raise ValueError(SAVE_ERROR)
+
+
 def save_connection(prepared: dict, path: Path | None = None) -> dict:
     """Persist encrypted credentials only after the caller confirms login success."""
     with _SAVE_LOCK:
@@ -307,19 +370,14 @@ def save_connection(prepared: dict, path: Path | None = None) -> dict:
         identity = tuple(connection[key] for key in ("host", "port", "user"))
         existing = next((item["public"] for item in document["profiles"]
                          if tuple(item["public"][key] for key in ("host", "port", "user")) == identity), None)
-        if existing:
-            name = existing["name"]
-        else:
-            if len(document["profiles"]) >= MAX_PROFILES:
-                raise ValueError(SAVE_ERROR)
-            stem = "saved-" + hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
-            names = {item["public"]["name"] for item in document["profiles"]}
-            name, counter = stem, 1
-            while name in names:
-                name, counter = f"{stem}-{counter}", counter + 1
+        if existing is None and len(document["profiles"]) >= MAX_PROFILES:
+            raise ValueError(SAVE_ERROR)
+        name = _canonical_name(connection, document["profiles"], existing)
+        original = (_rename_section(document["text"], existing["name"], name)
+                    if existing else document["text"])
         values = {key: connection[key] for key in ("host", "port", "user")}
         values["password"] = prepared["ciphertext"]
-        text = _update_section(document["text"], name, values)
+        text = _update_section(original, name, values)
         text = _update_section(text, "preferences", {"last_profile": name})
         _write_document(document, text)
         return _saved_result(name, path)

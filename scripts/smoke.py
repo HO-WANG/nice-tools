@@ -46,7 +46,7 @@ def ase_checks(base):
     assert '접속 정보가 만료' in sanitized_error(missing_session), 'All-owner object search did not reach session validation'
     assert isinstance(status.get("available"), bool), status
     assert "FreeTDS" not in str(status), "Obsolete native driver remains in client status"
-    print("ASE HTTP smoke: installed SAP client discovery and optional-owner session validation passed.")
+    print("ASE HTTP smoke: ODBC/SAP BCP discovery and optional-owner session validation passed.")
 
 
 def jasypt_checks(base):
@@ -78,34 +78,35 @@ def jasypt_checks(base):
     print('Jasypt HTTP smoke: Java reference ciphertexts, 12 AES/DES configurations and omitted MD5/DES defaults passed.')
 
 
-def profile_checks(base, directory, clients=None, executable=None):
-    """Exercise an isolated EXE configuration; never replace a user-owned file."""
+def profile_checks(base, directory, clients=None, executable=None, require_odbc=False):
+    """Real frozen ODBC discovery/failure; no simulated successful DB login."""
     directory = directory.resolve(strict=True)
     location = directory / 'ase-connections.txt'
     missing = json_request(base, '/api/ase/profiles')
     assert Path(missing['path']).resolve() == location, 'Configuration must be beside the original executable'
     assert missing['exists'] is False and missing['profiles'] == []
     assert not location.exists(), 'Refusing to replace an existing ASE configuration'
-    master = 'fixture-master-only-in-memory!42'
+    fixed_key = 'nice1234!!'
     password = 'fixture-db-password-never-log!42'
-    wrong_master = 'fixture-incorrect-master!43'
+    incompatible_key = 'fixture-incompatible-legacy-key!43'
     encrypted = json_request(base, '/api/jasypt', {
-        'operation': 'encrypt', 'text': password, 'password': master, 'wrap_enc': True,
+        'operation': 'encrypt', 'text': password, 'password': fixed_key, 'wrap_enc': True,
+    })['result']
+    bad_cipher = json_request(base, '/api/jasypt', {
+        'operation': 'encrypt', 'text': password, 'password': incompatible_key, 'wrap_enc': True,
     })['result']
     client_section = ''
     if clients is not None:
         clients = clients.resolve(strict=True)
-        for name in ('isql.exe', 'bcp.exe'):
-            assert (clients / name).is_file(), 'Missing external developer console fixture'
-        client_section = ('[sap_client]\n'
-                          f'isql_path = {clients / "isql.exe"}\n'
-                          f'bcp_path = {clients / "bcp.exe"}\n\n')
-    config = (client_section + '[jasypt]\nalgorithm = PBEWithMD5AndDES\niterations = 1000\n'
+        assert (clients / 'bcp.exe').is_file(), 'Missing external developer BCP console fixture'
+        client_section = f'[sap_client]\nbcp_path = {clients / "bcp.exe"}\n\n'
+    invalid_driver = 'NiceToolsFixtureMissingDriver-65046'
+    config = (client_section + f'[odbc]\ndriver = {invalid_driver}\n\n'
+              '[jasypt]\nalgorithm = PBEWithMD5AndDES\niterations = 1000\n'
               'salt_generator = random\niv_generator = none\noutput_type = base64\n\n'
               '[패키지 검사 서버]\nhost = fixture.internal\nport = 5000\n'
               f'user = smoke\npassword = {encrypted}\ndatabase = fixture_db\n')
     created = False
-    sessions = []
     try:
         with location.open('x', encoding='utf-8', newline='\n') as output:
             created = True
@@ -113,49 +114,39 @@ def profile_checks(base, directory, clients=None, executable=None):
         profiles = json_request(base, '/api/ase/profiles')
         assert Path(profiles['path']).resolve() == location and profiles['exists'] is True
         rendered = json.dumps(profiles, ensure_ascii=False)
-        assert not any(value in rendered for value in (encrypted, encrypted[4:-1], password, master))
+        assert not any(value in rendered for value in (encrypted, encrypted[4:-1], password, fixed_key))
+        assert profiles['odbc'] == {'driver': invalid_driver}
         assert len(profiles['profiles']) == 1
         profile = profiles['profiles'][0]
         assert set(profile) == {'id', 'name', 'host', 'port', 'user', 'database'}
         assert profile['name'] == '패키지 검사 서버' and profile['database'] == 'fixture_db'
-        wrong = json_request(base, '/api/ase/connect', {'profile_id': profile['id'], 'master_password': wrong_master}, 400)
-        assert '복호화' in sanitized_error(wrong, master, wrong_master, password, encrypted, encrypted[4:-1])
+        status = json_request(base, '/api/ase/status')
+        odbc = status['odbc']
+        assert isinstance(odbc['drivers'], list) and odbc['available'] is False
+        if require_odbc:
+            assert odbc['module_available'] is True, 'The actual pyodbc native extension did not load'
+            assert odbc['version'] == '5.3.0', 'The pinned native pyodbc extension did not load'
         if clients is not None:
-            status = json_request(base, '/api/ase/status')
-            assert status['available'], 'The EXE did not discover the configured external fixtures'
-            connected = json_request(base, '/api/ase/connect', {'profile_id': profile['id'], 'master_password': master})
-            sessions.append(connected['session'])
-            assert connected['databases'] == [{'id': 5, 'name': 'fixture_db'}]
-            assert connected['timings']['client_seconds'] >= 0
-            owners = json_request(base, '/api/ase/owners', {'session': sessions[-1], 'database': 'fixture_db'})
-            assert owners['owners'] == [{'id': 7, 'name': 'dbo'}]
-            objects = json_request(base, '/api/ase/objects', {'session': sessions[-1], 'database': 'fixture_db',
-                                                          'owner_id': None, 'search': '', 'kind': 'all'})['objects']
-            assert [obj['name'] for obj in objects] == ['orders', 'cancel_me', 'fail_me']
-            schema = json_request(base, '/api/ase/columns', {'session': sessions[-1], 'object': objects[0]})
-            assert schema['columns'][0]['name'] == 'id' and schema['columns'][0]['type_name'] == 'int'
-            manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
-                                 'user': 'other', 'password': password, 'master_password': master})
-            sessions.append(manual['session'])
-            assert manual['saved'] is True and manual['profile_id'], 'Successful manual login was not saved'
-            saved_text = location.read_text(encoding='utf-8-sig')
-            assert password not in saved_text and master not in saved_text and 'ENC(' in saved_text
-            saved = json_request(base, '/api/ase/profiles')
-            new_profile = next(item for item in saved['profiles'] if item['host'] == 'fixture-new.internal')
-            assert saved['last_profile_id'] == new_profile['id'], 'Last successful profile was not remembered'
-            restored = json_request(base, '/api/ase/connect', {'profile_id': new_profile['id'], 'master_password': master})
-            sessions.append(restored['session'])
-            assert restored['databases'] == connected['databases'], 'Saved encrypted credentials did not reconnect'
-            if executable is not None:
-                from verify_bundle import sap_worker_checks
-                sap_worker_checks(executable, directory, clients)
-            print('SAP EXE HTTP smoke: external console prompts, catalogs, encrypted autosave and saved-profile reconnection passed (fixtures only).')
+            assert status['bcp_available'] is True, 'The configured external BCP fixture was not discovered'
+        refused = json_request(base, '/api/ase/connect', {'profile_id': profile['id']}, 400)
+        detail = sanitized_error(refused, password, fixed_key, encrypted, encrypted[4:-1])
+        assert '복호화' not in detail and 'ODBC' in detail, 'The fixed-key profile did not reach driver validation'
+        manual = json_request(base, '/api/ase/connect', {'host': 'fixture-new.internal', 'port': 5001,
+                              'user': 'other', 'password': password}, 400)
+        assert 'ODBC' in sanitized_error(manual, password), 'Manual login did not reach native ODBC validation'
+        assert location.read_text(encoding='utf-8-sig') == config, 'A failed login persisted a new profile'
+        if executable is not None:
+            from verify_bundle import odbc_worker_checks
+            odbc_worker_checks(executable, directory, password, require_odbc)
+        # A legacy ciphertext encrypted with another key must fail before ODBC.
+        location.write_text(config.replace(encrypted, bad_cipher), encoding='utf-8')
+        stale = json_request(base, '/api/ase/profiles')['profiles'][0]
+        wrong = json_request(base, '/api/ase/connect', {'profile_id': stale['id']}, 400)
+        assert '복호화' in sanitized_error(wrong, password, fixed_key, incompatible_key, bad_cipher, bad_cipher[4:-1])
     finally:
-        for session in sessions:
-            json_request(base, '/api/ase/disconnect', {'session': session})
         if created:
             location.unlink()
-    print('ASE profile EXE smoke: executable-folder lookup, encrypted configuration and sanitized wrong-key checks passed.')
+    print('ASE EXE smoke: fixed-key profile decryption, native ODBC discovery/invalid-driver errors, failed-login nonpersistence and incompatible-ciphertext handling passed; no live ASE login tested.')
 
 
 def encoding_checks(base):
@@ -205,7 +196,8 @@ def main(argv=None):
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--large-files", action="store_true", help="Verify files >10 MiB and total requests >50 MiB")
     parser.add_argument("--sap-test-clients", type=Path, help="External developer-only Windows console fixtures")
-    parser.add_argument("--executable", type=Path, help="Actual executable to exercise its isolated SAP worker")
+    parser.add_argument("--executable", type=Path, help="Actual executable to exercise native ODBC worker discovery")
+    parser.add_argument("--require-odbc", action="store_true", help="Require imported native pyodbc in Windows release verification")
     parser.add_argument("--config-folder", type=Path, help="Verify encrypted profiles in an isolated executable folder")
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
@@ -215,6 +207,7 @@ def main(argv=None):
         page = response.read()
         assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page
         assert b'id="ase-search-button"' in page and b'id="ase-catalog-timings"' in page and b'id="ase-out-statistics"' in page
+        assert b'id="ase-master-password"' not in page, 'ASE still asks for a profile encryption key'
     for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
@@ -264,7 +257,7 @@ def main(argv=None):
     jasypt_checks(base)
     ase_checks(base)
     if args.config_folder is not None:
-        profile_checks(base, args.config_folder, args.sap_test_clients, args.executable)
+        profile_checks(base, args.config_folder, args.sap_test_clients, args.executable, args.require_odbc)
     if args.large_files:
         prefix = b"a" * (10 * 1024 * 1024 + 1)
         compare_request(base, {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [

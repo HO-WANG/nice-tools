@@ -7,7 +7,7 @@ analysis = Analysis(
     [str(root / "desktop_entry.py")],
     pathex=[str(root)],
     binaries=[],
-    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + copy_metadata("rapidfuzz") + copy_metadata("pycryptodome") + copy_metadata("charset-normalizer"),
+    datas=[(str(root / "nice_tools" / "static"), "nice_tools/static")] + copy_metadata("rapidfuzz") + copy_metadata("pycryptodome") + copy_metadata("charset-normalizer") + copy_metadata("pyodbc"),
     hiddenimports=[
         "uvicorn.logging",
         "uvicorn.loops.asyncio",
@@ -15,6 +15,8 @@ analysis = Analysis(
         "uvicorn.lifespan.on",
         "nice_tools.ase_worker",
         "nice_tools.ase_cli",
+        "nice_tools.ase_odbc",
+        "pyodbc",
         "nice_tools.ase_clients",
         "nice_tools.ase_process",
         "nice_tools.ase_picker",

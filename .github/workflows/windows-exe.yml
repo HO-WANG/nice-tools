@@ -24,7 +24,7 @@ jobs:
           cache-dependency-path: "requirements*.txt"
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
-      - name: Build external SAP console test clients
+      - name: Build external SAP BCP console test client
         shell: pwsh
         run: |
           ./scripts/build_sap_test_clients.ps1

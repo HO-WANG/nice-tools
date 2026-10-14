@@ -11,7 +11,6 @@ import subprocess
 import tempfile
 import threading
 import json
-import time
 from pathlib import Path
 
 from smoke import main as smoke_main
@@ -90,100 +89,37 @@ def worker_request(executable, payload, directory, expect_error=False):
     if expect_error:
         assert returncode != 0 and any(event["event"] == "error" for event in events), "Expected a failed transfer"
         return events
-    assert returncode == 0, "Frozen SAP worker failed with fixture clients"
+    assert returncode == 0, "Frozen ASE worker failed"
     results = [event["result"] for event in events if event["event"] == "result"]
     assert len(results) == 1, "Frozen worker did not return one result"
     return results[0]
 
 
-def sap_worker_checks(executable, directory, clients):
-    """Actual frozen workers, external console PE clients, fixture data only."""
-    directory = Path(directory)
-    connection = {"host": "fixture.internal", "port": 5000, "user": "smoke",
-                  "password": "fixture-db-password-never-log!42"}
-    obj = {"database": "fixture_db", "owner": "dbo", "owner_id": 7,
-           "id": 42, "name": "orders", "kind": "U"}
-    base = {"connection": connection, "object": obj}
-    target = directory / "한글 data.bcp"
+def odbc_worker_checks(executable, directory, password, require_odbc):
+    """Load real frozen pyodbc; never simulate catalog success without ASE."""
+    connection = {"host": "fixture.internal", "port": 5000, "user": "smoke", "password": password}
+    status = worker_request(executable, {"operation": "status", "connection": connection}, directory)
+    if require_odbc:
+        assert status["odbc"]["module_available"] is True, "Frozen worker could not import native pyodbc"
+        assert status["odbc"]["version"] == "5.3.0", "Frozen worker did not load pinned native pyodbc"
+    events = worker_request(executable, {"operation": "databases", "connection": connection}, directory, expect_error=True)
+    assert any("ODBC" in event.get("detail", "") for event in events), "Worker did not report invalid ODBC driver"
+    target = Path(directory) / "한글 preserved.bcp"
     target.write_bytes(b"existing destination\n")
-    out = {"direction": "out", "encoding": "utf-8", "field_terminator": r"\t", "row_terminator": r"\n"}
-    preview = worker_request(executable, {**base, "operation": "preview", "path": str(target), "options": out}, directory)
-    assert preview["out_target_fingerprint"]["exists"]
-    assert preview["columns"][0]["name"] == "id"
-    stage = directory / ".nice-tools-smoke-out.bcp"
+    stage = Path(directory) / ".nice-tools-smoke-out.bcp"
     stage.touch()
-    transfer = {**base, "operation": "transfer", "path": str(target), "options": out,
-                "columns": preview["columns"], "out_target_fingerprint": preview["out_target_fingerprint"],
-                "stage_path": str(stage), "defer_publish": True}
-    result = worker_request(executable, transfer, directory)
-    assert result["rows"] == 3 and result["direction"] == "out"
-    assert result["bcp_seconds"] > 0 and result["bcp_rows_per_second"] > 0
-    assert target.read_bytes() == b"existing destination\n", "Deferred worker bypassed parent publication"
-    assert stage.read_bytes() == b"1\n2\n3\n"
-    os.replace(stage, target)
-    incoming = {**out, "direction": "in", "batch_size": 2}
-    preview_in = worker_request(executable, {**base, "operation": "preview", "path": str(target), "options": incoming}, directory)
-    assert preview_in["rows"] == 3 and preview_in["fingerprint"]["size"] == 6
-    result_in = worker_request(executable, {**base, "operation": "transfer", "path": str(target), "options": incoming,
-                              "columns": preview_in["columns"], "fingerprint": preview_in["fingerprint"]}, directory)
-    assert result_in["rows"] == 3 and result_in["direction"] == "in"
-
-    failed = {**obj, "id": 44, "name": "fail_me"}
-    stage.touch()
-    transfer.update(object=failed, out_target_fingerprint={"exists": True, "size": target.stat().st_size,
-                                                         "mtime_ns": target.stat().st_mtime_ns})
-    worker_request(executable, transfer, directory, expect_error=True)
-    assert target.read_bytes() == b"1\n2\n3\n" and not stage.exists(), "Failed export changed destination or retained staging"
-
-    # The real parent owns its worker tree with this same Windows Job mechanism.
-    # Reserved staging makes cleanup deterministic even if the worker is killed.
-    if os.name == "nt":
-        stage.touch()
-        transfer.update(object={**obj, "id": 43, "name": "cancel_me"})
-        process, guard = spawn_worker(executable, directory)
-        try:
-            process.stdin.write(json.dumps(transfer).encode())
-            process.stdin.close()
-            deadline = time.monotonic() + 30
-            while stage.stat().st_size == 0 and time.monotonic() < deadline:
-                time.sleep(.05)
-            assert stage.stat().st_size == 6, "Cancellation fixture did not start the external BCP process"
-            commands = (Path(clients) / "fixture-commands.log").read_text(encoding="utf-8")
-            child_pid = int(re.findall(r"bcp\.exe\tPID=([0-9]+)", commands)[-1])
-            guard.terminate()
-            process.wait(timeout=10)
-            assert target.read_bytes() == b"1\n2\n3\n", "Cancelled worker changed the existing destination"
-            import ctypes
-            from ctypes import wintypes
-            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-            kernel.OpenProcess.restype = wintypes.HANDLE
-            kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
-            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-            child = kernel.OpenProcess(0x1000, False, child_pid)
-            if child:
-                try:
-                    status = wintypes.DWORD()
-                    child_deadline = time.monotonic() + 5
-                    while kernel.GetExitCodeProcess(child, ctypes.byref(status)) and status.value == 259 and time.monotonic() < child_deadline:
-                        time.sleep(.05)
-                    assert kernel.GetExitCodeProcess(child, ctypes.byref(status)) and status.value != 259, "Cancelled worker left BCP running"
-                finally:
-                    kernel.CloseHandle(child)
-        finally:
-            guard.close()
-            if process.poll() is None:
-                process.kill()
-                process.wait(timeout=10)
-            for pipe in (process.stdout, process.stderr):
-                pipe.close()
-            stage.unlink(missing_ok=True)
-
-    commands = (Path(clients) / "fixture-commands.log").read_text(encoding="utf-8")
-    assert connection["password"] not in commands and "fixture-master" not in commands
-    assert "\t-P" not in commands, "Password was passed as a command argument"
-    assert "isql.exe\t" in commands and "bcp.exe\t" in commands
-    print("SAP frozen worker smoke: console authentication, schema/file preview, deferred OUT, append IN, failure/cancel preservation passed; fixture clients only.")
+    obj = {"database": "fixture_db", "owner": "dbo", "owner_id": 7, "id": 42, "name": "orders", "kind": "U"}
+    columns = [{"position": 1, "name": "id", "type_id": 56, "type_name": "int", "length": 4,
+                "precision": 0, "scale": 0, "nullable": False, "identity": False}]
+    worker_request(executable, {"operation": "transfer", "connection": connection, "object": obj,
+                   "path": str(target), "stage_path": str(stage), "defer_publish": True,
+                   "columns": columns, "options": {"direction": "out", "encoding": "utf-8"},
+                   "out_target_fingerprint": {"exists": True, "size": target.stat().st_size,
+                                              "mtime_ns": target.stat().st_mtime_ns}}, directory, expect_error=True)
+    assert target.read_bytes() == b"existing destination\n", "ODBC schema failure replaced an existing export"
+    assert not stage.exists(), "ODBC schema failure retained reserved staging"
+    target.unlink()
+    print("Frozen ODBC worker smoke: native extension/discovery, sanitized missing-driver errors and export preservation passed; no live ASE transfer tested.")
 
 
 def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path | None = None):
@@ -217,6 +153,8 @@ def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path |
                 match = re.search(r"http://127\.0\.0\.1:\d+", line)
                 if match:
                     smoke_args = ["--url", match.group(), "--large-files", "--config-folder", directory]
+                    if not allow_non_windows:
+                        smoke_args += ["--require-odbc"]
                     if sap_test_clients is not None:
                         smoke_args += ["--sap-test-clients", str(sap_test_clients), "--executable", str(executable)]
                     smoke_main(smoke_args)

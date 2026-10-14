@@ -105,7 +105,7 @@ def test_profiles_endpoint_is_local_and_does_not_expose_passwords(tmp_path, monk
     from nice_tools.jasypt import transform
     from nice_tools import ase_profiles
 
-    cipher = transform({"operation": "encrypt", "text": "test-db-secret", "password": "test-master-secret", "wrap_enc": True})
+    cipher = transform({"operation": "encrypt", "text": "test-db-secret", "password": "nice1234!!", "wrap_enc": True})
     path = tmp_path / "ase-connections.txt"
     path.write_text(f"[dev]\nhost=localhost\nport=5000\nuser=test\npassword={cipher}\ndatabase=testdb\n", encoding="utf-8")
     monkeypatch.setattr(ase_profiles, "configuration_path", lambda: path)
@@ -116,40 +116,32 @@ def test_profiles_endpoint_is_local_and_does_not_expose_passwords(tmp_path, monk
         assert response.json()["profiles"][0]["host"] == "localhost"
         assert cipher not in response.text
         assert "test-db-secret" not in response.text
-        assert "test-master-secret" not in response.text
+        assert "nice1234!!" not in response.text
         foreign = client.get("/api/ase/profiles", headers={"Origin": "https://foreign.example"})
         assert foreign.status_code == 403
 
 
-def test_profile_connect_decrypts_only_after_entering_key(tmp_path, monkeypatch):
+def test_profile_connect_uses_fixed_key_without_user_key_input(tmp_path, monkeypatch):
     from nice_tools.jasypt import transform
     from nice_tools import ase_profiles, ase_api
 
-    cipher = transform({"operation": "encrypt", "text": "test-db-secret", "password": "test-master-secret", "wrap_enc": True})
+    cipher = transform({"operation": "encrypt", "text": "test-db-secret", "password": "nice1234!!", "wrap_enc": True})
     path = tmp_path / "ase-connections.txt"
     path.write_text(f"[dev]\nhost=localhost\nport=5000\nuser=test\npassword={cipher}\ndatabase=testdb\n", encoding="utf-8")
     monkeypatch.setattr(ase_profiles, "configuration_path", lambda: path)
     received = []
-
     def connect(connection):
         received.append(connection)
         return {"session": "fixture-session", "databases": [{"id": 1, "name": "testdb"}]}
-
     monkeypatch.setattr(ase_api.manager, "connect", connect)
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         profile_id = client.get("/api/ase/profiles").json()["profiles"][0]["id"]
-        for key in ("wrong-test-key", ""):
-            response = client.post("/api/ase/connect", json={"profile_id": profile_id, "master_password": key}, headers={"X-Nice-Tools": "ase"})
-            assert response.status_code == 400
-            assert not received
-            assert "wrong-test-key" not in response.text
-        response = client.post("/api/ase/connect", json={"profile_id": profile_id, "master_password": "test-master-secret"}, headers={"X-Nice-Tools": "ase"})
-        assert response.status_code == 200
-        assert received[0]["password"] == "test-db-secret"
-        assert response.json()["database"] == "testdb"
-        assert response.json()["profile_name"] == "dev"
-        assert "test-db-secret" not in response.text
-        assert "test-master-secret" not in response.text
+        response = client.post("/api/ase/connect", json={"profile_id": profile_id}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200
+    assert received[0]["password"] == "test-db-secret"
+    assert response.json()["database"] == "testdb"
+    assert response.json()["profile_name"] == "dev"
+    assert "test-db-secret" not in response.text and "nice1234!!" not in response.text
 
 
 class ConnectRequest:
@@ -167,19 +159,18 @@ class ConnectRequest:
 
 
 def connect_request(tmp_path, monkeypatch, profile, disconnected=False):
-    data = {"host": "localhost", "port": 5000, "user": "test", "password": "test-db-secret", "master_password": "test-master-secret"}
+    data = {"host": "localhost", "port": 5000, "user": "test", "password": "test-db-secret"}
     from nice_tools import ase_profiles
     monkeypatch.setattr(ase_profiles, "configuration_path", lambda: tmp_path / "ase-connections.txt")
     if profile:
         from nice_tools import ase_profiles, jasypt
 
         cipher = jasypt.transform({"operation": "encrypt", "text": data["password"],
-                                   "password": "test-master-secret", "wrap_enc": True})
+                                   "password": "nice1234!!", "wrap_enc": True})
         path = tmp_path / "ase-connections.txt"
         path.write_text(f"[dev]\nhost=localhost\nport=5000\nuser=test\npassword={cipher}\n", encoding="utf-8")
         monkeypatch.setattr(ase_profiles, "configuration_path", lambda: path)
-        data = {"profile_id": ase_profiles.public_profiles()["profiles"][0]["id"],
-                "master_password": "test-master-secret"}
+        data = {"profile_id": ase_profiles.public_profiles()["profiles"][0]["id"]}
     return ConnectRequest(data, disconnected)
 
 
@@ -238,7 +229,7 @@ def test_browser_disconnect_cleans_successful_connect_without_returning_session(
     assert response.headers["cache-control"] == "no-store"
     assert not sessions
     body = response.body.decode()
-    assert "new-session" not in body and "test-db-secret" not in body and "test-master-secret" not in body
+    assert "new-session" not in body and "test-db-secret" not in body and "nice1234!!" not in body
 
 
 @pytest.mark.parametrize("profile", [False, True], ids=["manual", "profile"])
@@ -347,7 +338,7 @@ def test_manual_connect_saves_only_successful_credentials_and_preselects_next_la
         assert not path.exists()
         return {'session': 'test-session', 'databases': []}
     monkeypatch.setattr(ase_api.manager, 'connect', connect)
-    data = {'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'test-db-secret', 'master_password': 'test-master-secret'}
+    data = {'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'test-db-secret'}
     with TestClient(app, base_url='http://127.0.0.1:8000') as client:
         response = client.post('/api/ase/connect', json=data, headers={'X-Nice-Tools': 'ase'})
         assert response.status_code == 200
@@ -355,10 +346,10 @@ def test_manual_connect_saves_only_successful_credentials_and_preselects_next_la
         assert result['saved'] is True
         public = client.get('/api/ase/profiles').json()
         assert public['last_profile_id'] == result['profile_id']
-        assert ase_profiles.decrypt_connection(result['profile_id'], data['master_password'])['connection']['password'] == data['password']
+        assert ase_profiles.decrypt_connection(result['profile_id'])['connection']['password'] == data['password']
     assert set(calls[0]) == {'host', 'port', 'user', 'password'}
-    assert data['password'] not in path.read_text() and data['master_password'] not in path.read_text()
-    assert data['password'] not in response.text and data['master_password'] not in response.text
+    assert data['password'] not in path.read_text() and 'nice1234!!' not in path.read_text()
+    assert data['password'] not in response.text and 'nice1234!!' not in response.text
 
 
 def test_manual_failed_login_does_not_write_connection_file(tmp_path, monkeypatch):
@@ -368,22 +359,23 @@ def test_manual_failed_login_does_not_write_connection_file(tmp_path, monkeypatc
     def fail(connection):
         raise ValueError('접속 실패')
     monkeypatch.setattr(ase_api.manager, 'connect', fail)
-    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'master_password': 'master-secret'})
+    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret'})
     response = asyncio.run(ase_api.operation(request, 'connect'))
     assert response.status_code == 400
     assert not path.exists()
 
 
-def test_manual_missing_master_key_prevents_connect_and_secret_write(tmp_path, monkeypatch):
-    from nice_tools import ase_api, ase_profiles
-    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: tmp_path / 'ase-connections.txt')
+@pytest.mark.parametrize("profile", [False, True])
+def test_connect_rejects_supplied_master_key_and_never_attempts_connection(tmp_path, monkeypatch, profile):
+    from nice_tools import ase_api
+    request = connect_request(tmp_path, monkeypatch, profile)
+    request.data['master_password'] = 'old-custom-key'
     calls = []
     monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: calls.append(connection) or {'session': 'test'})
-    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret'})
     response = asyncio.run(ase_api.operation(request, 'connect'))
     assert response.status_code == 400
     assert not calls
-    assert 'db-secret' not in response.body.decode()
+    assert 'old-custom-key' not in response.body.decode()
 
 
 def test_successful_login_with_bad_config_keeps_session_and_warns_without_overwrite(tmp_path, monkeypatch):
@@ -393,7 +385,7 @@ def test_successful_login_with_bad_config_keeps_session_and_warns_without_overwr
     path.write_bytes(original)
     monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
     monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: {'session': 'connected-session', 'databases': []})
-    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'master_password': 'master-secret'})
+    request = ConnectRequest({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret'})
     response = asyncio.run(ase_api.operation(request, 'connect'))
     assert response.status_code == 200
     result = json.loads(response.body)
@@ -428,4 +420,113 @@ def test_cancelled_connect_during_save_cleans_live_session(tmp_path, monkeypatch
             assert cleaned.is_set() and not sessions
         finally:
             release.set()
+    asyncio.run(scenario())
+
+
+def test_obsolete_key_profile_failure_does_not_connect_or_rewrite_file(tmp_path, monkeypatch):
+    from nice_tools import ase_api, ase_profiles, jasypt
+    path = tmp_path / 'ase-connections.txt'
+    cipher = jasypt.transform({'operation': 'encrypt', 'text': 'old-db-secret', 'password': 'old-custom-key', 'wrap_enc': True})
+    path.write_text(f'[old]\nhost=localhost\nport=5000\nuser=test\npassword={cipher}\n')
+    original = path.read_bytes()
+    monkeypatch.setattr(ase_profiles, 'configuration_path', lambda: path)
+    calls = []
+    monkeypatch.setattr(ase_api.manager, 'connect', lambda connection: calls.append(connection) or {'session': 'unused'})
+    profile_id = ase_profiles.public_profiles()['profiles'][0]['id']
+    response = asyncio.run(ase_api.operation(ConnectRequest({'profile_id': profile_id}), 'connect'))
+    assert response.status_code == 400
+    assert not calls and path.read_bytes() == original
+    assert '다시' in response.body.decode() and '저장' in response.body.decode()
+    for secret in ('old-db-secret', 'old-custom-key', 'nice1234!!', cipher):
+        assert secret not in response.body.decode()
+
+
+@pytest.mark.parametrize('stage', ['late-connect', 'socket-gone', 'save-cancelled'])
+def test_session_cleanup_runs_outside_asgi_event_loop(tmp_path, monkeypatch, stage):
+    from nice_tools import ase_api, ase_profiles
+    request = connect_request(tmp_path, monkeypatch, False, disconnected=stage == 'socket-gone')
+    entered, release, cleaned = threading.Event(), threading.Event(), threading.Event()
+    disconnect_threads = []
+    sessions = {}
+    def connect(connection):
+        if stage == 'late-connect':
+            entered.set()
+            assert release.wait(3)
+        sessions['new-session'] = connection
+        return {'session': 'new-session', 'databases': []}
+    def save(prepared):
+        entered.set()
+        assert release.wait(3)
+        raise ValueError('save aborted')
+    def disconnect(session):
+        disconnect_threads.append(threading.get_ident())
+        sessions.pop(session)
+        cleaned.set()
+    monkeypatch.setattr(ase_api.manager, 'connect', connect)
+    monkeypatch.setattr(ase_api.manager, 'disconnect', disconnect)
+    if stage == 'save-cancelled':
+        monkeypatch.setattr(ase_profiles, 'save_connection', save)
+    async def scenario():
+        asgi_thread = threading.get_ident()
+        task = asyncio.create_task(ase_api.operation(request, 'connect'))
+        try:
+            if stage == 'socket-gone':
+                response = await task
+                assert response.status_code == 400
+            else:
+                assert await asyncio.to_thread(entered.wait, 2)
+                task.cancel()
+                if stage == 'late-connect':
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+                    release.set()
+                else:
+                    release.set()
+                    with pytest.raises(asyncio.CancelledError):
+                        await task
+            assert await asyncio.to_thread(cleaned.wait, 2)
+            assert len(disconnect_threads) == 1
+            assert disconnect_threads[0] != asgi_thread, 'ODBC close ran on the HTTP event loop'
+            assert not sessions
+        finally:
+            release.set()
+    asyncio.run(scenario())
+
+
+def test_background_disconnect_failures_are_consumed_without_event_loop_errors(tmp_path, monkeypatch):
+    from nice_tools import ase_api
+    request = connect_request(tmp_path, monkeypatch, False)
+    entered, release = threading.Event(), threading.Event()
+    def connect(connection):
+        entered.set()
+        assert release.wait(3)
+        return {'session': 'late-session', 'databases': []}
+    def disconnect(session):
+        raise RuntimeError('driver-error-containing-private-secret')
+    monkeypatch.setattr(ase_api.manager, 'connect', connect)
+    monkeypatch.setattr(ase_api.manager, 'disconnect', disconnect)
+    run_in_threadpool = ase_api.run_in_threadpool
+    async def scenario():
+        loop_errors = []
+        cleanup_returned = asyncio.Event()
+        async def observe_worker(function, *args, **kwargs):
+            try:
+                return await run_in_threadpool(function, *args, **kwargs)
+            finally:
+                if function is disconnect:
+                    cleanup_returned.set()
+        monkeypatch.setattr(ase_api, 'run_in_threadpool', observe_worker)
+        asyncio.get_running_loop().set_exception_handler(lambda loop, context: loop_errors.append(context))
+        task = asyncio.create_task(ase_api.operation(request, 'connect'))
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        await asyncio.wait_for(cleanup_returned.wait(), timeout=2)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert not loop_errors
     asyncio.run(scenario())

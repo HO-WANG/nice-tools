@@ -9,10 +9,14 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def sap_client(monkeypatch):
+    import nice_tools
     from nice_tools import ase_cli
+    module = SimpleNamespace(connect=None, run_operation=None, adapters=[])
+    monkeypatch.setitem(sys.modules, "nice_tools.ase_odbc", module)
+    monkeypatch.setattr(nice_tools, "ase_odbc", module, raising=False)
     monkeypatch.setattr(ase_cli, "client_status", lambda: {"available": True})
-    monkeypatch.setattr(ase_cli, "run_operation", None)
-    return ase_cli
+    monkeypatch.setattr(ase_cli, "run_operation", lambda *args, **kwargs: pytest.fail("Catalog operations must use the persistent ODBC connection"))
+    return module
 
 
 def manager_for(tmp_path, transfer="success", rows=1, contents=b"new\n", catalog_timings=None, transfer_metrics=None):
@@ -63,7 +67,29 @@ print(json.dumps({'event':'result','result':r}),flush=True)
         if catalog_timings is not None:
             result["timings"] = dict(catalog_timings)
         return result
-    sys.modules["nice_tools.ase_cli"].run_operation = run_operation
+    backend = sys.modules["nice_tools.ase_odbc"]
+    backend.run_operation = run_operation
+    class Adapter:
+        login_seconds = 0.25
+        def __init__(self, settings):
+            backend.adapters.append(self)
+            self.closed = False
+            self.cancelled = False
+            self.driver = "SAP ASE ODBC"
+        def open(self):
+            return self
+        def run_operation(self, payload, emit=None):
+            if self.closed:
+                raise ValueError("The ODBC connection is closed")
+            return backend.run_operation(payload, emit)
+        def cancel(self):
+            self.cancelled = True
+        def close(self):
+            self.closed = True
+    def connect(settings):
+        return Adapter(settings).open()
+    backend.OdbcSession = Adapter
+    backend.connect = connect
     return AseManager(worker_command=[sys.executable, str(script)])
 
 
@@ -378,18 +404,18 @@ def catalog_clock(monkeypatch, manager):
     """Measure the direct SAP CLI boundary, with no application subprocess."""
     from nice_tools import ase_jobs
     clock = TransferClock()
-    operation = sys.modules["nice_tools.ase_cli"].run_operation
+    operation = sys.modules["nice_tools.ase_odbc"].run_operation
     def timed_operation(*args, **kwargs):
         clock.advance(5.0)
         return operation(*args, **kwargs)
-    monkeypatch.setattr(sys.modules["nice_tools.ase_cli"], "run_operation", timed_operation)
+    monkeypatch.setattr(sys.modules["nice_tools.ase_odbc"], "run_operation", timed_operation)
     monkeypatch.setattr(ase_jobs, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(manager, "_spawn", lambda *args, **kwargs: pytest.fail("Catalog queries must not start the application EXE"))
     return clock
 
 
-def test_connect_preserves_client_timings_and_parent_total(tmp_path, monkeypatch):
-    timings = {"client_seconds": 4.75}
+def test_connect_preserves_odbc_timings_and_parent_total(tmp_path, monkeypatch):
+    timings = {"login_seconds": 0.25, "query_seconds": 4.5}
     manager = manager_for(tmp_path, catalog_timings=timings)
     try:
         catalog_clock(monkeypatch, manager)
@@ -403,8 +429,8 @@ def test_connect_preserves_client_timings_and_parent_total(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("operation", ["owners", "objects", "columns"])
-def test_catalog_calls_sap_cli_without_application_worker(tmp_path, monkeypatch, operation):
-    timings = {"client_seconds": 4.75}
+def test_catalog_reuses_odbc_without_application_worker(tmp_path, monkeypatch, operation):
+    timings = {"login_seconds": 0.25, "query_seconds": 4.5}
     manager = manager_for(tmp_path, catalog_timings=timings)
     try:
         session = manager.connect({"host": "localhost", "user": "u", "password": "pw"})["session"]
@@ -422,7 +448,7 @@ def test_status_resolves_clients_without_application_worker(tmp_path, monkeypatc
     assert manager.status() == {"available": True, "platform": sys.platform}
 
 
-def test_preview_queries_sap_cli_without_application_worker(tmp_path, monkeypatch):
+def test_preview_reuses_odbc_without_application_worker(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     try:
         session = manager.connect({"host": "localhost", "user": "u", "password": "pw"})["session"]
@@ -435,30 +461,27 @@ def test_preview_queries_sap_cli_without_application_worker(tmp_path, monkeypatc
         manager.close()
 
 
-def test_direct_catalog_registers_process_for_disconnect(tmp_path, monkeypatch):
+def test_disconnect_cancels_active_odbc_query_then_closes_connection(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     session = manager.connect({"host": "localhost", "user": "u", "password": "pw"})["session"]
+    adapter = sys.modules["nice_tools.ase_odbc"].adapters[0]
     entered = threading.Event()
-    killed = threading.Event()
+    cancelled = threading.Event()
     errors = []
-    class Handle:
-        pid = 12345
-        def poll(self):
-            return None
-        def kill(self):
-            killed.set()
-        def wait(self, timeout=None):
-            return None
-    handle = Handle()
-    def operation(payload, emit=None, register=None):
-        cleanup = register(handle)
+    events = []
+    def cancel():
+        events.append("cancel")
+        cancelled.set()
+    def close():
+        events.append("close")
+        adapter.closed = True
+    monkeypatch.setattr(adapter, "cancel", cancel)
+    monkeypatch.setattr(adapter, "close", close)
+    def operation(payload, emit=None):
         entered.set()
-        try:
-            assert killed.wait(timeout=5)
-            return {"owners": []}
-        finally:
-            cleanup()
-    monkeypatch.setattr(sys.modules["nice_tools.ase_cli"], "run_operation", operation)
+        assert cancelled.wait(timeout=5)
+        raise ValueError("Query cancelled")
+    monkeypatch.setattr(sys.modules["nice_tools.ase_odbc"], "run_operation", operation)
     def query():
         try:
             manager.catalog(session, "owners", database="db")
@@ -468,15 +491,14 @@ def test_direct_catalog_registers_process_for_disconnect(tmp_path, monkeypatch):
     thread.start()
     try:
         assert entered.wait(timeout=5)
-        assert manager.processes[handle] == session
         manager.disconnect(session)
         thread.join(timeout=5)
         assert not thread.is_alive()
-        assert killed.is_set()
-        assert handle not in manager.processes
+        assert events == ["cancel", "close"]
         assert len(errors) == 1
+        assert not manager.processes
     finally:
-        killed.set()
+        cancelled.set()
         thread.join(timeout=5)
         manager.close()
 
@@ -490,7 +512,7 @@ def test_connect_cannot_create_session_after_manager_shutdown(tmp_path, monkeypa
         entered.set()
         assert release.wait(timeout=5)
         return {"databases": []}
-    monkeypatch.setattr(sys.modules["nice_tools.ase_cli"], "run_operation", operation)
+    monkeypatch.setattr(sys.modules["nice_tools.ase_odbc"], "run_operation", operation)
     def connect():
         try:
             manager.connect({"host": "localhost", "user": "u", "password": "pw"})
@@ -720,3 +742,96 @@ def test_worker_security_setup_failure_kills_suspended_process(tmp_path, monkeyp
     assert events[-2:] == ["process-kill", "wait"]
     assert not manager.processes
     assert not manager.worker_jobs
+
+
+def test_one_odbc_connection_is_reused_for_catalog_and_preview(tmp_path):
+    manager = manager_for(tmp_path)
+    backend = sys.modules["nice_tools.ase_odbc"]
+    try:
+        session, review = selection(manager, tmp_path / "data.txt")
+        manager.catalog(session, "owners", database="db")
+        manager.catalog(session, "objects", database="db")
+        manager.catalog(session, "columns", object={"database":"db", "owner":"dbo", "owner_id":1, "id":10, "name":"t", "kind":"U"})
+        assert len(backend.adapters) == 1
+        assert manager.sessions[session]["adapter"] is backend.adapters[0]
+        assert not backend.adapters[0].closed
+        manager.disconnect(session)
+        assert backend.adapters[0].closed
+    finally:
+        manager.close()
+
+
+def test_failed_first_catalog_closes_opened_odbc_connection(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    backend = sys.modules["nice_tools.ase_odbc"]
+    def fail(*args, **kwargs):
+        raise ValueError("private-password failure")
+    monkeypatch.setattr(backend, "run_operation", fail)
+    with pytest.raises(ValueError) as error:
+        manager.connect({"host":"localhost", "user":"u", "password":"private-password"})
+    assert "private-password" not in str(error.value)
+    assert len(backend.adapters) == 1
+    assert backend.adapters[0].closed
+    assert not manager.sessions
+
+
+def test_manager_shutdown_closes_odbc_connections(tmp_path):
+    manager = manager_for(tmp_path)
+    backend = sys.modules["nice_tools.ase_odbc"]
+    manager.connect({"host":"localhost", "user":"u", "password":"pw"})
+    manager.connect({"host":"localhost", "user":"u", "password":"pw"})
+    manager.close()
+    assert len(backend.adapters) == 2
+    assert all(adapter.cancelled and adapter.closed for adapter in backend.adapters)
+
+
+def test_idle_session_expiry_closes_old_odbc_connection(tmp_path):
+    manager = manager_for(tmp_path)
+    backend = sys.modules["nice_tools.ase_odbc"]
+    try:
+        session = manager.connect({"host":"localhost", "user":"u", "password":"pw"})["session"]
+        manager.sessions[session]["touched"] -= 3601
+        manager.connect({"host":"localhost", "user":"u", "password":"pw"})
+        assert session not in manager.sessions
+        assert backend.adapters[0].closed
+        assert not backend.adapters[1].closed
+    finally:
+        manager.close()
+
+
+def test_shutdown_owns_and_cancels_odbc_adapter_during_initial_open(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    backend = sys.modules["nice_tools.ase_odbc"]
+    entered = threading.Event()
+    cancelled = threading.Event()
+    errors = []
+    def open_adapter(self):
+        entered.set()
+        assert cancelled.wait(timeout=5)
+        raise ValueError("Initial connection cancelled")
+    def cancel_adapter(self):
+        self.cancelled = True
+        cancelled.set()
+    monkeypatch.setattr(backend.OdbcSession, "open", open_adapter)
+    monkeypatch.setattr(backend.OdbcSession, "cancel", cancel_adapter)
+    def connect():
+        try:
+            manager.connect({"host":"localhost", "user":"u", "password":"pw"})
+        except ValueError as error:
+            errors.append(error)
+    thread = threading.Thread(target=connect)
+    thread.start()
+    try:
+        assert entered.wait(timeout=5)
+        assert backend.adapters[0] in manager.pending_adapters
+        manager.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert backend.adapters[0].cancelled and backend.adapters[0].closed
+        assert len(errors) == 1
+        assert not manager.pending_adapters
+        assert not manager.sessions
+    finally:
+        cancelled.set()
+        thread.join(timeout=5)
+        manager.close()
