@@ -627,20 +627,20 @@ def test_existing_aes_dsn_profile_update_preserves_database_and_comments(tmp_pat
 def test_save_sql_ini_path_preserves_encrypted_profiles_comments_and_odbc_settings(tmp_path):
     module = loader()
     path = write_profile(tmp_path, name='legacy', database='default-db', dsn='Existing ODBC DSN')
-    original = '# operator comments\n[odbc]\ndriver=SAP ASE ODBC Driver\n\n' + path.read_text()
-    path.write_text(original)
+    original = '# operator comments\n[odbc]\ndriver=SAP ASE ODBC Driver\n\n' + path.read_text(encoding='utf-8')
+    path.write_text(original, encoding='utf-8')
     sql_path = tmp_path / '설치 폴더' / 'sql.ini'
     result = module.save_sql_ini_path(str(sql_path), path)
     public = module.public_profiles(path)
     assert result == {'saved': True}
     assert public['clients']['sql_ini_path'] == str(sql_path)
     assert module.client_settings(path)['sql_ini_path'] == str(sql_path)
-    assert path.read_text().startswith(original)
+    assert path.read_text(encoding='utf-8').startswith(original)
     assert public['odbc'] == {'driver': 'SAP ASE ODBC Driver'}
     profile = public['profiles'][0]
     assert profile['dsn'] == 'Existing ODBC DSN' and profile['database'] == 'default-db'
     assert module.decrypt_connection(profile['id'], path)['connection']['password'] == PLAINTEXT
-    assert PLAINTEXT not in path.read_text() and '[ALIAS]' not in path.read_text()
+    assert PLAINTEXT not in path.read_text(encoding='utf-8') and '[ALIAS]' not in path.read_text(encoding='utf-8')
 
 
 def test_sql_ini_path_update_keeps_bcp_and_legacy_ignored_isql_settings(tmp_path):
@@ -648,13 +648,13 @@ def test_sql_ini_path_update_keeps_bcp_and_legacy_ignored_isql_settings(tmp_path
     path = tmp_path / 'ase-connections.txt'
     old_sql, new_sql = tmp_path / 'old.ini', tmp_path / 'new.ini'
     bcp = tmp_path / 'bcp.exe'
-    path.write_text(f'[sap_client]\n# SAP client comment\nisql_path=legacy-invalid-path\nbcp_path={bcp}\nsql_ini_path={old_sql}\n')
+    path.write_text(f'[sap_client]\n# SAP client comment\nisql_path=legacy-invalid-path\nbcp_path={bcp}\nsql_ini_path={old_sql}\n', encoding='utf-8')
     module.save_sql_ini_path(str(new_sql), path)
     public = module.public_profiles(path)
     assert public['clients'] == {'bcp_path': str(bcp), 'sql_ini_path': str(new_sql)}
-    assert '# SAP client comment' in path.read_text()
-    assert 'isql_path=legacy-invalid-path' in path.read_text()
-    assert sum(line.startswith('sql_ini_path') for line in path.read_text().splitlines()) == 1
+    assert '# SAP client comment' in path.read_text(encoding='utf-8')
+    assert 'isql_path=legacy-invalid-path' in path.read_text(encoding='utf-8')
+    assert sum(line.startswith('sql_ini_path') for line in path.read_text(encoding='utf-8').splitlines()) == 1
 
 
 @pytest.mark.parametrize('selected_path', ['relative/sql.ini', 'C-not-an-absolute-path', 'bad\tprivate-path', None])
@@ -680,7 +680,7 @@ def test_sql_ini_metadata_save_never_overwrites_malformed_existing_profiles(tmp_
 def test_sql_ini_path_rejects_c1_and_unicode_line_separators_without_changing_profiles(tmp_path, separator):
     module = loader()
     path = write_profile(tmp_path, name='protected', database='default-db', dsn='Working DSN')
-    path.write_text('# preserved operator comment\n' + path.read_text())
+    path.write_text('# preserved operator comment\n' + path.read_text(encoding='utf-8'), encoding='utf-8')
     before = path.read_bytes()
     dangerous = str(tmp_path / ('folder' + separator + 'private-path.ini'))
     with pytest.raises(ValueError) as exc:
@@ -691,4 +691,4 @@ def test_sql_ini_path_rejects_c1_and_unicode_line_separators_without_changing_pr
     assert public['profiles'][0]['name'] == 'protected'
     assert public['profiles'][0]['database'] == 'default-db'
     assert module.decrypt_connection(public['profiles'][0]['id'], path)['connection']['password'] == PLAINTEXT
-    assert '# preserved operator comment' in path.read_text()
+    assert '# preserved operator comment' in path.read_text(encoding='utf-8')

@@ -636,7 +636,7 @@ def test_picked_sql_ini_persists_path_only_even_if_entries_are_unsupported(sql_i
     assert result['saved'] is True and result['cancelled'] is False
     assert result['entries'] == state['catalog']['entries']
     assert ase_profiles.public_profiles()['clients']['sql_ini_path'] == selected
-    assert 'ASE_ALIAS' not in path.read_text()
+    assert 'ASE_ALIAS' not in path.read_text(encoding='utf-8')
     assert calls == [('pick',), ('status', selected)]
 
 
