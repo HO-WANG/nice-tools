@@ -533,162 +533,129 @@ def test_port_suffix_collision_preserves_unrelated_named_profile(tmp_path):
     assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data
 
 
-@pytest.mark.parametrize('settings', [{}, {'algorithm': jasypt.AES_ALGORITHM, 'iterations': 32, 'iv_generator': 'random'}])
-def test_optional_dsn_round_trip_preserves_crypto_comments_and_legacy_profiles(tmp_path, settings):
+def test_legacy_dsn_and_sql_path_load_directly_without_exposing_reading_or_changing_them(tmp_path, monkeypatch):
     module = loader()
-    path = write_profile(tmp_path, settings=settings, name='legacy', database='default-db')
-    original = '# operator comments remain\n' + path.read_text()
-    path.write_text(original)
-    data = {'host': 'ase-host', 'port': 5000, 'user': 'reader', 'password': 'new-db-secret', 'dsn': ' My ASE DSN '}
-    saved = module.save_connection(module.prepare_connection(data, path), path)
-    public = module.public_profiles(path)
-    fresh = next(item for item in public['profiles'] if item['id'] == saved['profile_id'])
-    assert fresh['dsn'] == 'My ASE DSN'
-    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == {**data, 'dsn': 'My ASE DSN'}
-    legacy = next(item for item in public['profiles'] if item['name'] == 'legacy')
-    assert 'dsn' not in legacy
-    assert 'dsn' not in module.decrypt_connection(legacy['id'], path)['connection']
-    assert legacy['database'] == 'default-db'
-    assert path.read_text().startswith(original)
-    assert module.public_profiles(path)['jasypt']['algorithm'] == (settings.get('algorithm') or jasypt.DES_ALGORITHM)
-
-
-def test_dsn_distinguishes_profiles_without_overwriting_direct_or_other_dsn(tmp_path):
-    module = loader()
-    path = tmp_path / 'ase-connections.txt'
-    base = {'host': 'server', 'port': 5000, 'user': 'sa', 'password': 'direct-secret'}
-    module.save_connection(module.prepare_connection(base, path), path)
-    one = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN A', 'password': 'dsn-a-secret'}, path), path)
-    two = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN B', 'password': 'dsn-b-secret'}, path), path)
-    updated = module.save_connection(module.prepare_connection({**base, 'dsn': 'DSN A', 'password': 'dsn-a-updated'}, path), path)
-    public = module.public_profiles(path)
-    assert len(public['profiles']) == 3
-    assert one['profile_name'] == updated['profile_name']
-    assert one['profile_name'] != two['profile_name']
-    direct = next(item for item in public['profiles'] if 'dsn' not in item)
-    dsn_b = next(item for item in public['profiles'] if item.get('dsn') == 'DSN B')
-    assert module.decrypt_connection(direct['id'], path)['connection']['password'] == 'direct-secret'
-    assert module.decrypt_connection(dsn_b['id'], path)['connection']['password'] == 'dsn-b-secret'
-    assert module.decrypt_connection(updated['profile_id'], path)['connection']['password'] == 'dsn-a-updated'
-    assert public['last_profile_id'] == updated['profile_id']
-
-
-@pytest.mark.parametrize('dsn', ['', '   '])
-def test_blank_dsn_is_absent_and_reuses_legacy_connection_identity(tmp_path, dsn):
-    module = loader()
-    path = write_profile(tmp_path)
-    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'updated-secret', 'dsn': dsn}
-    saved = module.save_connection(module.prepare_connection(data, path), path)
-    public = module.public_profiles(path)
-    assert len(public['profiles']) == 1 and 'dsn' not in public['profiles'][0]
-    assert 'dsn' not in module.decrypt_connection(saved['profile_id'], path)['connection']
-
-
-@pytest.mark.parametrize('dsn', ['bad\tprivate-dsn', 'bad\x7fprivate-dsn', 'x' * 256, None, 123])
-def test_invalid_manual_dsn_is_sanitized_before_connect_or_save(tmp_path, dsn):
-    path = tmp_path / 'ase-connections.txt'
-    with pytest.raises(ValueError) as exc:
-        loader().prepare_connection({'host': 'localhost', 'port': 5000, 'user': 'test', 'password': 'db-secret', 'dsn': dsn}, path)
-    assert 'private-dsn' not in str(exc.value) and 'db-secret' not in str(exc.value)
-    assert not path.exists()
-
-
-@pytest.mark.parametrize('dsn', ['bad\tprivate-dsn', 'bad\x7fprivate-dsn', 'x' * 256])
-def test_invalid_profile_dsn_is_rejected_without_echo(tmp_path, dsn):
-    path = write_profile(tmp_path, dsn=dsn)
-    with pytest.raises(ValueError) as exc:
-        loader().public_profiles(path)
-    assert 'private-dsn' not in str(exc.value)
-
-
-def test_global_odbc_dsn_is_rejected(tmp_path):
-    path = tmp_path / 'ase-connections.txt'
-    path.write_text('[odbc]\ndsn=global-dsn\n')
-    with pytest.raises(ValueError):
-        loader().public_profiles(path)
-
-
-def test_existing_aes_dsn_profile_update_preserves_database_and_comments(tmp_path):
-    module = loader()
-    settings = {'algorithm': jasypt.AES_ALGORITHM, 'iterations': 32, 'iv_generator': 'random'}
-    path = write_profile(tmp_path, settings=settings, name='custom-old-name', database='default-db', dsn='ASE DSN')
-    path.write_text(path.read_text().replace('[custom-old-name]\n', '[custom-old-name]\n# retained DSN profile comment\n'))
-    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'new-secret', 'dsn': 'ASE DSN'}
-    saved = module.save_connection(module.prepare_connection(data, path), path)
-    public = module.public_profiles(path)
-    assert len(public['profiles']) == 1
-    assert public['profiles'][0]['dsn'] == 'ASE DSN' and public['profiles'][0]['database'] == 'default-db'
-    assert saved['profile_name'] == '127.0.0.1-sa'
-    assert '# retained DSN profile comment' in path.read_text()
-    assert '[custom-old-name]' not in path.read_text()
-    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data
-
-
-def test_save_sql_ini_path_preserves_encrypted_profiles_comments_and_odbc_settings(tmp_path):
-    module = loader()
-    path = write_profile(tmp_path, name='legacy', database='default-db', dsn='Existing ODBC DSN')
-    original = '# operator comments\n[odbc]\ndriver=SAP ASE ODBC Driver\n\n' + path.read_text(encoding='utf-8')
-    path.write_text(original, encoding='utf-8')
-    sql_path = tmp_path / '설치 폴더' / 'sql.ini'
-    result = module.save_sql_ini_path(str(sql_path), path)
-    public = module.public_profiles(path)
-    assert result == {'saved': True}
-    assert public['clients']['sql_ini_path'] == str(sql_path)
-    assert module.client_settings(path)['sql_ini_path'] == str(sql_path)
-    assert path.read_text(encoding='utf-8').startswith(original)
-    assert public['odbc'] == {'driver': 'SAP ASE ODBC Driver'}
-    profile = public['profiles'][0]
-    assert profile['dsn'] == 'Existing ODBC DSN' and profile['database'] == 'default-db'
-    assert module.decrypt_connection(profile['id'], path)['connection']['password'] == PLAINTEXT
-    assert PLAINTEXT not in path.read_text(encoding='utf-8') and '[ALIAS]' not in path.read_text(encoding='utf-8')
-
-
-def test_sql_ini_path_update_keeps_bcp_and_legacy_ignored_isql_settings(tmp_path):
-    module = loader()
-    path = tmp_path / 'ase-connections.txt'
-    old_sql, new_sql = tmp_path / 'old.ini', tmp_path / 'new.ini'
-    bcp = tmp_path / 'bcp.exe'
-    path.write_text(f'[sap_client]\n# SAP client comment\nisql_path=legacy-invalid-path\nbcp_path={bcp}\nsql_ini_path={old_sql}\n', encoding='utf-8')
-    module.save_sql_ini_path(str(new_sql), path)
-    public = module.public_profiles(path)
-    assert public['clients'] == {'bcp_path': str(bcp), 'sql_ini_path': str(new_sql)}
-    assert '# SAP client comment' in path.read_text(encoding='utf-8')
-    assert 'isql_path=legacy-invalid-path' in path.read_text(encoding='utf-8')
-    assert sum(line.startswith('sql_ini_path') for line in path.read_text(encoding='utf-8').splitlines()) == 1
-
-
-@pytest.mark.parametrize('selected_path', ['relative/sql.ini', 'C-not-an-absolute-path', 'bad\tprivate-path', None])
-def test_bad_sql_ini_metadata_path_is_rejected_without_writing(tmp_path, selected_path):
-    path = tmp_path / 'ase-connections.txt'
-    with pytest.raises(ValueError) as exc:
-        loader().save_sql_ini_path(selected_path, path)
-    assert 'private-path' not in str(exc.value)
-    assert not path.exists()
-
-
-def test_sql_ini_metadata_save_never_overwrites_malformed_existing_profiles(tmp_path):
-    path = tmp_path / 'ase-connections.txt'
-    original = b'[bad]\npassword=existing-private-secret\n'
-    path.write_bytes(original)
-    with pytest.raises(ValueError) as exc:
-        loader().save_sql_ini_path(str(tmp_path / 'sql.ini'), path)
-    assert path.read_bytes() == original
-    assert 'existing-private-secret' not in str(exc.value)
-
-
-@pytest.mark.parametrize('separator', ['\x80', '\x85', '\x9f', '\u2028', '\u2029'])
-def test_sql_ini_path_rejects_c1_and_unicode_line_separators_without_changing_profiles(tmp_path, separator):
-    module = loader()
-    path = write_profile(tmp_path, name='protected', database='default-db', dsn='Working DSN')
-    path.write_text('# preserved operator comment\n' + path.read_text(encoding='utf-8'), encoding='utf-8')
+    path = write_profile(tmp_path, name='legacy', dsn='Old Windows DSN', database='default-db')
+    unused = tmp_path / 'unread SQL.ini'
+    raw = '[sap_client]\nsql_ini_path=' + str(unused) + '\n\n# legacy comment\n' + path.read_text(encoding='utf-8')
+    path.write_text(raw, encoding='utf-8')
     before = path.read_bytes()
-    dangerous = str(tmp_path / ('folder' + separator + 'private-path.ini'))
-    with pytest.raises(ValueError) as exc:
-        module.save_sql_ini_path(dangerous, path)
-    assert 'private-path' not in str(exc.value)
-    assert path.read_bytes() == before
+    open_path = Path.open
+    def forbid_sql_file(self, *args, **kwargs):
+        assert self != unused, 'removed SQL.ini feature attempted a read'
+        return open_path(self, *args, **kwargs)
+    monkeypatch.setattr(Path, 'open', forbid_sql_file)
     public = module.public_profiles(path)
-    assert public['profiles'][0]['name'] == 'protected'
+    assert 'dsn' not in public['profiles'][0]
+    assert 'sql_ini_path' not in public['clients']
+    assert module.client_settings(path) == {}
+    connection = module.decrypt_connection(public['profiles'][0]['id'], path)['connection']
+    assert connection == {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': PLAINTEXT}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize('legacy_value', ['missing-or-invalid', 'bad\tcontrol-value', 'x' * 1000, 'line one\n continued value'])
+def test_invalid_legacy_profile_dsn_and_sql_path_are_ignored(tmp_path, legacy_value):
+    module = loader()
+    path = write_profile(tmp_path, dsn=legacy_value)
+    path.write_text('[sap_client]\nsql_ini_path=' + legacy_value + '\n\n' + path.read_text(encoding='utf-8'), encoding='utf-8')
+    before = path.read_bytes()
+    public = module.public_profiles(path)
+    assert public['clients'] == {} and 'dsn' not in public['profiles'][0]
+    assert 'dsn' not in module.decrypt_connection(public['profiles'][0]['id'], path)['connection']
+    assert path.read_bytes() == before
+
+
+def test_manual_update_keeps_legacy_ignored_fields_comments_and_duplicate_profiles(tmp_path):
+    module = loader()
+    path = write_profile(tmp_path, name='legacy-one', dsn='DSN One', database='default-db')
+    other = '[legacy-two]\n# other profile untouched\nhost=127.0.0.1\nport=5000\nuser=sa\npassword=' + encrypted('other-password') + '\ndsn=DSN Two\n'
+    prefix = '[sap_client]\n# client comment\nsql_ini_path=invalid-old-path\n[odbc]\ndriver=SAP ASE ODBC Driver\n\n'
+    path.write_text(prefix + '# first profile comment\n' + path.read_text(encoding='utf-8') + '\n' + other, encoding='utf-8')
+    data = {'host': '127.0.0.1', 'port': 5000, 'user': 'sa', 'password': 'updated-password'}
+    result = module.save_connection(module.prepare_connection(data, path), path)
+    after = path.read_text(encoding='utf-8')
+    public = module.public_profiles(path)
+    assert len(public['profiles']) == 2 and all('dsn' not in item for item in public['profiles'])
+    assert public['clients'] == {} and public['odbc'] == {'driver': 'SAP ASE ODBC Driver'}
+    assert after.startswith(prefix) and '# first profile comment' in after and other in after
+    assert '\ndsn=DSN One\n' in after and 'sql_ini_path=invalid-old-path' in after
+    assert module.decrypt_connection(result['profile_id'], path)['connection'] == data
+    untouched = next(item for item in public['profiles'] if item['name'] == 'legacy-two')
+    assert module.decrypt_connection(untouched['id'], path)['connection']['password'] == 'other-password'
+
+
+@pytest.mark.parametrize('section,field', [('sap_client', 'unknown_path=unknown-secret'), ('odbc', 'dsn=unknown-secret'), ('local', 'unknown_field=unknown-secret')])
+def test_only_exact_removed_profile_and_client_fields_are_ignored(tmp_path, section, field):
+    path = write_profile(tmp_path, dsn='Ignored DSN')
+    if section == 'local':
+        path.write_text(path.read_text(encoding='utf-8') + field + '\n', encoding='utf-8')
+    else:
+        path.write_text(f'[{section}]\n{field}\n\n' + path.read_text(encoding='utf-8'), encoding='utf-8')
+    with pytest.raises(ValueError) as exc:
+        loader().public_profiles(path)
+    assert 'unknown-secret' not in str(exc.value)
+
+
+def test_new_profiles_never_write_removed_dsn_or_sql_path_fields(tmp_path):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    data = {'host': 'server', 'port': 5000, 'user': 'reader', 'password': 'db-secret'}
+    result = module.save_connection(module.prepare_connection(data, path), path)
+    assert 'dsn' not in path.read_text(encoding='utf-8') and 'sql_ini_path' not in path.read_text(encoding='utf-8')
+    assert module.decrypt_connection(result['profile_id'], path)['connection'] == data
+
+
+@pytest.mark.parametrize('separator', ['\n ', '\x85', '\u2028', '\u2029'])
+def test_manual_save_preserves_ignored_legacy_value_that_looks_like_an_active_field(tmp_path, separator):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    legacy_line = 'dsn=old-value' + separator + 'password = ignored-fragment\n'
+    path.write_text('[legacy]\n# retained comment\nhost=server\nport=5000\nuser=test\n' + legacy_line + 'password=' + encrypted('old-password') + '\n', encoding='utf-8')
+    data = {'host': 'server', 'port': 5000, 'user': 'test', 'password': 'updated-password'}
+    saved = module.save_connection(module.prepare_connection(data, path), path)
+    assert legacy_line in path.read_text(encoding='utf-8')
+    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data
+    assert '# retained comment' in path.read_text(encoding='utf-8')
+
+
+@pytest.mark.parametrize('indent', [' ', '\t'])
+@pytest.mark.parametrize('existing_preferences', [False, True])
+def test_indented_profile_save_preserves_option_boundaries_and_ignored_legacy_data(tmp_path, indent, existing_preferences):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    original = '[legacy]\n# retained profile comment\n' + ''.join(indent + line + '\n' for line in (
+        'host=server', 'port=5000', 'user=test', 'password=' + encrypted('old-password'),
+        'dsn=old-value', 'database=default-db'))
+    if existing_preferences:
+        original += '\n[preferences]\n# retained selection comment\n' + indent + 'last_profile=legacy\n'
+    path.write_text(original, encoding='utf-8')
+    assert module.public_profiles(path)['profiles'][0]['database'] == 'default-db'
+    data = {'host': 'server', 'port': 5000, 'user': 'test', 'password': 'updated-password'}
+    saved = module.save_connection(module.prepare_connection(data, path), path)
+    public = module.public_profiles(path)
+    after = path.read_text(encoding='utf-8')
+    assert saved['profile_name'] == 'server-test' and len(public['profiles']) == 1
     assert public['profiles'][0]['database'] == 'default-db'
-    assert module.decrypt_connection(public['profiles'][0]['id'], path)['connection']['password'] == PLAINTEXT
-    assert '# preserved operator comment' in path.read_text(encoding='utf-8')
+    assert public['last_profile_id'] == saved['profile_id']
+    assert module.decrypt_connection(saved['profile_id'], path)['connection'] == data
+    assert indent + 'dsn=old-value\n' in after and indent + 'database=default-db\n' in after
+    assert '# retained profile comment' in after
+    assert indent + 'password = ENC(' in after
+    if existing_preferences:
+        assert indent + 'last_profile = server-test\n' in after
+        assert '# retained selection comment' in after
+
+
+def test_new_field_in_indented_section_preserves_existing_password_and_database_boundaries(tmp_path):
+    module = loader()
+    path = tmp_path / 'ase-connections.txt'
+    original = '[legacy]\n' + ''.join(' ' + line + '\n' for line in (
+        'host=server', 'port=5000', 'user=test', 'password=' + encrypted('old-password'), 'dsn=old-value'))
+    updated = module._update_section(original, 'legacy', {'database': 'new-default'})
+    path.write_text(updated, encoding='utf-8')
+    public = module.public_profiles(path)
+    assert public['profiles'][0]['database'] == 'new-default'
+    assert module.decrypt_connection(public['profiles'][0]['id'], path)['connection']['password'] == 'old-password'
+    assert ' dsn=old-value\n' in updated
+    assert ' database = new-default\n' in updated

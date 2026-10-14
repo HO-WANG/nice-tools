@@ -6,17 +6,15 @@
 # Never write plaintext DB passwords here.
 # Comments must occupy their own lines. Settings apply to all server sections.
 # Optional explicit SAP paths; omit this section to use PATH/SYBASE/SYBASE_OCS.
+# Catalogs connect directly with host/port/user/password through pyodbc and the
+# installed 64-bit SAP ASE ODBC driver. No DSN or SQL.INI selection is required.
+# Legacy profile dsn and sap_client sql_ini_path entries are ignored and may remain.
 
 [sap_client]
 bcp_path = C:\SAP\OCS-16_0\bin\bcp.exe
-# Optional absolute literal path; the pre-connect file picker remembers it here.
-# sql_ini_path = C:\SAP\ini\sql.ini
-# sql.ini server aliases fill host/port only; they are not Windows ODBC DSNs.
 
 # Optional: exact SAP ASE driver name from the Windows 64-bit ODBC administrator.
 # Remove this section to select a registered SAP ASE driver automatically.
-# With dsn, this name must match that DSN's registered driver; otherwise reject.
-# It never overrides the driver supplied by the DSN connection string.
 [odbc]
 driver = Adaptive Server Enterprise
 
@@ -33,10 +31,6 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 database = appdb
-# Optional: exact registered 64-bit SAP ASE user/system DSN name.
-# DSN supplies driver/charset/default database/security settings. Explicit
-# host/port/user/password remain the endpoint and credentials used by BCP.
-# dsn = ASE_UAT
 
 [ase-test.example.internal-bcp_user]
 host = ase-test.example.internal
@@ -44,7 +38,6 @@ port = 5000
 user = bcp_user
 password = ENC(PASTE_JASYPT_RESULT_HERE)
 # database is optional.
-# dsn = ASE_UAT
 
 [preferences]
 # Updated automatically after a successful connection.

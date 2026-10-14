@@ -19,8 +19,9 @@ PASSWORD = "browser-only-password-7!"
 FIXED_PROFILE_KEY = "nice1234!!"
 PROFILE_PATH = r"C:\nice-tools\ase-connections.txt"
 CLIENT_PATHS = {"bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
+REMOVED_CONNECTION_CONTROLS = "#ase-dsn, #ase-dsn-help, #ase-sql-ini, #ase-sql-ini-help, #ase-sql-ini-path, #ase-pick-sql-ini, #ase-sql-ini-reload"
+REMOVED_CONNECTION_ENDPOINTS = {"sql-ini", "pick-sql-ini", "data-sources", "data_sources", "dsns", "dsn"}
 ODBC = {"driver": "Adaptive Server Enterprise", "drivers": ["Adaptive Server Enterprise"]}
-SQL_INI_PATH = r"C:\SAP\ini\sql.ini"
 PROFILES = [
     {"id": "main", "name": "운영 ASE", "host": "ase.saved.internal", "port": 5001, "user": "saved_user", "database": "db1"},
     {"id": "hostile", "name": '<img src=x onerror="window.__aseXss=true">', "host": "ase.backup.internal", "port": 5002, "user": "backup_user", "database": "missing_db"},
@@ -86,16 +87,6 @@ class ASEMock:
     fail_connect: bool = False
     replace_profile_after_save: bool | str = False
     legacy_profile: bool = False
-    data_sources: list | None = None
-    data_sources_detail: str = ""
-    expected_dsn: str = ""
-    sql_ini_catalog: dict = field(default_factory=lambda: {"path": None, "found": False, "entries": [], "detail": "sql.ini를 찾을 수 없습니다. 파일을 선택하세요."})
-    fail_sql_ini: bool = False
-    delay_sql_ini: bool = False
-    pending_sql_ini: list = field(default_factory=list)
-    cancel_sql_ini: bool = False
-    sql_ini_saved: bool = True
-    sql_profile_rotation: bool = False
 
     def timed(self, payload):
         return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
@@ -128,16 +119,17 @@ class ASEMock:
         headers = request.headers
         self.calls.append({"endpoint": endpoint, "method": request.method, "payload": payload, "url": request.url, "headers": headers})
         try:
+            assert endpoint not in REMOVED_CONNECTION_ENDPOINTS, "Removed SQL.ini/DSN APIs must not be requested"
             assert not parsed.query, "ASE request has a query string"
             assert PASSWORD not in request.url, "Password leaked into URL"
             assert FIXED_PROFILE_KEY not in request.url, "Fixed profile key must not be sent by the browser"
             assert "master_password" not in (payload or {}), "ASE profile key must not be supplied by the browser"
+            assert "dsn" not in (payload or {}), "Direct connections must not contain a DSN override"
             assert headers.get("cache-control") == "no-store", "ASE request must disable caching"
             assert headers.get("x-nice-tools") == "ase", "ASE request is missing its browser-origin guard"
             if endpoint == "status":
                 assert request.method == "GET"
-                odbc = {**ODBC, **({"data_sources": self.data_sources} if self.data_sources is not None else {}), **({"data_sources_detail": self.data_sources_detail} if self.data_sources_detail else {})}
-                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": odbc, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
+                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": ODBC, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
             if endpoint == "profiles":
                 assert request.method == "GET"
                 if self.delay_profiles:
@@ -148,29 +140,9 @@ class ASEMock:
                     self.fail_profiles = False
                     return self.respond(route, {"detail": HOSTILE_ERROR}, status=400)
                 return self.respond(route, self.profile_response())
-            if endpoint == "sql-ini":
-                assert request.method == "GET"
-                if self.delay_sql_ini:
-                    self.delay_sql_ini = False
-                    self.pending_sql_ini.append((route, self.sql_ini_catalog.copy()))
-                    return
-                if self.fail_sql_ini:
-                    self.fail_sql_ini = False
-                    return self.respond(route, {"detail": HOSTILE_ERROR}, status=400)
-                return self.respond(route, self.sql_ini_catalog)
             assert request.method == "POST", f"Unexpected {request.method} for {endpoint}"
             assert headers.get("content-type", "").startswith("application/json"), "ASE uses JSON, not uploads"
             assert isinstance(payload, dict)
-            if endpoint == "pick-sql-ini":
-                assert payload == {}, "sql.ini picker must not receive a user-supplied path or session"
-                if self.cancel_sql_ini:
-                    self.cancel_sql_ini = False
-                    return self.respond(route, {"cancelled": True})
-                if self.sql_profile_rotation:
-                    self.profiles = [{**profile, "id": "sql-" + profile["id"]} for profile in self.profiles]
-                    if self.last_profile_id:
-                        self.last_profile_id = "sql-" + self.last_profile_id
-                return self.respond(route, {"cancelled": False, **self.sql_ini_catalog, "saved": self.sql_ini_saved, **({"save_warning": HOSTILE_ERROR} if not self.sql_ini_saved else {})})
             if endpoint == "connect":
                 if self.fail_connect:
                     self.fail_connect = False
@@ -184,18 +156,14 @@ class ASEMock:
                     self.last_profile_id = profile["id"]
                     response.update({"profile_id": profile["id"], "profile_name": profile["name"], "database": profile.get("database")})
                 else:
-                    assert {key: value for key, value in payload.items() if key != "dsn"} in [
+                    assert payload in [
                         {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": PASSWORD},
                         {"host": "ase.example.internal", "port": 5000, "user": "tester", "password": ""},
                     ]
-                    assert payload.get("dsn", "") == self.expected_dsn
-                    assert "dsn" not in payload or isinstance(payload["dsn"], str) and payload["dsn"], "Empty DSN must be omitted"
                     if self.fail_save:
                         response.update({"saved": False, "save_warning": HOSTILE_ERROR})
                     elif self.auto_save:
                         saved = {"id": "saved-new", "name": f"{payload['host']}-{payload['user']}", "host": payload["host"], "port": payload["port"], "user": payload["user"]}
-                        if "dsn" in payload:
-                            saved["dsn"] = payload["dsn"]
                         self.profiles = [profile for profile in self.profiles if profile["id"] != saved["id"]] + [saved]
                         self.profiles_exist = True
                         self.last_profile_id = saved["id"]
@@ -206,9 +174,6 @@ class ASEMock:
                             self.last_profile_id = "main"
                             if self.replace_profile_after_save == "rotated":
                                 self.profiles.append({**saved, "id": "rotated-profile"})
-                            if self.replace_profile_after_save == "different-dsn":
-                                self.profiles.append({**saved, "id": "other-dsn-profile", "dsn": "OTHER_ASE_DSN"})
-                                self.last_profile_id = "other-dsn-profile"
                 if self.delay_connect:
                     self.delay_connect = False
                     response["session"] = f"late-session-{len(self.endpoint_calls('connect'))}"
@@ -310,6 +275,13 @@ class ASEMock:
         return [call for call in self.calls if call["endpoint"] == name]
 
 
+def assert_classic_connection_controls(page, mock):
+    """Keep direct host/port/account entry without retired alias or DSN behavior."""
+    assert page.locator(REMOVED_CONNECTION_CONTROLS).count() == 0, "SQL.ini/ODBC DSN controls must be absent"
+    assert page.locator("#ase-connect-form input").evaluate_all("inputs => inputs.map(input => input.id)") == ["ase-host", "ase-port", "ase-user", "ase-password"], "Connection form must retain its four direct connection fields"
+    assert not REMOVED_CONNECTION_ENDPOINTS.intersection(call["endpoint"] for call in mock.calls), "Removed SQL.ini/DSN APIs were requested"
+
+
 def select_table(page, name=TABLE["name"], owner="dbo"):
     page.locator("#ase-object-body tr").filter(has=page.get_by_role("cell", name=owner, exact=True)).get_by_role("button", name=name, exact=True).click()
     expect(page.locator("#ase-column-body")).to_contain_text(HOSTILE)
@@ -363,6 +335,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#directory-tool")).to_be_hidden()
     expect(page.locator("#jasypt-tool")).to_be_hidden()
     expect(page.locator("#current-tool")).to_have_text(tool_title)
+    assert_classic_connection_controls(page, mock)
     expect(page.locator("#ase-password")).to_have_attribute("type", "password")
     assert page.locator("#ase-master-password, #ase-master-key-field").count() == 0
     expect(page.locator("#ase-odbc-driver")).to_contain_text(ODBC["driver"])
@@ -534,11 +507,6 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     assert mock.pending_starts
     expect(page.locator("#ase-profile")).to_be_disabled()
     expect(page.locator("#ase-profile-reload")).to_be_disabled()
-    for control in ("#ase-sql-ini", "#ase-pick-sql-ini", "#ase-sql-ini-reload"):
-        expect(page.locator(control)).to_be_disabled()
-    sql_calls = len(mock.endpoint_calls("pick-sql-ini"))
-    page.locator("#ase-pick-sql-ini").dispatch_event("click")
-    assert len(mock.endpoint_calls("pick-sql-ini")) == sql_calls
     profile_calls = len(mock.endpoint_calls("profiles"))
     page.locator("#ase-profile-reload").dispatch_event("click")
     page.locator("#ase-profile").dispatch_event("change")
@@ -738,6 +706,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     assert len(mock.endpoint_calls("disconnect")) == 1
     assert len(mock.endpoint_calls("connect")) == 1
     assert len(mock.endpoint_calls("status")) >= 1
+    assert_classic_connection_controls(page, mock)
     assert not mock.violations, mock.violations
     assert not uploads, "ASE must use the desktop native picker, not a browser upload"
     assert page.locator("#ase-tool input[type='file']").count() == 0
@@ -958,6 +927,7 @@ def validate_profiles(page, url):
     expect(page.locator("#ase-profile")).to_have_value("")
     expect(page.locator("#ase-host")).to_have_value("manual.changed.internal")
     expect(page.locator("#ase-password")).to_have_value(PASSWORD)
+    assert_classic_connection_controls(page, mock)
     assert not mock.violations, mock.violations
     assert not errors, errors
 
@@ -1036,6 +1006,7 @@ def validate_saved_connections(page, url):
     expect(page.locator("#ase-password")).to_have_value("")
     assert len(mock.endpoint_calls("profiles")) == profiles_before, "Failed login must not refresh or save a profile"
     assert mock.last_profile_id == "saved-new"
+    assert_classic_connection_controls(page, mock)
     assert page.evaluate("localStorage.length + sessionStorage.length") == 0
     assert page.evaluate("window.__aseStorageWrites") == []
     assert all(PASSWORD not in message and FIXED_PROFILE_KEY not in message for message in console)
@@ -1043,15 +1014,12 @@ def validate_saved_connections(page, url):
     assert not errors, errors
 
 
-def validate_saved_profile_race(page, url, retain_profile=False, different_dsn=False):
+def validate_saved_profile_race(page, url, retain_profile=False):
     """A changed file must not make a live connection appear to target another server."""
-    replacement = "different-dsn" if different_dsn else "rotated" if retain_profile else True
-    mock = ASEMock(auto_save=True, replace_profile_after_save=replacement, expected_dsn="TEST_ASE_DSN" if different_dsn else "", data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}] if different_dsn else None)
+    mock = ASEMock(auto_save=True, replace_profile_after_save="rotated" if retain_profile else True)
     page.route("**/api/ase/**", mock.handle)
     page.goto(url, wait_until="networkidle")
     page.locator('a[data-tool="ase-tool"]').click()
-    if different_dsn:
-        page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
     page.locator("#ase-host").fill("ase.example.internal")
     page.locator("#ase-port").fill("5000")
     page.locator("#ase-user").fill("tester")
@@ -1062,8 +1030,6 @@ def validate_saved_profile_race(page, url, retain_profile=False, different_dsn=F
     expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
     expect(page.locator("#ase-port")).to_have_value("5000")
     expect(page.locator("#ase-user")).to_have_value("tester")
-    if different_dsn:
-        expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
     assert not mock.endpoint_calls("disconnect")
     page.locator("#ase-database").select_option("db1")
     page.locator("#ase-search-button").click()
@@ -1134,227 +1100,6 @@ def validate_driver_status(page, url):
     assert not mock.violations, mock.violations
 
 
-def validate_dsns(page, url):
-    """Registered names, manual overrides, saved DSNs, and missing registration are explicit."""
-    dsn = "한글 ASE 테스트"
-    dsn_driver = "SAP ASE ODBC Driver"
-    mock = ASEMock(auto_save=True, expected_dsn=dsn, data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}, {"name": dsn, "driver": dsn_driver}, {"name": HOSTILE, "driver": ODBC["driver"]}])
-    page.add_init_script("window.__aseXss = false;")
-    page.route("**/api/ase/**", mock.handle)
-    page.goto(url, wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-dsn")).to_have_value("")
-    expect(page.locator("#ase-dsn option")).to_have_count(4)
-    expect(page.locator("#ase-dsn option[value='']")).to_have_text("직접 연결 (DSN 없음)")
-    expect(page.locator("#ase-dsn-help")).to_contain_text("서버·포트·계정은 입력값")
-    assert not mock.endpoint_calls("connect")
-    page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
-    page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-dsn").select_option(HOSTILE)
-    expect(page.locator("#ase-password")).to_have_value("")
-    assert page.locator("#ase-dsn option img").count() == 0
-    page.locator("#ase-dsn").select_option(dsn)
-    expect(page.locator("#ase-odbc-driver")).to_contain_text(dsn_driver)
-    page.locator("#ase-host").fill("ase.example.internal")
-    page.locator("#ase-port").fill("5000")
-    page.locator("#ase-user").fill("tester")
-    page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-connect").click()
-    expect(page.locator("#ase-profile")).to_have_value("saved-new")
-    expect(page.locator("#ase-dsn")).to_have_value(dsn)
-    expect(page.locator("#ase-dsn")).to_be_disabled()
-    assert mock.endpoint_calls("connect")[-1]["payload"]["dsn"] == dsn
-    assert not mock.endpoint_calls("disconnect"), "Saved DSN refresh must keep the active session"
-    page.locator("#ase-disconnect").click()
-    mock.data_sources = []
-    mock.data_sources_detail = "DSN 목록을 읽지 못했습니다. ODBC 설정을 확인하세요."
-    page.reload(wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-dsn")).to_have_value(dsn)
-    expect(page.locator("#ase-dsn-help")).to_contain_text(mock.data_sources_detail)
-    assert "등록된 64비트 SAP ASE DSN이 없습니다" not in page.locator("#ase-dsn-help").inner_text()
-    expect(page.locator("#ase-dsn option[value='" + dsn + "']")).to_contain_text("등록 확인 필요")
-    mock.data_sources_detail = ""
-    page.reload(wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-dsn")).to_have_value(dsn)
-    expect(page.locator("#ase-dsn option[value='" + dsn + "']")).to_contain_text("등록되지 않은 DSN")
-    expect(page.locator("#ase-dsn-help")).to_contain_text("등록되어 있지 않습니다")
-    page.locator("#ase-connect").click()
-    expect(page.locator("#ase-database")).to_be_enabled()
-    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "saved-new"}
-    page.locator("#ase-profile").select_option("")
-    expect(page.locator("#ase-dsn")).to_have_value("")
-    expect(page.locator("#ase-dsn-help")).to_contain_text("등록된 64비트 SAP ASE DSN이 없습니다")
-    for width in (390, 768, 1440):
-        page.set_viewport_size({"width": width, "height": 844})
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"ASE DSN overflow at {width}px"
-    assert page.evaluate("localStorage.length + sessionStorage.length") == 0
-    assert page.evaluate("window.__aseXss") is False
-    assert not mock.violations, mock.violations
-
-
-def validate_dsn_case(page, url):
-    """Saved DSN spelling is preserved while registration and driver lookup ignore case."""
-    registered = "TEST_ASE_CASE_DSN"
-    saved_name = registered.lower()
-    driver = "SAP ASE ODBC Driver"
-    profile = {**PROFILES[0], "dsn": saved_name}
-    mock = ASEMock(profiles=[profile], profiles_exist=True, data_sources=[{"name": registered, "driver": driver}])
-    page.route("**/api/ase/**", mock.handle)
-    page.goto(url, wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-dsn")).to_have_value(saved_name)
-    assert "등록되어 있지 않습니다" not in page.locator("#ase-dsn-help").inner_text()
-    assert "등록되지 않은 DSN" not in page.locator("#ase-dsn option:checked").inner_text()
-    expect(page.locator("#ase-odbc-driver")).to_contain_text(driver)
-    page.locator("#ase-connect").click()
-    expect(page.locator("#ase-database")).to_be_enabled()
-    expect(page.locator("#ase-dsn")).to_have_value(saved_name)
-    assert mock.endpoint_calls("connect")[-1]["payload"] == {"profile_id": "main"}
-    assert not mock.endpoint_calls("disconnect")
-    assert not mock.violations, mock.violations
-
-
-def sql_ini_fixture():
-    return {"path": SQL_INI_PATH, "found": True, "entries": [
-        {"id": "sql-test", "name": "TEST_ASE_ALIAS", "host": "ase.example.internal", "port": 5000, "available": True, "detail": ""},
-        {"id": "sql-disabled", "name": HOSTILE, "available": False, "detail": HOSTILE_ERROR},
-    ], "detail": "sql.ini에서 서버를 읽었습니다."}
-
-
-def validate_sql_ini(page, url):
-    """SQL.ini aliases supply addresses without changing ODBC DSN/account or logging in."""
-    mock = ASEMock(sql_ini_catalog=sql_ini_fixture(), data_sources=[{"name": "TEST_ASE_DSN", "driver": ODBC["driver"]}], expected_dsn="TEST_ASE_DSN", auto_save=True)
-    errors = []
-    page.on("pageerror", lambda error: errors.append(str(error)))
-    page.add_init_script("window.__aseXss = false;")
-    page.route("**/api/ase/**", mock.handle)
-    page.goto(url, wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-sql-ini option[value='sql-test']")).to_contain_text("TEST_ASE_ALIAS · ase.example.internal:5000")
-    expect(page.locator("#ase-sql-ini option[value='sql-disabled']")).to_be_disabled()
-    expect(page.locator("#ase-sql-ini option[value='sql-disabled']")).to_contain_text(HOSTILE_ERROR)
-    expect(page.locator("#ase-sql-ini-path")).to_contain_text(SQL_INI_PATH)
-    assert not mock.endpoint_calls("connect") and not mock.endpoint_calls("objects")
-    page.locator("#ase-dsn").select_option("TEST_ASE_DSN")
-    page.locator("#ase-user").fill("tester")
-    page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-sql-ini").select_option("sql-test")
-    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
-    expect(page.locator("#ase-port")).to_have_value("5000")
-    expect(page.locator("#ase-user")).to_have_value("tester")
-    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
-    expect(page.locator("#ase-password")).to_have_value("")
-    mock.cancel_sql_ini = True
-    page.locator("#ase-pick-sql-ini").click()
-    expect(page.locator("#ase-sql-ini")).to_have_value("sql-test")
-    expect(page.locator("#ase-sql-ini-path")).to_contain_text(SQL_INI_PATH)
-    mock.fail_sql_ini = True
-    page.locator("#ase-sql-ini-reload").click()
-    expect(page.locator("#ase-sql-ini-help")).to_contain_text(HOSTILE_ERROR)
-    assert not page.locator("#ase-sql-ini-help script, #ase-sql-ini option img").count()
-    page.locator("#ase-host").fill("manual.changed.internal")
-    expect(page.locator("#ase-sql-ini")).to_have_value("")
-    page.locator("#ase-sql-ini").select_option("sql-test")
-    page.locator("#ase-port").fill("5001")
-    expect(page.locator("#ase-sql-ini")).to_have_value("")
-    page.locator("#ase-sql-ini").select_option("sql-test")
-    page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-pick-sql-ini").click()
-    expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
-    expect(page.locator("#ase-password")).to_have_value(PASSWORD)
-    expect(page.locator("#ase-profile")).to_have_value("")
-    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
-    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
-    mock.sql_ini_saved = False
-    page.locator("#ase-pick-sql-ini").click()
-    expect(page.locator("#ase-sql-ini-help")).to_contain_text(HOSTILE_ERROR)
-    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
-    expect(page.locator("#ase-user")).to_have_value("tester")
-    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
-    assert not mock.endpoint_calls("connect") and not mock.endpoint_calls("objects")
-    page.locator("#ase-password").fill(PASSWORD)
-    page.locator("#ase-connect").click()
-    expect(page.locator("#ase-database")).to_be_enabled()
-    expect(page.locator("#ase-sql-ini")).to_be_disabled()
-    expect(page.locator("#ase-pick-sql-ini")).to_be_disabled()
-    expect(page.locator("#ase-sql-ini-reload")).to_be_disabled()
-    assert mock.endpoint_calls("connect")[-1]["payload"]["dsn"] == "TEST_ASE_DSN"
-    for width in (390, 768, 1440):
-        page.set_viewport_size({"width": width, "height": 844})
-        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"SQL.ini controls overflow at {width}px"
-    assert page.evaluate("window.__aseXss") is False
-    assert not mock.violations, mock.violations
-    assert not errors, errors
-
-
-def validate_sql_ini_races(page, url):
-    """A late file read cannot overwrite editing; saved-file IDs remain bound to the selected profile."""
-    profile = {**PROFILES[1], "dsn": "TEST_ASE_DSN"}
-    mock = ASEMock(profiles=[PROFILES[0], profile], profiles_exist=True, last_profile_id="hostile", sql_ini_catalog=sql_ini_fixture(), sql_profile_rotation=True)
-    page.route("**/api/ase/**", mock.handle)
-    page.goto(url, wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-profile")).to_have_value("hostile")
-    expect(page.locator("#ase-sql-ini")).to_be_disabled()
-    expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
-    page.locator("#ase-pick-sql-ini").click()
-    expect(page.locator("#ase-profile")).to_have_value("sql-hostile")
-    expect(page.locator("#ase-host")).to_have_value(profile["host"])
-    expect(page.locator("#ase-port")).to_have_value(str(profile["port"]))
-    expect(page.locator("#ase-user")).to_have_value(profile["user"])
-    expect(page.locator("#ase-dsn")).to_have_value("TEST_ASE_DSN")
-    assert not mock.endpoint_calls("connect")
-    page.locator("#ase-profile").select_option("")
-    mock.delay_sql_ini = True
-    page.locator("#ase-sql-ini-reload").click()
-    page.wait_for_timeout(30)
-    assert mock.pending_sql_ini
-    page.locator("#ase-host").fill("new.manual.internal")
-    route, response = mock.pending_sql_ini.pop()
-    mock.respond(route, {**response, "path": r"C:\stale\sql.ini"})
-    page.wait_for_timeout(100)
-    expect(page.locator("#ase-host")).to_have_value("new.manual.internal")
-    expect(page.locator("#ase-sql-ini-path")).not_to_contain_text(r"C:\stale\sql.ini")
-    page.locator("#ase-host").fill("ase.example.internal")
-    page.locator("#ase-port").fill("5000")
-    page.locator("#ase-user").fill("tester")
-    page.locator("#ase-password").fill(PASSWORD)
-    mock.delay_sql_ini = True
-    page.locator("#ase-sql-ini-reload").click()
-    page.wait_for_timeout(30)
-    assert mock.pending_sql_ini
-    page.locator("#ase-connect").click()
-    expect(page.locator("#ase-database")).to_be_enabled()
-    route, response = mock.pending_sql_ini.pop()
-    mock.respond(route, {**response, "path": r"C:\after-login\sql.ini"})
-    page.wait_for_timeout(100)
-    expect(page.locator("#ase-host")).to_have_value("ase.example.internal")
-    expect(page.locator("#ase-sql-ini-path")).not_to_contain_text(r"C:\after-login\sql.ini")
-    assert not mock.violations, mock.violations
-
-
-def validate_sql_ini_invalid_picker(page, url):
-    """A failed/empty picked file shows its read error rather than claiming successful reading."""
-    mock = ASEMock(sql_ini_catalog=sql_ini_fixture())
-    page.route("**/api/ase/**", mock.handle)
-    page.goto(url, wait_until="networkidle")
-    page.locator('a[data-tool="ase-tool"]').click()
-    expect(page.locator("#ase-sql-ini option[value='sql-test']")).to_have_count(1)
-    for found, detail in ((False, "sql.ini의 서버 주소 형식을 읽을 수 없습니다."), (True, "sql.ini에 사용할 서버 항목이 없습니다.")):
-        mock.sql_ini_catalog = {"path": r"C:\selected\sql.ini", "found": found, "entries": [], "detail": detail}
-        mock.sql_ini_saved = False
-        page.locator("#ase-pick-sql-ini").click()
-        expect(page.locator("#ase-pick-sql-ini")).to_be_enabled()
-        expect(page.locator("#ase-sql-ini-help")).to_contain_text(detail)
-        expect(page.locator("#ase-sql-ini-help")).to_have_attribute("data-tone", "error")
-        assert "파일은 읽었지만" not in page.locator("#ase-sql-ini-help").inner_text()
-        expect(page.locator("#ase-sql-ini option")).to_have_count(1)
-    assert not mock.endpoint_calls("connect")
-    assert not mock.violations, mock.violations
-
-
 def validate_removed_owner(page, url):
     """A full owner refresh must invalidate a now-missing selected owner's review."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
@@ -1397,17 +1142,11 @@ def main():
         validate_saved_connections(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url, retain_profile=True)
-        validate_saved_profile_race(context.new_page(), args.url, different_dsn=True)
-        validate_dsns(context.new_page(), args.url)
-        validate_dsn_case(context.new_page(), args.url)
-        validate_sql_ini(context.new_page(), args.url)
-        validate_sql_ini_races(context.new_page(), args.url)
-        validate_sql_ini_invalid_picker(context.new_page(), args.url)
         validate_legacy_profile(context.new_page(), args.url)
         validate_driver_status(context.new_page(), args.url)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: SQL.ini aliases/native picking, path warnings/cancellation, profile-ID rotation and stale response guards; registered DSNs and diagnostics; explicit Search/IME, owners, filters, connection/session guards, saved profiles, job locks, OUT statistics, native file tokens, safe text, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: direct four-field connections, removed SQL.ini/DSN controls and API calls, explicit Search/Enter with IME guard, optional/lazy owners, filters, stale responses, ODBC/BCP status and timings, saved profiles, fixed-key contract, job locks, OUT statistics, native file tokens, safe text, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

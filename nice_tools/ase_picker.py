@@ -50,7 +50,7 @@ def _load_dialog_library():
     return ctypes.WinDLL("comdlg32", use_last_error=True)
 
 
-def _pick_file(direction: str, suggested_name: str | None = None, *, sql_ini=False) -> dict:
+def pick_file(direction: str, suggested_name: str | None = None) -> dict:
     """Return a real Windows path, or an explicit cancellation result."""
     if not isinstance(direction, str) or direction.lower() not in {"in", "out"}:
         raise ValueError("File direction must be 'in' or 'out'.")
@@ -78,14 +78,12 @@ def _pick_file(direction: str, suggested_name: str | None = None, *, sql_ini=Fal
 
     request = OPENFILENAMEW()
     request.lStructSize = ctypes.sizeof(OPENFILENAMEW)
-    request.lpstrFilter = ("SAP server files (*.ini)\0*.ini\0All files (*.*)\0*.*\0\0" if sql_ini else
-                           "BCP and text files (*.bcp;*.txt)\0*.bcp;*.txt\0All files (*.*)\0*.*\0\0")
+    request.lpstrFilter = "BCP and text files (*.bcp;*.txt)\0*.bcp;*.txt\0All files (*.*)\0*.*\0\0"
     request.nFilterIndex = 1
     request.lpstrFile = buffer
     request.nMaxFile = MAX_PATH_CHARS
-    request.lpstrTitle = ("Select SAP sql.ini file" if sql_ini else
-                          "Select a BCP input file" if direction == "in" else "Save a BCP output file")
-    request.lpstrDefExt = "ini" if sql_ini else "bcp"
+    request.lpstrTitle = "Select a BCP input file" if direction == "in" else "Save a BCP output file"
+    request.lpstrDefExt = "bcp"
     request.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | OFN_DONTADDTORECENT
     request.Flags |= OFN_FILEMUSTEXIST if direction == "in" else OFN_OVERWRITEPROMPT
     function = library.GetOpenFileNameW if direction == "in" else library.GetSaveFileNameW
@@ -97,12 +95,3 @@ def _pick_file(direction: str, suggested_name: str | None = None, *, sql_ini=Fal
     if error:
         raise ValueError(f"Windows file selection failed (0x{error:04x}).")
     return {"cancelled": True}
-
-
-def pick_file(direction: str, suggested_name: str | None = None) -> dict:
-    return _pick_file(direction, suggested_name)
-
-
-def pick_sql_ini() -> dict:
-    """Choose the local SAP server configuration without a database session."""
-    return _pick_file("in", "sql.ini", sql_ini=True)

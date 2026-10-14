@@ -26,9 +26,8 @@ JASYPT_FIELDS = ("algorithm", "iterations", "salt_generator", "iv_generator", "o
 RESERVED_SECTIONS = {"jasypt", "sap_client", "preferences", "odbc"}
 CLIENT_FIELDS = {"isql_path", "bcp_path", "sql_ini_path"}
 SAVE_ERROR = "접속은 성공했지만 연결 정보를 저장하지 못했습니다. 설정 파일의 형식·권한과 변경 여부를 확인하세요."
-SQL_INI_SAVE_ERROR = "sql.ini를 읽었지만 파일 경로를 저장하지 못했습니다. 연결 설정 파일의 형식·권한과 변경 여부를 확인하세요."
 _SAVE_LOCK = threading.RLock()
-PROFILE_FIELDS = {"host", "port", "user", "password", "database", "dsn"}
+PROFILE_FIELDS = {"host", "port", "user", "password", "database"}
 REQUIRED_FIELDS = {"host", "port", "user", "password"}
 CONFIG_ERROR = (
     "ase-connections.txt의 형식이 올바르지 않습니다. 프로필의 host·port·user·password=ENC(...)와 "
@@ -75,27 +74,13 @@ def _settings(values: dict) -> dict:
     return {key: config[key] for key in JASYPT_FIELDS}
 
 
-def _sql_ini_path(value: str) -> str:
-    if (not isinstance(value, str) or not value.strip()
-            or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in value)):
-        raise ValueError(CONFIG_ERROR)
-    value = value.strip()
-    if not Path(value).is_absolute():
-        raise ValueError(CONFIG_ERROR)
-    return value
-
-
 def _client_settings(values: dict) -> dict:
     if set(values) - CLIENT_FIELDS:
         raise ValueError(CONFIG_ERROR)
     result = {}
     for key, value in values.items():
-        if key == "isql_path":
-            # Legacy metadata is retained on disk but no longer selects a tool.
-            continue
-        if key == "sql_ini_path":
-            if value.strip():
-                result[key] = _sql_ini_path(value)
+        if key in {"isql_path", "sql_ini_path"}:
+            # Retain removed feature metadata without resolving or reading it.
             continue
         value = value.strip()
         if not value:
@@ -175,6 +160,9 @@ def _load(path: Path | None) -> dict:
     profiles = []
     for name in profile_names:
         values = dict(parser[name])
+        # A previous release persisted Windows DSN choices. Preserve that text
+        # as user data, while all connections now use explicit host and port.
+        values.pop("dsn", None)
         if (not name.strip() or len(name) > 255 or any(char in name for char in "\r\n")
                 or set(values) - PROFILE_FIELDS or not REQUIRED_FIELDS <= set(values)
                 or any("\r" in value or "\n" in value for value in values.values())):
@@ -187,12 +175,11 @@ def _load(path: Path | None) -> dict:
                 raise ValueError(CONFIG_ERROR)
             connection = connection_data({"host": values["host"].strip(),
                                           "port": int(values["port"].strip()),
-                                          "user": values["user"].strip(), "password": "",
-                                          **({"dsn": values["dsn"]} if "dsn" in values else {})})
+                                          "user": values["user"].strip(), "password": ""})
         except (ValueError, UnicodeError):
             raise ValueError(CONFIG_ERROR) from None
         public = {"id": hashlib.sha256(raw + b"\x00" + name.encode("utf-8")).hexdigest(),
-                  "name": name, **{key: connection[key] for key in ("host", "port", "user", "dsn") if key in connection}}
+                  "name": name, **{key: connection[key] for key in ("host", "port", "user")}}
         database = values.get("database", "").strip()
         if database:
             if len(database) > 255:
@@ -226,7 +213,7 @@ def decrypt_connection(profile_id: str, path: Path | None = None) -> dict:
         connection = connection_data({**metadata, "password": password})
     except (ValueError, TypeError, UnicodeError):
         raise ValueError(DECRYPT_ERROR) from None
-    result = {"connection": {key: connection[key] for key in ("host", "port", "user", "password", "dsn") if key in connection},
+    result = {"connection": {key: connection[key] for key in ("host", "port", "user", "password")},
               "profile_name": metadata["name"]}
     if "database" in metadata:
         result["database"] = metadata["database"]
@@ -258,7 +245,7 @@ def prepare_connection(connection: dict, path: Path | None = None) -> dict:
     validated = connection_data(connection)
     if any(char in validated["user"] for char in "\r\n"):
         raise ValueError("사용자 이름에는 줄바꿈을 사용할 수 없습니다.")
-    data = {key: validated[key] for key in ("host", "port", "user", "password", "dsn") if key in validated}
+    data = {key: validated[key] for key in ("host", "port", "user", "password")}
     # Corrupt user data must not block a manual login or be overwritten. Use
     # default metadata; the eventual save still rejects this file.
     try:
@@ -270,37 +257,66 @@ def prepare_connection(connection: dict, path: Path | None = None) -> dict:
     return {"connection": data, "ciphertext": ciphertext, "settings": settings}
 
 
-def _update_section(text: str, section: str, values: dict) -> str:
-    """Update known single-line INI values while retaining comments and order."""
-    newline = "\r\n" if "\r\n" in text else "\n"
-    lines = text.splitlines(keepends=True)
-    header = re.compile(r"^\[(?P<name>[^\[\]\r\n]+)\]\s*$")
-    start = end = None
+def _ini_lines(text: str) -> tuple[list[str], list[tuple[int, str]], dict[int, str]]:
+    # Match ConfigParser's physical LF lines and continuation indentation. A
+    # removed field may contain arbitrary legacy text; treating Unicode line
+    # separators or indented "password=..." text as a new field would mutate it.
+    lines = re.findall(r"[^\n]*\n|[^\n]+$", text)
+    headers, fields = [], {}
+    option_indent = None
     for index, line in enumerate(lines):
-        match = header.fullmatch(line.rstrip("\r\n").strip())
-        if match:
-            if start is not None:
-                end = index
-                break
-            if match["name"] == section:
-                start = index
+        value = line.strip()
+        if not value:
+            option_indent = None
+            continue
+        if value.startswith(("#", ";")):
+            continue
+        indent = len(line) - len(line.lstrip())
+        if option_indent is not None and indent > option_indent:
+            continue
+        header = re.fullmatch(r"\[([^\[\]\r\n]+)\]", value)
+        if header:
+            headers.append((index, header[1]))
+            option_indent = None
+            continue
+        field = re.match(r"^([^#;:=\s][^:=]*?)\s*[:=]", value)
+        if field:
+            fields[index] = field[1].strip().lower()
+            option_indent = indent
+    return lines, headers, fields
+
+
+def _update_section(text: str, section: str, values: dict) -> str:
+    """Update known INI fields while retaining comments and ignored legacy data."""
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines, headers, fields = _ini_lines(text)
+    start = end = None
+    for index, name in headers:
+        if start is not None:
+            end = index
+            break
+        if name == section:
+            start = index
     if start is None:
         prefix = text + (newline if text and not text.endswith(("\n", "\r")) else "")
         if prefix and not prefix.endswith(newline * 2):
             prefix += newline
         return prefix + f"[{section}]{newline}" + "".join(f"{key} = {value}{newline}" for key, value in values.items())
     end = len(lines) if end is None else end
+    prefixes = {index: lines[index][:len(lines[index]) - len(lines[index].lstrip())]
+                for index in fields if start < index < end}
+    # A deeper indent would turn a newly inserted option into continuation
+    # text. Match the shallowest existing option while preserving each changed
+    # option's literal original whitespace.
+    insertion_prefix = min(prefixes.values(), key=len, default="")
     pending = dict(values)
     for index in range(start + 1, end):
-        # Parser validation already excludes duplicate/multiline values.
-        match = re.match(r"^\s*([^#;:=\s][^:=]*?)\s*[:=]", lines[index])
-        if match:
-            key = match[1].strip().lower()
-            if key in pending:
-                lines[index] = f"{key} = {pending.pop(key)}{newline}"
+        key = fields.get(index)
+        if key in pending:
+            lines[index] = f"{prefixes[index]}{key} = {pending.pop(key)}{newline}"
     if end and not lines[end - 1].endswith(("\n", "\r")):
         lines[end - 1] += newline
-    lines[end:end] = [f"{key} = {value}{newline}" for key, value in pending.items()]
+    lines[end:end] = [f"{insertion_prefix}{key} = {value}{newline}" for key, value in pending.items()]
     return "".join(lines)
 
 
@@ -338,13 +354,9 @@ def _saved_result(name: str, path: Path | None) -> dict:
     return {"saved": True, "profile_id": profile["id"], "profile_name": name}
 
 
-def _connection_identity(connection: dict) -> tuple:
-    return tuple(connection[key] for key in ("host", "port", "user")) + (connection.get("dsn", ""),)
-
-
 def _canonical_name(connection: dict, profiles: list[dict], existing: dict | None) -> str:
     """Use host-account, escaping INI delimiters and resolving endpoint collisions."""
-    identity = _connection_identity(connection)
+    identity = tuple(connection[key] for key in ("host", "port", "user"))
     digest = hashlib.sha256(repr(identity).encode("utf-8")).hexdigest()[:12]
     base = f"{connection['host']}-{connection['user']}"
     base = base.replace("%", "%25").replace("[", "%5B").replace("]", "%5D")
@@ -371,9 +383,10 @@ def _canonical_name(connection: dict, profiles: list[dict], existing: dict | Non
 def _rename_section(text: str, old_name: str, new_name: str) -> str:
     if old_name == new_name:
         return text
-    lines = text.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        if line.strip() == f"[{old_name}]":
+    lines, headers, _ = _ini_lines(text)
+    for index, name in headers:
+        if name == old_name:
+            line = lines[index]
             ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
             lines[index] = f"[{new_name}]{ending}"
             return "".join(lines)
@@ -387,15 +400,15 @@ def save_connection(prepared: dict, path: Path | None = None) -> dict:
         if document["settings"] != prepared["settings"]:
             raise ValueError(SAVE_ERROR)
         connection = prepared["connection"]
-        identity = _connection_identity(connection)
+        identity = tuple(connection[key] for key in ("host", "port", "user"))
         existing = next((item["public"] for item in document["profiles"]
-                         if _connection_identity(item["public"]) == identity), None)
+                         if tuple(item["public"][key] for key in ("host", "port", "user")) == identity), None)
         if existing is None and len(document["profiles"]) >= MAX_PROFILES:
             raise ValueError(SAVE_ERROR)
         name = _canonical_name(connection, document["profiles"], existing)
         original = (_rename_section(document["text"], existing["name"], name)
                     if existing else document["text"])
-        values = {key: connection[key] for key in ("host", "port", "user", "dsn") if key in connection}
+        values = {key: connection[key] for key in ("host", "port", "user")}
         values["password"] = prepared["ciphertext"]
         text = _update_section(original, name, values)
         text = _update_section(text, "preferences", {"last_profile": name})
@@ -413,13 +426,3 @@ def remember_connection(profile_id: str, path: Path | None = None) -> dict:
         text = _update_section(document["text"], "preferences", {"last_profile": profile["name"]})
         _write_document(document, text)
         return _saved_result(profile["name"], path)
-
-
-def save_sql_ini_path(sql_ini_path: str, path: Path | None = None) -> dict:
-    """Remember only a successfully read, explicitly picked file's location."""
-    selected = _sql_ini_path(sql_ini_path)
-    with _SAVE_LOCK:
-        document = _load(path)
-        text = _update_section(document["text"], "sap_client", {"sql_ini_path": selected})
-        _write_document(document, text)
-    return {"saved": True}

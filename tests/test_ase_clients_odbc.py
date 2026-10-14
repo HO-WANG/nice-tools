@@ -84,39 +84,3 @@ def test_invalid_other_profile_does_not_disable_bcp(installed):
     config, bcp = installed
     config.write_text(f"[sap_client]\nbcp_path={bcp}\n[broken-profile]\npassword=invalid\n")
     assert ase_clients.client_config() == {"bcp_path": str(bcp)}
-
-
-def test_sql_ini_catalog_status_is_independent_of_odbc_and_bcp_readiness(installed, monkeypatch):
-    _, _ = installed
-    catalog = {"path": "/local/sql.ini", "found": True, "entries": [], "detail": "loaded"}
-    monkeypatch.setattr(ase_clients, "_sql_ini_status", lambda: catalog, raising=False)
-    monkeypatch.setattr(ase_clients, "_odbc_status", lambda: {"available": False, "detail": "ODBC missing", "drivers": []})
-    result = ase_clients.client_status()
-    assert result["sql_ini"] == catalog
-    assert not result["available"] and not result["bcp_available"]
-
-
-def test_sql_ini_discovery_failure_is_sanitized_without_disabling_other_tools(installed, monkeypatch):
-    config, bcp = installed
-    config.write_text(f"[sap_client]\nbcp_path={bcp}\n")
-
-    def failure():
-        raise ValueError("private-secret raw file or driver error")
-
-    monkeypatch.setattr(ase_clients, "_sql_ini_status", failure, raising=False)
-    result = ase_clients.client_status()
-    assert result["available"] and result["bcp_available"]
-    assert result["sql_ini"]["found"] is False and result["sql_ini"]["entries"] == []
-    assert "private-secret" not in str(result)
-
-
-def test_real_profile_sql_ini_path_is_loaded_independently_of_bcp_settings(installed):
-    config, bcp = installed
-    ini = config.parent / "configured-sql.ini"
-    ini.write_text("[SDK_UAT]\nquery=NLWNSCK,192.0.2.23,3000\n", encoding="utf-8")
-    config.write_text(f"[sap_client]\nbcp_path={bcp}\nsql_ini_path={ini}\n", encoding="utf-8")
-    result = ase_clients.client_status()
-    assert result["available"] and result["bcp_available"]
-    assert result["sql_ini"]["found"]
-    assert result["sql_ini"]["entries"][0]["name"] == "SDK_UAT"
-    assert ase_clients.client_config() == {"bcp_path": str(bcp)}

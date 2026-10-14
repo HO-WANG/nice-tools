@@ -71,28 +71,3 @@ def test_linux_picker_has_descriptive_platform_error(picker, monkeypatch):
 def test_picker_rejects_invalid_direction(picker):
     with pytest.raises(ValueError, match="direction"):
         picker.pick_file("invalid")
-
-
-def test_sql_ini_dialog_is_an_existing_file_picker_before_connection(picker, monkeypatch):
-    chosen = "C:\\SAP 설치\\ini\\sql.ini"
-    def invoke(request):
-        assert "*.ini" in request.lpstrFilter
-        assert "sql.ini" in request.lpstrTitle
-        assert request.lpstrDefExt == "ini"
-        assert request.Flags & picker.OFN_FILEMUSTEXIST
-        assert request.Flags & picker.OFN_NOCHANGEDIR
-        assert request.Flags & picker.OFN_DONTADDTORECENT
-        assert not request.Flags & picker.OFN_OVERWRITEPROMPT
-        buffer = ctypes.cast(request.lpstrFile, ctypes.POINTER(ctypes.c_wchar * request.nMaxFile)).contents
-        assert buffer.value == "sql.ini"
-        buffer.value = chosen
-        return 1
-    monkeypatch.setattr(picker.sys, "platform", "win32")
-    monkeypatch.setattr(picker, "_load_dialog_library", lambda: dialog_library(picker, invoke))
-    assert picker.pick_sql_ini() == {"cancelled": False, "path": chosen}
-
-
-def test_sql_ini_picker_cancellation_does_not_return_a_path(picker, monkeypatch):
-    monkeypatch.setattr(picker.sys, "platform", "win32")
-    monkeypatch.setattr(picker, "_load_dialog_library", lambda: dialog_library(picker, lambda request: 0))
-    assert picker.pick_sql_ini() == {"cancelled": True}

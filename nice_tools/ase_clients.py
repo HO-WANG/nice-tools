@@ -77,11 +77,6 @@ def _odbc_status() -> dict:
     return odbc_status()
 
 
-def _sql_ini_status() -> dict:
-    from .ase_sqlini import sql_ini_status
-    return sql_ini_status()
-
-
 def client_status() -> dict:
     """Missing BCP disables transfers without disabling ODBC browsing."""
     try:
@@ -90,10 +85,6 @@ def client_status() -> dict:
         odbc = {'available': False, 'detail': 'SAP ASE ODBC 드라이버 상태를 확인하지 못했습니다.', 'drivers': []}
     result = {'available': bool(odbc.get('available')), 'odbc': odbc,
               'detail': odbc.get('detail', 'SAP ASE ODBC 드라이버를 확인하세요.'), 'bcp_available': False}
-    try:
-        result['sql_ini'] = _sql_ini_status()
-    except (ImportError, ValueError, OSError, RuntimeError):
-        result['sql_ini'] = {'path': None, 'found': False, 'entries': [], 'detail': 'sql.ini 상태를 확인하지 못했습니다.'}
     try:
         result.update(client_config(), bcp_available=True)
     except (ValueError, OSError, RuntimeError):

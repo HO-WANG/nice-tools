@@ -45,13 +45,6 @@ def connection_data(value):
             minimum = 0 if key == "password" else 1
             raise ValueError(f"{label}는 UTF-8 기준 {minimum}~255바이트로 입력하세요.")
         result[key] = text
-    if "dsn" in value:
-        dsn = value["dsn"]
-        if (not isinstance(dsn, str) or len(dsn) > 255
-                or any(ord(char) < 32 or ord(char) == 127 for char in dsn)):
-            raise ValueError("ODBC DSN은 제어 문자 없이 255자 이내로 입력하세요.")
-        if dsn.strip():
-            result["dsn"] = dsn.strip()
     return result
 
 
@@ -293,29 +286,6 @@ class AseManager:
         result = self._invoke_direct({"operation": operation, "connection": session["connection"], **parameters}, token)
         self._session(token)
         return result
-
-    def pick_sql_ini(self):
-        """Own a local configuration dialog before an ASE session exists."""
-        with self.lock:
-            if self.closed:
-                raise ValueError("파일 선택 요청이 취소되었습니다.")
-        result = self._invoke({"operation": "pick-sql-ini"}, timeout=None)
-        with self.lock:
-            if self.closed:
-                raise ValueError("파일 선택 요청이 취소되었습니다.")
-        if result.get("cancelled"):
-            return {"cancelled": True}
-        raw_path = result.get("path")
-        if (not isinstance(raw_path, str) or not raw_path or len(raw_path) >= 32768
-                or any(ord(char) < 32 or 127 <= ord(char) <= 159 or char in "\u2028\u2029" for char in raw_path)):
-            raise ValueError("선택한 sql.ini 파일 경로를 사용할 수 없습니다.")
-        try:
-            path = Path(raw_path)
-            if not path.is_absolute() or not path.is_file():
-                raise ValueError
-            return {"cancelled": False, "path": str(path.resolve())}
-        except (OSError, RuntimeError, ValueError):
-            raise ValueError("선택한 sql.ini 파일 경로를 사용할 수 없습니다.") from None
 
     def pick_file(self, token, direction, suggested_name=None):
         session = self._session(token)

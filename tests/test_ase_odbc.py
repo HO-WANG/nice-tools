@@ -163,7 +163,7 @@ def test_connect_selects_registered_ase_driver_and_verifies_server(odbc):
         assert session.driver == "Adaptive Server Enterprise"
         connection_string, options = db.connect_calls[0]
         assert "DRIVER={Adaptive Server Enterprise}" in connection_string
-        assert "SERVER={ase.internal}" in connection_string
+        assert "SERVER=ase.internal;" in connection_string
         assert "PORT=5000" in connection_string
         assert "CHARSET=UTF8" in connection_string
         assert options == {"autocommit": True, "timeout": 15}
@@ -204,6 +204,49 @@ def test_odbc_braces_escape_passwords_without_changing_their_value(odbc):
     text = db.connect_calls[0][0]
     assert "PWD={part;PWD=wrong}}tail{value};" in text
     assert text.count("DRIVER=") == 1
+
+
+def test_sap_connection_string_does_not_wrap_ordinary_connection_values(odbc):
+    adapter, db = odbc
+    session = adapter.connect({**CONNECTION, "host": "192.0.2.23", "password": "sample!P=@value}word"})
+    session.close()
+    assert db.connect_calls[0][0] == (
+        "DRIVER={Adaptive Server Enterprise};SERVER=192.0.2.23;PORT=5000;"
+        "UID=reader;PWD=sample!P=@value}word;DATABASE=master;CHARSET=UTF8;"
+    )
+    assert len(db.connect_calls) == 1
+
+
+@pytest.mark.parametrize("value,encoded", [
+    ("", ""), ("ordinary", "ordinary"), ("contains=equals!@", "contains=equals!@"),
+    ("closing}brace", "closing}brace"), ("middle{brace", "middle{brace"),
+    ("{leading}", "{{leading}}}"), ("part;UID=wrong}", "{part;UID=wrong}}}"),
+    (" leading", "{ leading}"), ("trailing ", "{trailing }"), (" ", "{ }"),
+    ("inner space", "inner space"),
+])
+def test_user_and_password_values_escape_only_odbc_grammar_boundaries(odbc, value, encoded):
+    adapter, db = odbc
+    # Empty user names remain invalid; an empty DB password is valid.
+    request = {**CONNECTION, "password": value}
+    if value:
+        request["user"] = value
+    session = adapter.connect(request)
+    session.close()
+    text = db.connect_calls[0][0]
+    assert "PWD=" + encoded + ";DATABASE=master;" in text
+    assert "UID=" + (encoded if value else "reader") + ";PWD=" in text
+    assert "DRIVER={Adaptive Server Enterprise};" in text
+
+
+def test_im002_diagnostic_describes_name_interpretation_without_raw_driver_message(odbc):
+    adapter, db = odbc
+    db.connect_error = FakeDriverError("IM002", "[Microsoft ODBC Driver Manager] PWD=private-password arbitrary raw error")
+    with pytest.raises(ValueError) as error:
+        adapter.connect(CONNECTION)
+    message = str(error.value)
+    assert "SQLSTATE: IM002" in message and "단계: connect" in message
+    assert "데이터 원본/드라이버 이름 해석 실패" in message
+    assert "private-password" not in message and "arbitrary raw error" not in message
 
 
 @pytest.mark.parametrize("version", ["Microsoft SQL Server 2022", "SAP SQL Anywhere 17", "", None])
@@ -536,123 +579,3 @@ def test_real_pyodbc_error_subclass_exposes_only_its_known_sqlstate(odbc, monkey
     assert "SQLSTATE: 08001" in str(error.value)
     assert "private-password" not in str(error.value)
     assert "confidential" not in str(error.value)
-
-
-def test_registered_working_dsn_preserves_settings_with_explicit_bcp_endpoint(odbc, monkeypatch):
-    adapter, db = odbc
-    calls = []
-
-    def data_sources():
-        calls.append(())
-        return {"KIS_DB_UAT": "Adaptive Server Enterprise"}
-
-    monkeypatch.setattr(db, "dataSources", data_sources, raising=False)
-    session = adapter.connect({**CONNECTION, "dsn": "kis_db_uat"})
-    try:
-        text = db.connect_calls[0][0]
-        assert text == "DSN={KIS_DB_UAT};SERVER={ase.internal};PORT=5000;UID={reader};PWD={private-password};"
-        assert "DRIVER=" not in text and "DATABASE=" not in text and "CHARSET=" not in text
-        assert session.driver == "Adaptive Server Enterprise"
-        assert calls == [()]
-        assert session.run_operation(payload("databases"))["databases"] == [{"id": 5, "name": "연구]db"}]
-    finally:
-        session.close()
-
-
-def test_dsn_input_trims_outer_whitespace_consistently_with_api_profiles(odbc, monkeypatch):
-    adapter, db = odbc
-    monkeypatch.setattr(db, "dataSources", lambda: {"ASE_UAT": "Adaptive Server Enterprise"}, raising=False)
-    session = adapter.connect({**CONNECTION, "dsn": " ASE_UAT "})
-    session.close()
-    assert db.connect_calls[0][0].startswith("DSN={ASE_UAT};")
-
-
-def test_dsn_and_credentials_escape_braces_and_semicolons(odbc, monkeypatch):
-    adapter, db = odbc
-    dsn = "KIS;UID=wrong}DSN"
-    monkeypatch.setattr(db, "dataSources", lambda: {dsn: "Adaptive Server Enterprise"}, raising=False)
-    session = adapter.connect({**CONNECTION, "dsn": dsn, "user": "user;PWD=wrong}", "password": "pass;}word"})
-    session.close()
-    assert db.connect_calls[0][0] == "DSN={KIS;UID=wrong}}DSN};SERVER={ase.internal};PORT=5000;UID={user;PWD=wrong}}};PWD={pass;}}word};"
-
-
-@pytest.mark.parametrize("sources", [
-    {}, {"another": "Adaptive Server Enterprise"}, {"KIS_DB_UAT": "SQL Server"},
-    {"KIS_DB_UAT": "Sybase SQL Anywhere"}, {"KIS_DB_UAT": "FreeTDS"},
-    {"KIS_DB_UAT": "SAP ASE Unregistered Driver"},
-])
-def test_unknown_or_non_ase_dsn_never_falls_back_to_dsnless(odbc, monkeypatch, sources):
-    adapter, db = odbc
-    monkeypatch.setattr(db, "dataSources", lambda: sources, raising=False)
-    with pytest.raises(ValueError) as error:
-        adapter.connect({**CONNECTION, "dsn": "KIS_DB_UAT"})
-    assert "단계: driver-resolution" in str(error.value)
-    assert db.connect_calls == []
-
-
-@pytest.mark.parametrize("dsn", [None, 1, True, "bad\nname", "bad\tname", "bad\x7fname", "x" * 256])
-def test_invalid_dsn_is_rejected_before_native_discovery(odbc, monkeypatch, dsn):
-    adapter, db = odbc
-
-    def forbidden():
-        pytest.fail("Invalid DSNs must not reach native discovery")
-
-    monkeypatch.setattr(db, "dataSources", forbidden, raising=False)
-    with pytest.raises(ValueError):
-        adapter.connect({**CONNECTION, "dsn": dsn})
-    assert db.connect_calls == []
-
-
-@pytest.mark.parametrize("dsn", ["", "   "])
-def test_blank_dsn_preserves_dsnless_connection_without_datasources_api(odbc, dsn):
-    adapter, db = odbc
-    assert not hasattr(db, "dataSources")
-    session = adapter.connect({**CONNECTION, "dsn": dsn})
-    session.close()
-    assert db.connect_calls[0][0].startswith("DRIVER={Adaptive Server Enterprise};")
-    assert "DSN=" not in db.connect_calls[0][0]
-
-
-def test_dsn_uses_its_actual_driver_and_checks_explicit_driver_consistency(odbc, monkeypatch):
-    adapter, db = odbc
-    monkeypatch.setattr(db, "dataSources", lambda: {"KIS_DB_UAT": "sap ase odbc driver"}, raising=False)
-    session = adapter.connect({**CONNECTION, "dsn": "KIS_DB_UAT"})
-    assert session.driver == "SAP ASE ODBC Driver"
-    session.close()
-    monkeypatch.setattr(adapter, "_odbc_settings", lambda: {"driver": "Adaptive Server Enterprise"})
-    with pytest.raises(ValueError):
-        adapter.connect({**CONNECTION, "dsn": "KIS_DB_UAT"})
-    assert len(db.connect_calls) == 1
-
-
-def test_status_lists_only_valid_dsn_names_and_exact_registered_ase_drivers(odbc, monkeypatch):
-    adapter, db = odbc
-    monkeypatch.setattr(db, "dataSources", lambda: {
-        "KIS_DB_UAT": "adaptive server enterprise", "other": "SAP ASE ODBC Driver", "sql": "SQL Server",
-        "unregistered": "SAP ASE Unregistered Driver", "bad\nname": "Adaptive Server Enterprise",
-        "x" * 256: "Adaptive Server Enterprise",
-    }, raising=False)
-    result = adapter.odbc_status()
-    assert result["available"]
-    assert result["data_sources"] == [{"name": "KIS_DB_UAT", "driver": "Adaptive Server Enterprise"},
-                                      {"name": "other", "driver": "SAP ASE ODBC Driver"}]
-    assert db.connect_calls == []
-
-
-def test_datasource_discovery_error_is_private_and_does_not_block_dsnless_readiness(odbc, monkeypatch):
-    adapter, db = odbc
-
-    def failure():
-        raise FakeDriverError("HY000", "PWD=private-password; secret discovery detail")
-
-    monkeypatch.setattr(db, "dataSources", failure, raising=False)
-    result = adapter.odbc_status()
-    assert result["available"] and result["data_sources"] == []
-    assert "private-password" not in str(result) and "secret discovery detail" not in str(result)
-    with pytest.raises(ValueError) as error:
-        adapter.connect({**CONNECTION, "dsn": "KIS_DB_UAT"})
-    assert "private-password" not in str(error.value) and "secret discovery detail" not in str(error.value)
-    assert db.connect_calls == []
-    session = adapter.connect(CONNECTION)
-    session.close()
-    assert len(db.connect_calls) == 1

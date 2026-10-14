@@ -68,7 +68,9 @@ def _diagnostic(stage, error, library=None, action=None):
         message += " 인증이 거부되었을 수 있습니다. DB 사용자·비밀번호와 계정 상태를 확인하세요."
     elif state in ("HYT00", "HYT01"):
         message += " 연결 또는 조회 제한 시간이 지났을 수 있습니다. 네트워크와 서버 응답을 확인하세요."
-    elif state in ("IM002", "IM003", "IM004", "IM005", "IM006", "IM014"):
+    elif state == "IM002":
+        message += " 데이터 원본/드라이버 이름 해석 실패입니다. 연결 문자열 형식과 등록된 드라이버 이름을 확인하세요."
+    elif state in ("IM003", "IM004", "IM005", "IM006", "IM014"):
         message += " ODBC 드라이버 등록과 64비트 설치 상태를 확인하세요."
     elif state in ("HY092", "HYC00"):
         message += " 드라이버가 시간 제한 등 요청한 연결 속성 또는 기능을 지원하지 않을 수 있습니다."
@@ -122,42 +124,8 @@ def _select_driver(drivers, configured=None):
     return next((name for name in eligible if name.casefold() == "adaptive server enterprise"), eligible[0])
 
 
-def _valid_dsn_name(name):
-    return (isinstance(name, str) and bool(name.strip()) and len(name) <= 255 and
-            not any(ord(character) < 32 or ord(character) == 127 for character in name))
-
-
-def _registered_data_sources(library, drivers):
-    try:
-        # pyodbc 5.3 dataSources() takes no arguments. It enumerates the current
-        # process's user/system DSNs and therefore the application's bitness.
-        sources = library.dataSources()
-        if not isinstance(sources, dict):
-            raise ValueError
-    except Exception as error:
-        raise AseOdbcError("등록된 64비트 ODBC DSN 목록을 읽지 못했습니다.", stage="driver-resolution",
-                           sqlstate=_sqlstate(error, library)) from None
-    eligible = {name.casefold(): name for name in drivers if _ase_driver(name)}
-    result = []
-    for name, description in sources.items():
-        if not _valid_dsn_name(name) or not isinstance(description, str):
-            continue
-        driver = eligible.get(description.casefold())
-        if driver is not None:
-            result.append({"name": name, "driver": driver})
-    return result
-
-
-def _resolve_dsn(requested, sources):
-    matches = [source for source in sources if source["name"].casefold() == requested.casefold()]
-    if len(matches) != 1:
-        raise AseOdbcError("입력한 DSN을 등록된 SAP ASE 64비트 ODBC DSN에서 확인할 수 없습니다. DSN 이름과 드라이버를 확인하세요.")
-    return matches[0]
-
-
 def odbc_status():
-    result = {"available": False, "detail": "", "driver": None, "drivers": [], "data_sources": [],
-              "module_available": False, "version": None}
+    result = {"available": False, "detail": "", "driver": None, "drivers": [], "module_available": False, "version": None}
     try:
         library = _pyodbc()
     except Exception:
@@ -172,12 +140,6 @@ def odbc_status():
         result["detail"] = str(error)
     except Exception:
         result["detail"] = "ASE ODBC 드라이버 설정을 읽지 못했습니다."
-    try:
-        result["data_sources"] = _registered_data_sources(library, result["drivers"])
-    except AseOdbcError as error:
-        # DSN discovery is optional for a connection entered as host/port. A
-        # failed list must not turn an otherwise available driver into an error.
-        result["data_sources_detail"] = str(error)
     return result
 
 
@@ -256,11 +218,6 @@ def _connection(raw):
         if not isinstance(value, str) or any(ord(char) < 32 or ord(char) == 127 for char in value) or (key == "user" and not value):
             raise AseOdbcError("사용자 또는 비밀번호가 올바르지 않습니다.")
         result[key] = value
-    dsn = raw.get("dsn", "")
-    if not isinstance(dsn, str) or len(dsn) > 255 or any(ord(character) < 32 or ord(character) == 127 for character in dsn):
-        raise AseOdbcError("DSN 이름은 제어 문자를 제외한 255자 이내 문자열로 입력하세요.")
-    if dsn.strip():
-        result["dsn"] = dsn.strip()
     return result
 
 
@@ -268,15 +225,20 @@ def _braced(value):
     return "{" + value.replace("}", "}}") + "}"
 
 
-def _connection_string(settings, driver, dsn=None):
+def _odbc_value(value):
+    # Avoid unnecessary wrappers: some SAP ASE clients treat them as literal
+    # credential characters. Quote only ODBC delimiters or significant edge
+    # whitespace, doubling closing braces only inside a quoted value.
+    if ";" in value or value.startswith("{") or value != value.strip():
+        return _braced(value)
+    return value
+
+
+def _connection_string(settings, driver):
     # pyodbc's **kwargs connection builder does not escape semicolons or braces.
     # Build the ODBC string explicitly; it is used only by SQLDriverConnect.
-    prefix = f"DSN={_braced(dsn)};" if dsn is not None else f"DRIVER={_braced(driver)};"
-    # Explicit endpoint attributes override the DSN's defaults so catalog and
-    # BCP use the same entered server/port. Keep its other working attributes.
-    suffix = "" if dsn is not None else "DATABASE={master};CHARSET=UTF8;"
-    return (prefix + f"SERVER={_braced(settings['host'])};PORT={settings['port']};"
-            f"UID={_braced(settings['user'])};PWD={_braced(settings['password'])};" + suffix)
+    return (f"DRIVER={_braced(driver)};SERVER={_odbc_value(settings['host'])};PORT={settings['port']};"
+            f"UID={_odbc_value(settings['user'])};PWD={_odbc_value(settings['password'])};DATABASE=master;CHARSET=UTF8;")
 
 
 def _request(payload):
@@ -362,19 +324,11 @@ class OdbcSession:
                 library = _pyodbc()
                 self._library = library
                 configured = self._explicit_driver if self._explicit_driver is not None else _odbc_settings().get("driver")
+                self.driver = _select_driver(_registered_drivers(library), configured)
                 settings = self._settings
-                drivers = _registered_drivers(library)
-                dsn = None
-                if settings.get("dsn"):
-                    source = _resolve_dsn(settings["dsn"], _registered_data_sources(library, drivers))
-                    dsn, self.driver = source["name"], source["driver"]
-                    if configured is not None and _select_driver(drivers, configured).casefold() != self.driver.casefold():
-                        raise AseOdbcError("선택한 DSN의 드라이버와 설정한 ODBC 드라이버가 다릅니다. DSN 또는 드라이버 설정을 확인하세요.")
-                else:
-                    self.driver = _select_driver(drivers, configured)
                 login_started = time.monotonic()
                 stage = "connect"
-                connection = library.connect(_connection_string(settings, self.driver, dsn), autocommit=True, timeout=settings["login_timeout"])
+                connection = library.connect(_connection_string(settings, self.driver), autocommit=True, timeout=settings["login_timeout"])
                 self.login_seconds = max(0.0, time.monotonic() - login_started)
                 self._check(generation)
                 stage = "connection-timeout-setting"
