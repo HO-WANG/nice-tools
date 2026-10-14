@@ -395,7 +395,8 @@ def test_real_runner_parses_copy_protocol_before_password_redaction(clients, tmp
     def boundary(argv, actual_password, **kwargs):
         if Path(argv[0]).name.lower() == "isql.exe":
             return fake.run(argv, actual_password, **kwargs)
-        result = ase_process.run_client([sys.executable, "-u", str(script), *argv[1:]], actual_password, **kwargs)
+        result = ase_process.run_client([sys.executable, "-u", str(script), *argv[1:]], actual_password,
+                                        **{**kwargs, "timeout": 10})
         public.append(result)
         return result
 

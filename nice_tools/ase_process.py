@@ -393,7 +393,19 @@ class _WindowsConsole:
         if not available.value:
             if self.poll() is not None:
                 self._start_console_close()
-            return b""
+                closing = self._console_close_thread
+                if closing is not None and not closing.is_alive():
+                    # The final flush may have arrived between the first empty
+                    # Peek and completed ClosePseudoConsole. Drain it before EOF.
+                    # A valid but empty pipe need not report BROKEN_PIPE here.
+                    if not self.kernel.PeekNamedPipe(self.output, None, 0, None, ctypes.byref(available), None):
+                        if ctypes.get_last_error() in (109, 232):
+                            return None
+                        raise OSError("SAP 콘솔 출력을 확인하지 못했습니다.")
+                    if not available.value:
+                        return None
+            if not available.value:
+                return b""
         buffer = ctypes.create_string_buffer(min(available.value, 8192))
         received = wintypes.DWORD()
         if not self.kernel.ReadFile(self.output, buffer, len(buffer), ctypes.byref(received), None):

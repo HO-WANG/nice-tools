@@ -308,3 +308,50 @@ def test_private_protocol_parser_exception_is_sanitized_and_reaps_client(tmp_pat
         run(argv, "private-secret", _parse_output=parse, register=handles.append, timeout=10)
     assert "private-secret" not in str(error.value)
     assert handles[0].poll() is not None
+
+
+def finished_console(peeks, final_bytes=b""):
+    """Model a closed native console whose reader pipe still remains valid."""
+    import ctypes
+    from nice_tools.ase_process import _WindowsConsole
+
+    class Kernel:
+        def __init__(self):
+            self.peeks = list(peeks)
+            self.peek_calls = 0
+
+        def PeekNamedPipe(self, handle, buffer, length, read, available, left):
+            self.peek_calls += 1
+            available._obj.value = self.peeks.pop(0)
+            return True
+
+        def ReadFile(self, handle, buffer, length, received, overlapped):
+            ctypes.memmove(buffer, final_bytes, len(final_bytes))
+            received._obj.value = len(final_bytes)
+            return True
+
+    class ClosedConsoleThread:
+        def is_alive(self):
+            return False
+
+    console = _WindowsConsole.__new__(_WindowsConsole)
+    console.kernel = Kernel()
+    console.output = 123
+    console.poll = lambda: 0
+    console._console_close_thread = ClosedConsoleThread()
+    console._start_console_close = lambda: None
+    return console
+
+
+def test_finished_console_returns_eof_even_when_empty_reader_pipe_stays_open():
+    console = finished_console([0, 0])
+    assert console.read() is None
+    assert console.kernel.peek_calls == 2
+
+
+def test_finished_console_rechecks_pipe_for_final_flush_before_eof():
+    final = b"3 rows copied.\n"
+    console = finished_console([0, len(final), 0, 0], final)
+    assert console.read() == final
+    assert console.read() is None
+    assert console.kernel.peek_calls == 4

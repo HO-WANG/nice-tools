@@ -31,16 +31,7 @@ jobs:
           "NICE_TOOLS_SAP_TEST_CLIENTS=$((Resolve-Path build/sap-test-clients).Path)" >> $env:GITHUB_ENV
       - name: Run source tests
         shell: pwsh
-        run: |
-          $TestOutput = & python -m pytest -q 2>&1 | Tee-Object -FilePath source-tests.log
-          $TestExit = $LASTEXITCODE
-          $TestOutput | ForEach-Object { Write-Host $_ }
-          if ($TestExit -ne 0) {
-            $Diagnostic = ($TestOutput | Select-Object -Last 100) -join "`n"
-            $Diagnostic = $Diagnostic.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
-            Write-Host "::error::Windows source tests failed: $Diagnostic"
-            exit $TestExit
-          }
+        run: python scripts/run_source_tests.py --timeout 300
       - name: Verify Java Jasypt interoperability
         shell: pwsh
         run: python scripts/check_jasypt_java.py --java "$env:JAVA_HOME_17_X64\bin\java.exe"
