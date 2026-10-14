@@ -7,14 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 
-def manager_for(tmp_path, transfer="success", rows=1, contents=b"new\n"):
+def manager_for(tmp_path, transfer="success", rows=1, contents=b"new\n", catalog_timings=None):
     from nice_tools.ase_jobs import AseManager
 
     script = tmp_path / "worker.py"
     script.write_text('''import sys,json,time
 p=json.load(sys.stdin.buffer)
 op=p['operation']
+catalog_timings=CATALOG_TIMINGS
 if op=='databases': r={'databases':[{'id':1,'name':'db'}]}
+elif op in ('owners','objects','columns'): r={op:[]}
 elif op=='pick': r={'cancelled':False,'path':p['suggested_name']}
 elif op=='preview':
  if p['options']['batch_size']==1111:
@@ -29,8 +31,10 @@ elif op=='transfer':
  MODE
  r={'rows':ROW_COUNT}
 else: r={}
+if op in ('databases','owners','objects','columns') and catalog_timings is not None:
+ r['timings']=catalog_timings
 print(json.dumps({'event':'result','result':r}),flush=True)
-'''.replace("OUTPUT_BYTES", repr(contents)).replace("ROW_COUNT", repr(rows)).replace(" MODE", {
+'''.replace("OUTPUT_BYTES", repr(contents)).replace("ROW_COUNT", repr(rows)).replace("CATALOG_TIMINGS", repr(catalog_timings)).replace(" MODE", {
         "success": " pass",
         "fail": " print(json.dumps({'event':'error','detail':p['connection']['password']+' failed'}),flush=True); sys.exit(1)",
         "wait": " print(json.dumps({'event':'progress','phase':'transfer','message':'running'}),flush=True); time.sleep(60)",
@@ -341,5 +345,78 @@ def test_in_does_not_report_out_statistics(tmp_path, monkeypatch):
         assert result["state"] == "succeeded"
         assert result["result"] == {"rows": 1, "path": str(source.resolve()), "direction": "in"}
         assert "started_at" not in result
+    finally:
+        manager.close()
+
+
+def catalog_clock(monkeypatch, manager):
+    """Advance the parent clock across real subprocess boundaries, without sleeps."""
+    from nice_tools import ase_jobs
+
+    clock = TransferClock()
+    spawn = manager._spawn
+
+    def timed_spawn(payload, session=None):
+        clock.advance(2.0)
+        process = spawn(payload, session)
+        communicate = process.communicate
+
+        def timed_communicate(*args, **kwargs):
+            output = communicate(*args, **kwargs)
+            clock.advance(3.0)
+            return output
+
+        process.communicate = timed_communicate
+        return process
+
+    monkeypatch.setattr(ase_jobs, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(manager, "_spawn", timed_spawn)
+    return clock
+
+
+def test_connect_preserves_native_timings_and_worker_total(tmp_path, monkeypatch):
+    timings = {"native_load_seconds": 0.25, "login_seconds": 0.5, "setup_seconds": 0.125, "query_seconds": 1.0}
+    manager = manager_for(tmp_path, catalog_timings=timings)
+    try:
+        catalog_clock(monkeypatch, manager)
+        result = manager.connect({"host": "localhost", "user": "u", "password": "secret-pass"})
+        assert result["databases"] == [{"id": 1, "name": "db"}]
+        assert result["session"] in manager.sessions
+        assert result["timings"] == {**timings, "total_seconds": 5.0}
+        assert "secret-pass" not in json.dumps(result)
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize("operation", ["owners", "objects", "columns"])
+def test_catalog_total_counts_spawn_and_worker_completion(tmp_path, monkeypatch, operation):
+    from nice_tools import ase_jobs
+
+    timings = {"native_load_seconds": 0.25, "login_seconds": 0.5, "setup_seconds": 0.125, "query_seconds": 1.0}
+    manager = manager_for(tmp_path, catalog_timings=timings)
+    try:
+        session = manager.connect({"host": "localhost", "user": "u", "password": "pw"})["session"]
+        clock = catalog_clock(monkeypatch, manager)
+        loads = ase_jobs.json.loads
+
+        def slow_parent_parse(value):
+            result = loads(value)
+            clock.advance(7.0)
+            return result
+
+        monkeypatch.setattr(ase_jobs.json, "loads", slow_parent_parse)
+        result = manager.catalog(session, operation, database="db")
+        assert result == {operation: [], "timings": {**timings, "total_seconds": 5.0}}
+    finally:
+        manager.close()
+
+
+def test_legacy_worker_results_without_timings_are_unchanged(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    try:
+        catalog_clock(monkeypatch, manager)
+        result = manager.connect({"host": "localhost", "user": "u", "password": "pw"})
+        assert set(result) == {"session", "databases"}
+        assert manager.catalog(result["session"], "owners", database="db") == {"owners": []}
     finally:
         manager.close()

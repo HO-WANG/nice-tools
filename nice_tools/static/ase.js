@@ -4,7 +4,7 @@
   const get = (id) => document.getElementById(id);
   if (!get("ase-tool")) return;
   const state = {
-    available: false, session: null, databases: [], owners: [], objects: [], object: null,
+    available: false, session: null, databases: [], owners: [], ownersLoaded: false, objects: [], searched: false, object: null,
     columns: [], columnsLoaded: false, file: null, path: "", review: null,
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
     profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null,
@@ -92,6 +92,30 @@
     for (const id of ["ase-stat-rows", "ase-stat-elapsed", "ase-stat-rate", "ase-stat-bytes", "ase-stat-bytes-exact"]) get(id).textContent = "";
   }
 
+  function clearTimings() {
+    get("ase-catalog-timings").textContent = "";
+    get("ase-catalog-timings").hidden = true;
+  }
+
+  function showTimings(label, data) {
+    clearTimings();
+    const timings = data.timings;
+    if (!timings || !Number.isFinite(timings.total_seconds) || timings.total_seconds < 0) return;
+    const phases = ["native_load_seconds", "login_seconds", "setup_seconds", "query_seconds"];
+    if (phases.some((key) => key in timings && (!Number.isFinite(timings[key]) || timings[key] < 0))) return;
+    const connectionSetup = (timings.native_load_seconds || 0) + (timings.setup_seconds || 0);
+    const measured = phases.reduce((total, key) => total + (timings[key] || 0), 0);
+    if (!Number.isFinite(connectionSetup) || !Number.isFinite(measured)) return;
+    const seconds = (value) => `${value.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}초`;
+    const parts = [`${label} · 총 ${seconds(timings.total_seconds)}`];
+    if (Number.isFinite(timings.login_seconds)) parts.push(`서버 로그인 ${seconds(timings.login_seconds)}`);
+    if (Number.isFinite(timings.query_seconds)) parts.push(`조회 ${seconds(timings.query_seconds)}`);
+    if (Number.isFinite(timings.native_load_seconds) || Number.isFinite(timings.setup_seconds)) parts.push(`드라이버·연결 설정 ${seconds(connectionSetup)}`);
+    if (phases.every((key) => Number.isFinite(timings[key]))) parts.push(`실행 준비 ${seconds(Math.max(0, timings.total_seconds - measured))}`);
+    get("ase-catalog-timings").textContent = parts.join(" · ");
+    get("ase-catalog-timings").hidden = false;
+  }
+
   function reset(level) {
     nextGeneration();
     clearReview();
@@ -101,6 +125,7 @@
     get("ase-job-status").textContent = "";
     get("ase-job-events").replaceChildren();
     clearStatistics();
+    clearTimings();
     feedback();
     if (level === "connection") {
       state.session = null;
@@ -109,10 +134,14 @@
     }
     if (["connection", "database"].includes(level)) {
       state.owners = [];
-      setChoices("ase-owner", [], "소유자 선택", "id");
+      state.ownersLoaded = false;
+      setChoices("ase-owner", [], "전체 소유자", "id");
     }
-    if (["connection", "database", "owner"].includes(level)) state.objects = [];
-    if (["connection", "database", "owner", "object"].includes(level)) {
+    if (["connection", "database", "search"].includes(level)) {
+      state.objects = [];
+      state.searched = false;
+    }
+    if (["connection", "database", "search", "object"].includes(level)) {
       state.object = null;
       state.columns = [];
       state.columnsLoaded = false;
@@ -233,9 +262,7 @@
   function renderObjects() {
     const body = get("ase-object-body");
     body.replaceChildren();
-    const query = get("ase-search").value.trim().toLocaleLowerCase();
-    const kind = get("ase-kind").value;
-    const objects = state.objects.filter((object) => (kind === "all" || object.kind === kind) && String(object.name).toLocaleLowerCase().includes(query));
+    const objects = state.objects;
     for (const object of objects) {
       const row = document.createElement("tr");
       const selected = state.object?.id === object.id && state.object?.owner_id === object.owner_id;
@@ -249,12 +276,13 @@
       button.disabled = locked();
       button.addEventListener("click", () => selectObject(object));
       name.append(button);
+      cell(row, object.owner);
       cell(row, kindNames[object.kind] || object.kind);
       body.append(row);
     }
     get("ase-object-empty").hidden = objects.length > 0;
-    get("ase-object-empty").textContent = !state.session ? "서버에 연결한 뒤 DB와 소유자를 선택하세요." : state.busy === "objects" ? "객체를 불러오는 중입니다." : !get("ase-owner").value ? "DB와 소유자를 선택하세요." : "조건에 맞는 객체가 없습니다.";
-    get("ase-object-count").textContent = state.session ? `${objects.length.toLocaleString()}개 객체` : "연결 후 선택할 수 있습니다.";
+    get("ase-object-empty").textContent = !state.session ? "서버에 연결한 뒤 DB를 선택하세요." : state.busy === "objects" ? "객체를 검색하는 중입니다." : !get("ase-database").value ? "DB를 선택하세요. 소유자는 선택하지 않아도 됩니다." : !state.searched ? "검색을 누르면 객체를 조회합니다. 소유자는 선택하지 않아도 됩니다." : "조건에 맞는 객체가 없습니다.";
+    get("ase-object-count").textContent = !state.session ? "연결 후 선택할 수 있습니다." : !state.searched ? "검색 후 선택할 수 있습니다." : `${objects.length.toLocaleString()}개 객체`;
   }
 
   function renderColumns() {
@@ -279,9 +307,12 @@
     get("ase-connect").textContent = state.busy === "connect" ? "연결 중…" : state.session ? "연결됨" : "연결";
     get("ase-disconnect").disabled = !state.session || state.busy === "disconnect";
     get("ase-database").disabled = !state.session || isLocked;
-    get("ase-owner").disabled = !state.owners.length || isLocked;
-    get("ase-kind").disabled = !state.session || isLocked;
-    get("ase-search").disabled = !state.session || isLocked;
+    const databaseSelected = Boolean(state.session && get("ase-database").value);
+    get("ase-owner").disabled = !databaseSelected || isLocked;
+    get("ase-kind").disabled = !databaseSelected || isLocked;
+    get("ase-search").disabled = !databaseSelected || isLocked;
+    get("ase-search-button").disabled = !databaseSelected || isLocked || Boolean(state.busy);
+    get("ase-search-button").textContent = state.busy === "objects" ? "검색 중…" : "검색";
     get("ase-out").disabled = !state.columnsLoaded || !["U", "V"].includes(state.object?.kind) || isLocked;
     get("ase-in").disabled = !state.columnsLoaded || state.object?.kind !== "U" || isLocked;
     for (const id of optionIds) get(id).disabled = !canTransfer || isLocked || (id === "ase-keep-identity" && direction() !== "in");
@@ -350,12 +381,13 @@
       get("ase-password").value = "";
       setChoices("ase-database", state.databases, "DB 선택", "name");
       defaultDatabase = typeof data.database === "string" ? data.database : profile?.database || "";
-      get("ase-connection-note").textContent = `${profile ? `${typeof data.profile_name === "string" ? data.profile_name : profile.name}에 ` : ""}연결되었습니다. DB와 소유자를 선택하세요. ${profile ? "복호화 키" : "비밀번호"}는 입력창에서 지웠습니다.`;
+      showTimings("서버 연결", data);
+      get("ase-connection-note").textContent = `${profile ? `${typeof data.profile_name === "string" ? data.profile_name : profile.name}에 ` : ""}연결되었습니다. DB를 선택하고 검색을 누르세요. ${profile ? "복호화 키" : "비밀번호"}는 입력창에서 지웠습니다.`;
       feedback("서버에 연결되었습니다.");
     });
     if (generation === state.generation && state.session && state.databases.some((database) => database.name === defaultDatabase)) {
       get("ase-database").value = defaultDatabase;
-      await loadOwners();
+      render();
     }
   });
 
@@ -385,30 +417,53 @@
   });
 
   async function loadOwners() {
-    if (locked()) return;
-    reset("database");
+    if (locked() || state.busy || state.ownersLoaded) return;
     const database = get("ase-database").value;
-    if (!database) return;
+    if (!database || !state.session) return;
     await perform("owners", async (generation) => {
       const data = await api("owners", { session: state.session, database }, generation);
+      const selected = get("ase-owner").value;
       state.owners = Array.isArray(data.owners) ? data.owners : [];
-      setChoices("ase-owner", state.owners, "소유자 선택", "id");
-      if (!state.owners.length) feedback("선택할 소유자가 없습니다.");
+      state.ownersLoaded = true;
+      setChoices("ase-owner", state.owners, "전체 소유자", "id");
+      get("ase-owner").value = state.owners.some((owner) => String(owner.id) === selected) ? selected : "";
+      if (get("ase-owner").value !== selected) reset("search");
+      showTimings("소유자 조회", data);
     });
   }
 
-  get("ase-database").addEventListener("change", loadOwners);
+  get("ase-database").addEventListener("change", () => { if (!locked()) reset("database"); });
+  for (const event of ["focus", "pointerdown"]) get("ase-owner").addEventListener(event, loadOwners);
 
-  get("ase-owner").addEventListener("change", async () => {
-    if (locked()) return;
-    reset("owner");
+  async function searchObjects() {
+    if (locked() || state.busy || !state.session || !get("ase-database").value) return;
+    if (!get("ase-search").reportValidity()) return;
+    reset("search");
     const owner = state.owners.find((item) => String(item.id) === get("ase-owner").value);
-    if (!owner) return;
     await perform("objects", async (generation) => {
-      const data = await api("objects", { session: state.session, database: get("ase-database").value, owner_id: owner.id }, generation);
+      const data = await api("objects", { session: state.session, database: get("ase-database").value, owner_id: owner?.id ?? null, search: get("ase-search").value.trim(), kind: get("ase-kind").value }, generation);
       state.objects = Array.isArray(data.objects) ? data.objects : [];
+      state.searched = true;
+      if (!state.ownersLoaded) {
+        const selected = get("ase-owner").value;
+        const owners = new Map(state.owners.map((item) => [item.id, item]));
+        for (const object of state.objects) owners.set(object.owner_id, { id: object.owner_id, name: object.owner });
+        state.owners = [...owners.values()];
+        setChoices("ase-owner", state.owners, "전체 소유자", "id");
+        get("ase-owner").value = selected;
+      }
+      showTimings("객체 검색", data);
     });
+  }
+
+  get("ase-search-button").addEventListener("click", searchObjects);
+  get("ase-search").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      searchObjects();
+    }
   });
+  get("ase-owner").addEventListener("change", () => { if (!locked()) reset("search"); });
 
   async function selectObject(object) {
     if (locked()) return;
@@ -418,6 +473,7 @@
       const data = await api("columns", { session: state.session, object }, generation);
       state.columns = Array.isArray(data.columns) ? data.columns : [];
       state.columnsLoaded = true;
+      showTimings("컬럼 조회", data);
       const body = get("ase-column-body");
       body.replaceChildren();
       for (const column of state.columns) {
@@ -435,8 +491,8 @@
     });
   }
 
-  get("ase-kind").addEventListener("change", () => { if (!locked()) reset("object"); });
-  get("ase-search").addEventListener("input", renderObjects);
+  get("ase-kind").addEventListener("change", () => { if (!locked()) reset("search"); });
+  get("ase-search").addEventListener("input", () => { if (!locked()) reset("search"); });
   for (const id of ["ase-out", "ase-in"]) get(id).addEventListener("change", () => {
     if (locked()) return;
     get("ase-keep-identity").checked = false;

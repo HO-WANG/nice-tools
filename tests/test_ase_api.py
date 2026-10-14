@@ -45,6 +45,62 @@ def test_ase_json_required():
     assert "do-not-echo" not in response.text
 
 
+@pytest.mark.parametrize("owner", [{}, {"owner_id": None}, {"owner_id": 7}], ids=["omitted", "all", "specific"])
+def test_object_search_accepts_all_owners_and_forwards_search_filters(monkeypatch, owner):
+    from nice_tools import ase_api
+
+    calls = []
+
+    def catalog(session, operation, **parameters):
+        calls.append((session, operation, parameters))
+        return {"objects": []}
+
+    monkeypatch.setattr(ase_api.manager, "catalog", catalog)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/objects", json={
+            "session": "test-session", "database": "testdb", "search": "order_%", "kind": "V", **owner,
+        }, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200
+    assert response.json() == {"objects": []}
+    assert response.headers["cache-control"] == "no-store"
+    assert calls == [("test-session", "objects", {
+        "database": "testdb", "owner_id": owner.get("owner_id"), "search": "order_%", "kind": "V",
+    })]
+
+
+def test_object_search_defaults_to_all_kinds_and_empty_search(monkeypatch):
+    from nice_tools import ase_api
+
+    calls = []
+    monkeypatch.setattr(ase_api.manager, "catalog", lambda *args, **parameters: calls.append(parameters) or {"objects": []})
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/objects", json={"session": "test-session", "database": "testdb"},
+                               headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200
+    assert calls == [{"database": "testdb", "owner_id": None, "search": "", "kind": "all"}]
+
+
+@pytest.mark.parametrize("invalid", [
+    {"owner_id": value} for value in [True, False, 0, -1, 2147483648, "7", 1.5]
+] + [
+    {"search": value} for value in [None, 1, True, "bad\x00search", "x" * 256]
+] + [
+    {"kind": value} for value in [None, "", "u", "X", True, 1, []]
+])
+def test_object_search_rejects_invalid_filters_before_worker_creation(monkeypatch, invalid):
+    from nice_tools import ase_api
+
+    calls = []
+    monkeypatch.setattr(ase_api.manager, "catalog", lambda *args, **parameters: calls.append(parameters) or {"objects": []})
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/objects", json={
+            "session": "test-session", "database": "testdb", "owner_id": 7, **invalid,
+        }, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+    assert not calls
+
+
 def test_profiles_endpoint_is_local_and_does_not_expose_passwords(tmp_path, monkeypatch):
     from nice_tools.jasypt import transform
     from nice_tools import ase_profiles

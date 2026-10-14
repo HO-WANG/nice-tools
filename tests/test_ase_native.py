@@ -2,9 +2,11 @@ import ctypes as ct
 import hashlib
 import importlib
 import json
+import math
 import os
 from pathlib import Path
 import socket
+import time
 
 import pytest
 
@@ -36,6 +38,7 @@ class CatalogSession:
     def __init__(self, *args, **kwargs):
         self.queries = []
         self.transfers = []
+        self.timings = {"native_load_seconds": 0.125, "login_seconds": 1.5, "setup_seconds": 0.75}
         self.__class__.instances.append(self)
 
     def __enter__(self):
@@ -83,12 +86,13 @@ def test_missing_native_library_is_reported_without_install_instructions(monkeyp
 
 
 def test_database_discovery_returns_catalog_ids_and_unicode_names(catalogs):
-    assert catalogs.run_operation(payload("databases")) == {"databases": [{"id": 5, "name": "연구]db"}]}
+    assert catalogs.run_operation(payload("databases"))["databases"] == [{"id": 5, "name": "연구]db"}]
 
 
 def test_column_discovery_quotes_database_and_scopes_by_owner_and_object_ids(catalogs):
     result = catalogs.run_operation(payload("columns"))
-    assert result == {"object": OBJECT, "columns": COLUMNS}
+    assert result["object"] == OBJECT
+    assert result["columns"] == COLUMNS
     sql = "\n".join(CatalogSession.instances[-1].queries)
     assert "[연구]]db]" in sql
     assert "o.uid = 7" in sql
@@ -100,6 +104,53 @@ def test_column_discovery_quotes_database_and_scopes_by_owner_and_object_ids(cat
 def test_owner_ids_cannot_be_interpreted_as_sql(catalogs, value):
     with pytest.raises(ValueError, match="(?i)(owner|id|integer)"):
         catalogs.run_operation(payload("objects", database="safe", owner_id=value))
+    assert not CatalogSession.instances
+
+
+@pytest.mark.parametrize("owner", [{}, {"owner_id": None}])
+def test_object_search_without_owner_queries_all_owners(catalogs, owner):
+    result = catalogs.run_operation(payload("objects", database="연구]db", **owner))
+    assert result["objects"] == [OBJECT]
+    sql = CatalogSession.instances[-1].queries[-1]
+    assert "[연구]]db].dbo.sysobjects" in sql
+    assert "u.uid = o.uid" in sql
+    assert "WHERE o.uid =" not in sql
+    assert "o.type IN ('U', 'V', 'P')" in sql
+    assert "LIKE" not in sql
+
+
+@pytest.mark.parametrize("kind", ["U", "V", "P"])
+def test_object_search_filters_owner_and_kind_in_database(catalogs, kind):
+    catalogs.run_operation(payload("objects", database="safe", owner_id=7, kind=kind))
+    sql = CatalogSession.instances[-1].queries[-1]
+    assert "o.uid = 7" in sql
+    assert f"o.type = '{kind}'" in sql
+    assert "o.type IN" not in sql
+
+
+@pytest.mark.parametrize("search,pattern", [
+    ("order", "%order%"),
+    ("OrDeR", "%OrDeR%"),
+    ("%_[!'", "%!%!_![!!''%"),
+    ("' OR 1=1 --", "%'' OR 1=1 --%"),
+    ("주문", "%주문%"),
+])
+def test_object_name_search_quotes_sql_and_treats_wildcards_literally(catalogs, search, pattern):
+    catalogs.run_operation(payload("objects", database="safe", owner_id=7, search=search))
+    sql = CatalogSession.instances[-1].queries[-1]
+    assert f"lower(o.name) LIKE lower('{pattern}') ESCAPE '!'" in sql
+
+
+@pytest.mark.parametrize("invalid", [
+    {"owner_id": value} for value in [True, False, 0, -1, 2147483648, "7", 1.5]
+] + [
+    {"search": value} for value in [None, 1, True, "bad\x00search", "x" * 256]
+] + [
+    {"kind": value} for value in [None, "", "u", "X", True, 1, []]
+])
+def test_object_search_rejects_invalid_filters_before_login(catalogs, invalid):
+    with pytest.raises(ValueError):
+        catalogs.run_operation(payload("objects", database="safe", **{"owner_id": 7, **invalid}))
     assert not CatalogSession.instances
 
 
@@ -402,3 +453,79 @@ def test_verified_native_connection_refusal_is_sanitized_and_does_not_exit(monke
     assert "private-value" not in str(events)
     assert any(event.get("level") == "error" for event in events)
     assert "error" in str(error.value).lower()
+
+
+class PhaseClock:
+    def __init__(self):
+        self.value = 100.0
+
+    def __call__(self):
+        return self.value
+
+    def advance(self, seconds):
+        self.value += seconds
+
+
+def test_native_session_times_library_load_login_and_server_setup_separately(monkeypatch):
+    module = native_module()
+    clock = PhaseClock()
+
+    class TimedLibrary(NativeLibrary):
+        def dbinit(self):
+            clock.advance(2.0)  # Client prep must not be labeled as network login.
+            return super().dbinit()
+
+        def tdsdbopen(self, *args):
+            clock.advance(1.5)
+            return super().tdsdbopen(*args)
+
+        def dbsqlexec(self, *args):
+            clock.advance(0.5 if "@@version" in self.queries[-1] else 0.25)
+            return super().dbsqlexec(*args)
+
+    library = TimedLibrary()
+
+    def load_library():
+        clock.advance(0.125)
+        return library
+
+    monkeypatch.setattr(module, "_load_native", load_library)
+    monkeypatch.setattr(time, "monotonic", clock)
+    with module._Session(module._connection(CONNECTION)) as session:
+        assert session.timings == {
+            "native_load_seconds": 0.125,
+            "login_seconds": 1.5,
+            "setup_seconds": 0.75,
+        }
+    assert library.closed
+
+
+@pytest.mark.parametrize("operation,changes,query_count", [
+    ("databases", {}, 1),
+    ("owners", {"database": OBJECT["database"]}, 1),
+    ("objects", {"database": OBJECT["database"], "owner_id": OBJECT["owner_id"]}, 1),
+    ("columns", {}, 2),
+])
+def test_catalog_timing_contains_requested_queries_and_no_connection_values(monkeypatch, operation, changes, query_count):
+    module = native_module()
+    clock = PhaseClock()
+
+    class TimedCatalog(CatalogSession):
+        def query(self, sql):
+            clock.advance(0.625)
+            return super().query(sql)
+
+    TimedCatalog.observed_object = dict(OBJECT)
+    TimedCatalog.observed_columns = [dict(column) for column in COLUMNS]
+    monkeypatch.setattr(module, "_Session", TimedCatalog)
+    monkeypatch.setattr(time, "monotonic", clock)
+    result = module.run_operation(payload(operation, **changes))
+    assert result["timings"] == {
+        "native_load_seconds": 0.125,
+        "login_seconds": 1.5,
+        "setup_seconds": 0.75,
+        "query_seconds": query_count * 0.625,
+    }
+    assert all(isinstance(value, float) and value >= 0 and math.isfinite(value) for value in result["timings"].values())
+    for value in (CONNECTION["host"], CONNECTION["user"], CONNECTION["password"]):
+        assert value not in json.dumps(result)

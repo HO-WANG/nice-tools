@@ -6,7 +6,9 @@
 .ase-profile-detail { overflow-wrap: anywhere; }
 #ase-profile-help[data-tone="error"] { color: #a52a2a; }
 .ase-connection-grid { display: grid; grid-template-columns: minmax(160px,2fr) 90px minmax(110px,1fr) minmax(130px,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 20px; }
-.ase-browser-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)) 130px minmax(120px,1fr); gap: 12px; padding: 0 20px 16px; }
+.ase-browser-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)) 110px minmax(120px,1fr) auto; align-items: end; gap: 12px; padding: 0 20px 16px; }
+.ase-browser-controls > button { min-height: 36px; }
+.ase-catalog-timings { margin: 0 0 16px; color: var(--muted); font-size: 12px; line-height: 1.6; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .ase-object-layout { display: grid; grid-template-columns: minmax(0,2fr) minmax(0,3fr); border-top: 1px solid var(--line); }
 .ase-table-scroll { max-height: 320px; overflow: auto; min-width: 0; }
 .ase-table { width: 100%; border-collapse: collapse; text-align: left; font-size: 13px; }

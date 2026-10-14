@@ -117,9 +117,15 @@ async def operation(request: Request, operation: str):
             parameters = {"database": database}
             if operation == "objects":
                 owner_id = data.get("owner_id")
-                if isinstance(owner_id, bool) or not isinstance(owner_id, int) or not 0 < owner_id <= 2147483647:
-                    raise ValueError("소유자를 선택하세요.")
-                parameters["owner_id"] = owner_id
+                if owner_id is not None and (isinstance(owner_id, bool) or not isinstance(owner_id, int) or not 0 < owner_id <= 2147483647):
+                    raise ValueError("소유자 선택이 올바르지 않습니다.")
+                search = data.get("search", "")
+                if not isinstance(search, str) or "\x00" in search or len(search) > 255:
+                    raise ValueError("객체 검색어는 255자 이내로 입력하세요.")
+                kind = data.get("kind", "all")
+                if kind not in ("all", "U", "V", "P"):
+                    raise ValueError("객체 종류를 선택하세요.")
+                parameters.update(owner_id=owner_id, search=search, kind=kind)
             result = await run_in_threadpool(manager.catalog, session, operation, **parameters)
         elif operation == "columns":
             result = await run_in_threadpool(manager.catalog, session, operation, object=object_data(data.get("object")))

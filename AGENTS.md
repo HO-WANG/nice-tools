@@ -29,6 +29,8 @@ Run the source suite with the project's virtualenv: `.venv/bin/python -m pytest 
 
 ## ASE / BCP
 
+- DB/filter changes must not fetch objects automatically. Search/Enter explicitly queries the server, with an optional owner (all owners by default) and literal, case-insensitive name/kind filters. Owner choices may load on demand. Preserve exact owner/object/schema checks for BCP even when browsing all owners.
+- Catalog timing diagnostics must remain secret-free and distinguish native load, actual login, session setup, catalog query and parent total/remaining preparation. Every catalog request currently uses a fresh worker/login; do not claim a live connection is reused or that source/mock measurements establish user-PC latency.
 - Read optional UTF-8 INI profiles from `ase-connections.txt` beside the actual EXE, or the repository root for source execution, independently of the current directory and bundle extraction path. Connection metadata and Jasypt-encrypted DB passwords (`ENC(...)`) may persist in that user-owned file. Never persist plaintext DB passwords or the Jasypt master key in files, arguments, logs or browser storage; keep decrypted credentials in memory and worker stdin only. Obtain the master key from the UI at connection time and keep ASE JSON responses no-store with the loopback/custom-header boundary.
 - Use the bundled, checksum-verified FreeTDS Sybase DB-Library with TDS 5.0 and isolated workers of the same EXE. Do not replace character BCP with ordinary INSERT statements.
 - IN appends. Completed batches may survive failure/cancel; show this before execution. Revalidate reviewed schema and the complete input file, and hold the Windows read-sharing guard through native transfer.

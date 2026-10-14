@@ -37,6 +37,14 @@ def ase_checks(base, require_native=False):
     with urllib.request.urlopen(f"{base}/api/ase/status", timeout=30) as response:
         assert response.headers["Cache-Control"] == "no-store"
         status = json.load(response)
+    # Optional owner/filter validation must reach session validation even when
+    # no live ASE is configured. A build with the old required-owner boundary
+    # would fail here before inspecting the deliberately absent session.
+    missing_session = json_request(base, '/api/ase/objects', {
+        'session': 'smoke-absent-session', 'database': 'smoke_db',
+        'owner_id': None, 'search': 'customer', 'kind': 'all',
+    }, 400)
+    assert '접속 정보가 만료' in sanitized_error(missing_session), 'All-owner object search did not reach session validation'
     if require_native:
         assert status.get("available") and "1.5.19" in status.get("version", ""), status
         # A reserved, non-listening loopback socket exercises native login and
@@ -200,6 +208,7 @@ def main(argv=None):
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
         page = response.read()
         assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page
+        assert b'id="ase-search-button"' in page and b'id="ase-catalog-timings"' in page and b'id="ase-out-statistics"' in page
     for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()

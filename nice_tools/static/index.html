@@ -145,16 +145,19 @@
           </section>
         </form>
         <p id="ase-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+        <p id="ase-catalog-timings" class="ase-catalog-timings" role="status" aria-live="polite" title="실행 준비는 전체 시간에서 측정한 연결·조회 시간을 제외한 값이며, 프로세스 시작과 종료 등의 시간을 포함합니다." hidden></p>
         <section id="ase-browser" class="panel" aria-labelledby="ase-browser-title" aria-busy="false">
           <div class="section-heading"><h2 id="ase-browser-title">DB 객체</h2><span id="ase-object-count" class="section-note">연결 후 선택할 수 있습니다.</span></div>
           <div class="ase-browser-controls">
             <div class="field"><label for="ase-database">데이터베이스</label><select id="ase-database" disabled><option value="">DB 선택</option></select></div>
-            <div class="field"><label for="ase-owner">소유자</label><select id="ase-owner" disabled><option value="">소유자 선택</option></select></div>
+            <div class="field"><label for="ase-owner">소유자 (선택)</label><select id="ase-owner" disabled><option value="">전체 소유자</option></select></div>
             <div class="field"><label for="ase-kind">객체 종류</label><select id="ase-kind" disabled><option value="all">전체</option><option value="U">테이블</option><option value="V">뷰</option><option value="P">프로시저</option></select></div>
-            <div class="field"><label for="ase-search">객체 검색</label><input id="ase-search" type="search" placeholder="이름으로 검색" spellcheck="false" disabled></div>
+            <div class="field"><label for="ase-search">객체 검색</label><input id="ase-search" type="search" placeholder="이름으로 검색" maxlength="255" spellcheck="false" aria-describedby="ase-search-note" disabled></div>
+            <button id="ase-search-button" class="primary-button" type="button" disabled>검색</button>
           </div>
+          <p id="ase-search-note" class="ase-note">DB를 선택한 뒤 검색을 누르세요. 소유자는 선택하지 않아도 전체를 조회합니다.</p>
           <div class="ase-object-layout">
-            <div class="ase-table-scroll"><table class="ase-table"><caption class="visually-hidden">객체를 선택하여 컬럼 확인</caption><thead><tr><th scope="col">객체 이름</th><th scope="col">종류</th></tr></thead><tbody id="ase-object-body"></tbody></table><p id="ase-object-empty" class="ase-empty">서버에 연결한 뒤 DB와 소유자를 선택하세요.</p></div>
+            <div class="ase-table-scroll"><table class="ase-table"><caption class="visually-hidden">객체를 선택하여 컬럼 확인</caption><thead><tr><th scope="col">객체 이름</th><th scope="col">소유자</th><th scope="col">종류</th></tr></thead><tbody id="ase-object-body"></tbody></table><p id="ase-object-empty" class="ase-empty">서버에 연결한 뒤 DB를 선택하세요.</p></div>
             <section class="ase-columns" aria-labelledby="ase-columns-title"><div class="ase-subheading"><h3 id="ase-columns-title">컬럼 정보</h3><p id="ase-object-name" class="section-note"></p></div><p id="ase-column-empty" class="ase-empty">목록에서 객체를 선택하세요.</p><div id="ase-column-scroll" class="ase-table-scroll" hidden><table class="ase-table ase-column-table"><caption class="visually-hidden">선택한 객체의 컬럼 순서와 자료형</caption><thead><tr><th scope="col">순서</th><th scope="col">컬럼</th><th scope="col">자료형</th><th scope="col">NULL</th><th scope="col">IDENTITY</th></tr></thead><tbody id="ase-column-body"></tbody></table></div></section>
           </div>
         </section>

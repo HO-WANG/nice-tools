@@ -113,9 +113,11 @@ class AseManager:
         return process
 
     def _invoke(self, payload, session=None, timeout=90):
+        started_at = time.monotonic() if payload.get("operation") in ("databases", "owners", "objects", "columns") else None
         process = self._spawn(payload, session)
         try:
             output, _ = process.communicate(json.dumps(payload, ensure_ascii=False), timeout=timeout)
+            elapsed = max(0.0, time.monotonic() - started_at) if started_at is not None else None
             result = None
             error = None
             for line in output.splitlines():
@@ -126,6 +128,8 @@ class AseManager:
                     error = event.get("detail", "ASE 작업을 완료하지 못했습니다.")
             if process.returncode != 0 or error or not isinstance(result, dict):
                 raise ValueError(self._redact(error or "ASE 작업을 완료하지 못했습니다.", payload.get("connection", {})))
+            if elapsed is not None and isinstance(result.get("timings"), dict):
+                result["timings"] = {**result["timings"], "total_seconds": elapsed}
             return result
         except subprocess.TimeoutExpired:
             process.kill()
@@ -157,7 +161,10 @@ class AseManager:
                 raise ValueError("접속이 너무 많습니다. 사용하지 않는 접속을 해제하세요.")
             token = secrets.token_urlsafe(32)
             self.sessions[token] = {"connection": connection, "files": {}, "reviews": {}, "jobs": {}, "touched": now}
-        return {"session": token, "databases": result.get("databases", [])}
+        public = {"session": token, "databases": result.get("databases", [])}
+        if isinstance(result.get("timings"), dict):
+            public["timings"] = result["timings"]
+        return public
 
     def catalog(self, token, operation, **parameters):
         session = self._session(token)

@@ -15,6 +15,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
+import time
 
 
 class AseNativeError(ValueError):
@@ -296,7 +297,9 @@ def _configuration(connection, encoding):
 class _Session:
     def __init__(self, connection, encoding="utf-8", emit=None, batch_size=1000):
         self.connection, self.encoding = connection, encoding
+        started = time.monotonic()
         self.lib = _load_native()
+        self.timings = {"native_load_seconds": max(0.0, time.monotonic() - started)}
         self.diagnostics = _Diagnostics(emit, batch_size)
         self.db = self.login = None
         self.initialized = False
@@ -336,8 +339,11 @@ class _Session:
             self._checked("Enable ASE bulk copy", self.lib.dbsetlbool, self.login, 1, 6)
             self._checked("Select ASE protocol", self.lib.dbsetlversion, self.login, 2)  # DBVERSION_100 => TDS 5.0
             self.diagnostics.event({"type": "status", "phase": "connecting"})
+            started = time.monotonic()
             self.db = self.lib.tdsdbopen(self.login, b"nice_tools_ase", 0)  # Sybase ABI, not Microsoft's.
+            self.timings["login_seconds"] = max(0.0, time.monotonic() - started)
             self.diagnostics.check("Connect to ASE", 1 if self.db else 0)
+            started = time.monotonic()
             if self.lib.dbtds(self.db) != 7:  # DBTDS_5_0
                 raise AseNativeError("The server did not negotiate the ASE TDS 5.0 protocol.")
             self.query("SET QUOTED_IDENTIFIER ON SET NOCOUNT ON SET TEXTSIZE 2147483647")
@@ -345,6 +351,7 @@ class _Session:
             server_version = str(version[0].get("server_version", "")) if version else ""
             if "adaptive server" not in server_version.lower() and "sap ase" not in server_version.lower():
                 raise AseNativeError("This connection does not identify itself as SAP Adaptive Server Enterprise.")
+            self.timings["setup_seconds"] = max(0.0, time.monotonic() - started)
             return self
         except BaseException:
             self.close()
@@ -440,12 +447,21 @@ class _Session:
         return {"rows": rows.value, "direction": options["direction"]}
 
 
-def _objects_query(database, owner_id, object_id=None):
+def _objects_query(database, owner_id=None, object_id=None, search="", kind="all"):
     db = _identifier(database)
-    predicate = f"o.uid = {owner_id}" + (f" AND o.id = {object_id}" if object_id is not None else "")
+    predicates = ["o.type IN ('U', 'V', 'P')" if kind == "all" else f"o.type = '{kind}'"]
+    if owner_id is not None:
+        predicates.append(f"o.uid = {owner_id}")
+    if object_id is not None:
+        predicates.append(f"o.id = {object_id}")
+    if search:
+        # ASE LIKE also treats '[' as a pattern opener. Escape its wildcard
+        # syntax before quoting the SQL string; the added '%' alone are wildcards.
+        pattern = search.replace("!", "!!").replace("%", "!%").replace("_", "!_").replace("[", "![").replace("'", "''")
+        predicates.append(f"lower(o.name) LIKE lower('%{pattern}%') ESCAPE '!'")
     return (f"SELECT o.id, o.uid AS owner_id, u.name AS owner_name, o.name AS object_name, rtrim(o.type) AS kind "
             f"FROM {db}.dbo.sysobjects o JOIN {db}.dbo.sysusers u ON u.uid = o.uid "
-            f"WHERE {predicate} AND o.type IN ('U', 'V', 'P') ORDER BY o.type, o.name")
+            f"WHERE {' AND '.join(predicates)} ORDER BY o.type, u.name, o.name")
 
 
 def _verified_object(session, obj):
@@ -469,6 +485,10 @@ def _columns(session, obj):
     return [_column(row) for row in rows]
 
 
+def _catalog_result(session, started, result):
+    return {**result, "timings": {**session.timings, "query_seconds": max(0.0, time.monotonic() - started)}}
+
+
 def run_operation(payload, emit=None):
     if not isinstance(payload, dict):
         raise AseNativeError("The ASE operation is invalid.")
@@ -477,11 +497,22 @@ def run_operation(payload, emit=None):
         raise AseNativeError("The ASE operation is not supported.")
     connection = _connection(payload.get("connection"))
     obj, options, expected, database, owner_id = None, None, None, None, None
+    search, kind = "", "all"
     if operation in ("owners", "objects"):
         database = payload.get("database")
         _identifier(database)
         if operation == "objects":
-            owner_id = _id(payload.get("owner_id"), "owner id")
+            owner_id = payload.get("owner_id")
+            if owner_id is not None:
+                if isinstance(owner_id, bool) or not isinstance(owner_id, int):
+                    raise AseNativeError("The owner id must be an integer.")
+                owner_id = _id(owner_id, "owner id", minimum=1)
+            search = payload.get("search", "")
+            if not isinstance(search, str) or "\0" in search or len(search) > 255:
+                raise AseNativeError("The object search must be text up to 255 characters.")
+            kind = payload.get("kind", "all")
+            if kind not in ("all", "U", "V", "P"):
+                raise AseNativeError("The object kind is not supported.")
     if operation in ("columns", "transfer"):
         obj = _object(payload.get("object"))
     if operation == "transfer":
@@ -499,19 +530,20 @@ def run_operation(payload, emit=None):
             raise AseNativeError("The selected file path is invalid.")
     encoding = options["encoding"] if options else "utf-8"
     with _LOCK, _Session(connection, encoding, emit, options["batch_size"] if options else 1000) as session:
+        started = time.monotonic()
         if operation == "databases":
             rows = session.query("SELECT dbid AS id, name FROM master.dbo.sysdatabases ORDER BY name")
-            return {"databases": [{"id": _id(row["id"]), "name": row["name"]} for row in rows]}
+            return _catalog_result(session, started, {"databases": [{"id": _id(row["id"]), "name": row["name"]} for row in rows]})
         if operation == "owners":
             db = _identifier(database)
             rows = session.query(f"SELECT DISTINCT u.uid AS id, u.name FROM {db}.dbo.sysusers u JOIN {db}.dbo.sysobjects o ON o.uid = u.uid WHERE o.type IN ('U', 'V', 'P') ORDER BY u.name")
-            return {"owners": [{"id": _id(row["id"]), "name": row["name"]} for row in rows]}
+            return _catalog_result(session, started, {"owners": [{"id": _id(row["id"]), "name": row["name"]} for row in rows]})
         if operation == "objects":
-            return {"objects": [_object_row(row, database) for row in session.query(_objects_query(database, owner_id))]}
+            return _catalog_result(session, started, {"objects": [_object_row(row, database) for row in session.query(_objects_query(database, owner_id, search=search, kind=kind))]})
         obj = _verified_object(session, obj)
         columns = _columns(session, obj) if obj["kind"] != "P" else []
         if operation == "columns":
-            return {"object": obj, "columns": columns}
+            return _catalog_result(session, started, {"object": obj, "columns": columns})
         if columns != expected:
             raise AseNativeError("The reviewed column schema changed. Review the file again before bulk copy.")
         return session.bulk_copy(obj, columns, payload["path"], options)

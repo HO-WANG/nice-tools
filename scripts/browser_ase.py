@@ -28,6 +28,7 @@ HOSTILE = '<img src=x onerror="window.__aseXss=true">'
 HOSTILE_ERROR = '<script>window.__aseXss=true</script> request failed'
 HOSTILE_SAMPLE = '<svg onload="window.__aseXss=true">sample</svg>'
 TABLE = {"database": "db1", "owner": "dbo", "owner_id": 1, "id": 10, "name": "customer_rows", "kind": "U"}
+DUPLICATE_TABLE = {**TABLE, "owner": "analytics", "owner_id": 2, "id": 14}
 HOSTILE_TABLE = {**TABLE, "id": 11, "name": HOSTILE}
 VIEW = {**TABLE, "id": 12, "name": "customer_view", "kind": "V"}
 PROCEDURE = {**TABLE, "id": 13, "name": "customer_proc", "kind": "P"}
@@ -53,6 +54,8 @@ class ASEMock:
     delay_owners: bool = False
     delay_preview: bool = False
     pending_owners: list = field(default_factory=list)
+    delay_objects: bool = False
+    pending_objects: list = field(default_factory=list)
     pending_previews: list = field(default_factory=list)
     reviews: dict = field(default_factory=dict)
     profiles: list = field(default_factory=list)
@@ -70,6 +73,11 @@ class ASEMock:
     completed_rows: int = 1_234_567
     completed_statistics: dict | None = field(default_factory=lambda: {"elapsed_seconds": 1.25, "rows_per_second": 987_653.6, "bytes_written": 5_242_880})
     terminal_state: str = "succeeded"
+    owners_override: list | None = None
+    timings: dict | None = field(default_factory=lambda: {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75})
+
+    def timed(self, payload):
+        return {**payload, **({"timings": self.timings} if self.timings is not None else {})}
 
     def profile_response(self):
         return {"path": PROFILE_PATH, "exists": self.profiles_exist, "profiles": self.profiles, "jasypt": JASYPT}
@@ -119,7 +127,7 @@ class ASEMock:
             assert headers.get("content-type", "").startswith("application/json"), "ASE uses JSON, not uploads"
             assert isinstance(payload, dict)
             if endpoint == "connect":
-                response = {"session": SESSION, "databases": [{"id": 1, "name": "db1"}, {"id": 2, "name": "db2"}]}
+                response = self.timed({"session": SESSION, "databases": [{"id": 1, "name": "db1"}, {"id": 2, "name": "db2"}]})
                 if "profile_id" in payload:
                     assert set(payload) == {"profile_id", "master_password"}
                     assert payload["master_password"] == MASTER_PASSWORD
@@ -151,19 +159,27 @@ class ASEMock:
                     self.delay_owners = False
                     self.pending_owners.append(route)
                     return
-                owner = {"id": 1, "name": "dbo"} if payload["database"] == "db1" else {"id": 2, "name": "db2_owner"}
-                return self.respond(route, {"owners": [owner]})
+                owners = self.owners_override if self.owners_override is not None else [{"id": 1, "name": "dbo"}, {"id": 2, "name": "analytics"}, {"id": 3, "name": "empty_owner"}] if payload["database"] == "db1" else [{"id": 2, "name": "db2_owner"}]
+                return self.respond(route, self.timed({"owners": owners}))
             if endpoint == "objects":
-                assert set(payload) == {"session", "database", "owner_id"}
-                assert isinstance(payload["owner_id"], int)
-                objects = [TABLE, HOSTILE_TABLE, VIEW, PROCEDURE] if payload["database"] == "db1" else []
-                return self.respond(route, {"objects": objects})
+                assert set(payload) == {"session", "database", "owner_id", "search", "kind"}
+                assert payload["owner_id"] is None or isinstance(payload["owner_id"], int)
+                assert isinstance(payload["search"], str) and len(payload["search"]) <= 255
+                assert payload["kind"] in {"all", "U", "V", "P"}
+                objects = [TABLE, DUPLICATE_TABLE, HOSTILE_TABLE, VIEW, PROCEDURE] if payload["database"] == "db1" else []
+                objects = [obj for obj in objects if (payload["owner_id"] is None or obj["owner_id"] == payload["owner_id"]) and (payload["kind"] == "all" or obj["kind"] == payload["kind"]) and payload["search"].casefold() in obj["name"].casefold()]
+                response = self.timed({"objects": objects})
+                if self.delay_objects:
+                    self.delay_objects = False
+                    self.pending_objects.append((route, response))
+                    return
+                return self.respond(route, response)
             if endpoint == "columns":
                 assert set(payload) == {"session", "object"}
                 if self.fail_columns:
                     self.fail_columns = False
                     return self.respond(route, {"detail": HOSTILE_ERROR}, status=500)
-                return self.respond(route, {"object": payload["object"], "columns": COLUMNS})
+                return self.respond(route, self.timed({"object": payload["object"], "columns": COLUMNS}))
             if endpoint == "pick-file":
                 assert set(payload) == {"session", "direction", "suggested_name"}
                 assert payload["direction"] in {"in", "out"}
@@ -223,10 +239,16 @@ class ASEMock:
         return [call for call in self.calls if call["endpoint"] == name]
 
 
-def select_table(page, name=TABLE["name"]):
-    page.locator("#ase-object-body").get_by_role("button", name=name, exact=True).click()
+def select_table(page, name=TABLE["name"], owner="dbo"):
+    page.locator("#ase-object-body tr").filter(has=page.get_by_role("cell", name=owner, exact=True)).get_by_role("button", name=name, exact=True).click()
     expect(page.locator("#ase-column-body")).to_contain_text(HOSTILE)
     assert page.locator("#ase-column-body img").count() == 0
+
+
+def focus_owner(page):
+    # select_option changes the value without a real click's focus movement.
+    page.locator("#ase-search").focus()
+    page.locator("#ase-owner").focus()
 
 
 def pick_and_preview(page, mock):
@@ -282,29 +304,80 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_be_enabled()
     expect(page.locator("#ase-password")).to_have_value("")
+    expect(page.locator("#ase-catalog-timings")).to_be_visible()
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("서버 연결 · 총 0.75초")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("서버 로그인 0.25초")
     page.locator("#ase-database").select_option("db1")
     expect(page.locator("#ase-owner")).to_be_enabled()
+    assert not mock.endpoint_calls("owners"), "DB selection must remain local until Search"
+    assert not mock.endpoint_calls("objects"), "DB selection must not fetch objects"
+    expect(page.locator("#ase-owner")).to_have_value("")
+    expect(page.locator("#ase-search-button")).to_be_enabled()
+    expect(page.locator("#ase-catalog-timings")).to_be_hidden()
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-object-body button")).to_have_count(5)
+    assert mock.endpoint_calls("objects")[-1]["payload"] == {"session": SESSION, "database": "db1", "owner_id": None, "search": "", "kind": "all"}
+    expect(page.locator("#ase-object-body")).to_contain_text("analytics")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("객체 검색 · 총 0.75초")
+    select_table(page, owner="analytics")
+    assert mock.endpoint_calls("columns")[-1]["payload"]["object"] == DUPLICATE_TABLE
+    expect(page.locator("#ase-object-name")).to_have_text("db1.analytics.customer_rows")
+    focus_owner(page)
+    expect(page.locator("#ase-owner option[value='3']")).to_have_count(1)
     page.locator("#ase-owner").select_option("1")
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
+    page.locator("#ase-search-button").click()
     expect(page.locator("#ase-object-body button")).to_have_count(4)
     expect(page.locator("#ase-object-body")).to_contain_text(HOSTILE)
     assert page.locator("#ase-object-body img").count() == 0
 
-    # Kind and search filtering stays local after the metadata request.
+    # All filter changes stay local and invalidate old selections until Search.
     object_calls = len(mock.endpoint_calls("objects"))
     page.locator("#ase-kind").select_option("U")
-    expect(page.locator("#ase-object-body button")).to_have_count(2)
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
     page.locator("#ase-search").fill("customer_rows")
+    assert len(mock.endpoint_calls("objects")) == object_calls
+    for composition in ({"key": "Enter", "isComposing": True}, {"key": "Enter", "keyCode": 229}):
+        page.locator("#ase-search").dispatch_event("keydown", composition)
+        page.wait_for_timeout(30)
+        assert len(mock.endpoint_calls("objects")) == object_calls, "IME completion Enter must not submit Search"
+    page.locator("#ase-search").press("Enter")
     expect(page.locator("#ase-object-body button")).to_have_count(1)
-    page.locator("#ase-search").fill("")
+    assert mock.endpoint_calls("objects")[-1]["payload"] == {"session": SESSION, "database": "db1", "owner_id": 1, "search": "customer_rows", "kind": "U"}
+    select_table(page)
+    pick_and_preview(page, mock)
+    page.locator("#ase-search").fill("customer")
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
+    assert_invalidated(page)
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    expect(page.locator("#ase-path")).not_to_contain_text(FILE_PATH)
     page.locator("#ase-kind").select_option("V")
+    page.locator("#ase-search-button").click()
     expect(page.locator("#ase-object-body button")).to_have_count(1)
     expect(page.locator("#ase-object-body")).to_contain_text(VIEW["name"])
     page.locator("#ase-kind").select_option("P")
+    page.locator("#ase-search-button").click()
     expect(page.locator("#ase-object-body button")).to_have_count(1)
     expect(page.locator("#ase-object-body")).to_contain_text(PROCEDURE["name"])
     page.locator("#ase-kind").select_option("all")
+    page.locator("#ase-search").fill("")
+    page.locator("#ase-search-button").click()
     expect(page.locator("#ase-object-body button")).to_have_count(4)
-    assert len(mock.endpoint_calls("objects")) == object_calls
+
+    # Missing and invalid timing payloads must not retain prior measurements.
+    for timings in (None, {"total_seconds": -1}, {"total_seconds": HOSTILE_SAMPLE}, {"total_seconds": 0.5, "login_seconds": "0.1"}, {"total_seconds": 1, "native_load_seconds": 1.7e308, "setup_seconds": 1.7e308}):
+        mock.timings = timings
+        select_table(page)
+        expect(page.locator("#ase-catalog-timings")).to_be_hidden()
+    mock.timings = {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75}
+    select_table(page)
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("컬럼 조회")
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("조회 0.20초")
+    assert page.locator("#ase-catalog-timings svg").count() == 0
+    mock.timings = {"native_load_seconds": 0.02, "login_seconds": 0.05, "setup_seconds": 0.03, "query_seconds": 0.05, "total_seconds": 5.0}
+    select_table(page)
+    expect(page.locator("#ase-catalog-timings")).to_contain_text("실행 준비 4.85초")
+    mock.timings = {"native_load_seconds": 0.1, "login_seconds": 0.25, "setup_seconds": 0.05, "query_seconds": 0.2, "total_seconds": 0.75}
 
     # User tables import/export, views export, and procedures remain browse-only.
     select_table(page)
@@ -486,20 +559,50 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-feedback")).to_contain_text(HOSTILE_ERROR)
     assert page.locator("#ase-feedback script").count() == 0
 
-    # Switching database while an older owner lookup is pending discards it.
+    # Selecting a DB is local; an optional owner lookup starts only on focus.
     page.locator("#ase-database").select_option("db2")
+    focus_owner(page)
     expect(page.locator("#ase-owner option[value='2']")).to_have_count(1)
     mock.delay_owners = True
     page.locator("#ase-database").select_option("db1")
+    focus_owner(page)
     page.wait_for_timeout(30)
     assert mock.pending_owners
     page.locator("#ase-database").select_option("db2")
+    focus_owner(page)
     expect(page.locator("#ase-owner option[value='2']")).to_have_count(1)
     mock.respond(mock.pending_owners.pop(), {"owners": [{"id": 1, "name": "stale_owner"}]})
     page.wait_for_timeout(100)
     expect(page.locator("#ase-database")).to_have_value("db2")
     expect(page.locator("#ase-owner")).to_contain_text("db2_owner")
     assert "stale_owner" not in page.locator("#ase-owner").inner_text()
+
+    # A late object search cannot replace the current DB or changed filters.
+    page.locator("#ase-database").select_option("db1")
+    mock.delay_objects = True
+    page.locator("#ase-search-button").click()
+    page.wait_for_timeout(30)
+    assert mock.pending_objects
+    page.locator("#ase-database").select_option("db2")
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-object-empty")).to_have_text("조건에 맞는 객체가 없습니다.")
+    route, response = mock.pending_objects.pop()
+    mock.respond(route, response)
+    page.wait_for_timeout(100)
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
+    expect(page.locator("#ase-owner")).to_have_value("")
+    page.locator("#ase-database").select_option("db1")
+    mock.delay_objects = True
+    page.locator("#ase-search-button").click()
+    page.wait_for_timeout(30)
+    assert mock.pending_objects
+    page.locator("#ase-search").fill("changed")
+    route, response = mock.pending_objects.pop()
+    mock.respond(route, response)
+    page.wait_for_timeout(100)
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
+    expect(page.locator("#ase-object-empty")).to_contain_text("검색")
+    expect(page.locator("#ase-catalog-timings")).to_be_hidden()
 
     for width in (390, 768, 1440):
         page.set_viewport_size({"width": width, "height": 844})
@@ -508,7 +611,8 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     # Disconnect also cancels an active import and explains committed batches.
     page.locator("#ase-database").select_option("db1")
     expect(page.locator("#ase-owner")).to_be_enabled()
-    page.locator("#ase-owner").select_option("1")
+    page.locator("#ase-search").fill("")
+    page.locator("#ase-search-button").click()
     select_table(page)
     page.locator("#ase-in").check()
     pick_and_preview(page, mock)
@@ -519,6 +623,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-database")).to_be_disabled()
     expect(page.locator("#ase-start")).to_be_disabled()
     expect(page.locator("#ase-password")).to_have_value("")
+    expect(page.locator("#ase-catalog-timings")).to_be_hidden()
     expect(page.locator("#ase-feedback")).to_contain_text("완료된 배치")
     expect(page.locator("#ase-feedback")).to_contain_text("중복")
     assert len(mock.endpoint_calls("cancel")) == 2
@@ -575,9 +680,14 @@ def validate_profiles(page, url):
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-password")).to_have_value("")
     expect(page.locator("#ase-database")).to_have_value("db1")
+    expect(page.locator("#ase-owner")).to_have_value("")
+    assert not mock.endpoint_calls("owners"), "Profile default DB must not query owners automatically"
+    assert not mock.endpoint_calls("objects"), "Profile default DB must await Search"
+    focus_owner(page)
     expect(page.locator("#ase-owner option[value='1']")).to_have_count(1)
-    assert not mock.endpoint_calls("objects"), "Default DB only starts the existing owners lookup"
     page.locator("#ase-owner").select_option("1")
+    assert not mock.endpoint_calls("objects"), "Choosing an owner must await Search"
+    page.locator("#ase-search-button").click()
     select_table(page)
     pick_and_preview(page, mock)
     page.locator("#ase-profile-reload").click()
@@ -666,6 +776,7 @@ def validate_profiles(page, url):
     page.locator("#ase-password").fill(MASTER_PASSWORD)
     page.locator("#ase-connect").click()
     expect(page.locator("#ase-database")).to_have_value("db1")
+    focus_owner(page)
     page.wait_for_timeout(30)
     assert mock.pending_owners
     expect(page.locator("#ase-browser")).to_have_attribute("aria-busy", "true")
@@ -751,6 +862,33 @@ def validate_profiles(page, url):
     assert not errors, errors
 
 
+def validate_removed_owner(page, url):
+    """A full owner refresh must invalidate a now-missing selected owner's review."""
+    mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-port").fill("5000")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-owner option[value='2']")).to_have_count(1)
+    page.locator("#ase-owner").select_option("2")
+    page.locator("#ase-search-button").click()
+    select_table(page, owner="analytics")
+    pick_and_preview(page, mock)
+    focus_owner(page)
+    expect(page.locator("#ase-owner")).to_have_value("")
+    expect(page.locator("#ase-object-body button")).to_have_count(0)
+    assert_invalidated(page)
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    assert not mock.violations, mock.violations
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000")
@@ -763,8 +901,9 @@ def main():
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         validate(context.new_page(), ASEMock(), args.url, args.screenshot, args.mobile_screenshot)
         validate_profiles(context.new_page(), args.url)
+        validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: manual/profile/master-key contract, fallback, default DB, stale profile/connect responses, job locks, OUT statistics/zero rows/reset/invalid responses, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: explicit Search/Enter with IME guard, optional/lazy owners, server filters, duplicate names, stale search responses, catalog/residual timings, manual/profile/master-key contract, removed owner invalidation, job locks, OUT statistics, native file tokens, safe text, U/V/P modes, previews, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":
