@@ -122,7 +122,7 @@ class ASEMock:
             "events": [{"phase": "export", "message": HOSTILE_SAMPLE}],
             "result": result,
             **({"items": [
-                {"object": obj, "path": self.job_directories.get(job, EXPORT_DIRECTORY) + "\\" + obj["owner"] + "\\" + (obj["database"] + "." + obj["owner"] + "." + obj["name"] + ("_1.txt" if index == 0 else ".txt")),
+                {"object": obj, "path": self.job_directories.get(job, EXPORT_DIRECTORY) + "\\" + (obj["database"] + "." + obj["owner"] + "." + obj["name"] + ("_1.txt" if index == 0 else ".txt")),
                  "state": ("queued" if index >= self.job_concurrencies.get(job, 3) else "running") if state == "running" else ("failed" if self.mixed_batch and index == 1 else "succeeded" if self.mixed_batch and state == "failed" else state),
                  "message": f"SAP BCP failed\nSAP BCP console log:\nServer Message: SELECT permission denied\n{HOSTILE_ERROR}" if self.mixed_batch and index == 1 and state != "running" else f"mock item {state}",
                  "rows": self.completed_rows if state == "succeeded" or self.mixed_batch and state == "failed" and index != 1 else 0,
@@ -1205,7 +1205,7 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
     expect(page.locator("#ase-job-items")).to_contain_text("완료")
     expect(page.locator("#ase-job-items")).to_contain_text(HOSTILE_ERROR)
     expect(page.locator("#ase-job-items")).to_contain_text("Server Message: SELECT permission denied")
-    expect(page.locator("#ase-job-items")).to_contain_text("db1.dbo.customer_rows_1.txt")
+    expect(page.locator("#ase-job-items")).to_contain_text(CHOSEN_DIRECTORY + "\\db1.dbo.customer_rows_1.txt")
     expect(page.locator("#ase-job-items")).to_contain_text("바이트")
     expect(page.locator("#ase-job-items")).to_contain_text("bcp.exe 실행 0.5초")
     expect(page.locator("#ase-job-items script, #ase-job-items img")).to_have_count(0)
@@ -1291,6 +1291,11 @@ def validate_in_mode(page, url):
     page.locator("#ase-start").click()
     expect(page.locator("#ase-cancel")).to_be_enabled()
     expect(page.locator("#ase-in")).to_be_disabled()
+    expect(page.locator("#ase-job-items-scroll")).to_be_visible()
+    expect(page.locator("#ase-job-items tr")).to_have_count(1)
+    expect(page.locator("#ase-job-items")).to_contain_text("db1.dbo.customer_rows")
+    expect(page.locator("#ase-job-items")).to_contain_text(FILE_PATH)
+    expect(page.locator("#ase-job-items")).to_contain_text("실행 중")
     request = mock.endpoint_calls("jobs")[-1]['payload']
     assert set(request) == {'session', 'object', 'file', 'options'}
     assert request['object'] == TABLE and request['options']['direction'] == 'in'
@@ -1298,6 +1303,19 @@ def validate_in_mode(page, url):
     assert request['options']['field_terminator'] == '|'
     page.locator("#ase-cancel").click()
     expect(page.locator("#ase-in")).to_be_enabled()
+    expect(page.locator("#ase-job-items")).to_contain_text("취소됨")
+    expect(page.locator("#ase-job-warning")).to_be_visible()
+    mock.hold_job = False
+    for terminal, label in (("failed", "실패"), ("succeeded", "완료")):
+        mock.terminal_state = terminal
+        page.locator("#ase-start").click()
+        expect(page.locator("#ase-job-status")).to_contain_text(f"mock job {terminal}", timeout=10000)
+        expect(page.locator("#ase-job-items tr")).to_have_count(1)
+        expect(page.locator("#ase-job-items")).to_contain_text(label)
+        expect(page.locator("#ase-job-items")).to_contain_text(f"mock job {terminal}")
+        if terminal == "succeeded":
+            expect(page.locator("#ase-job-items")).to_contain_text("1,234,567행")
+        assert (page.locator("#ase-job-warning").is_visible()) == (terminal == "failed")
     page.locator("#ase-disconnect").click()
     expect(page.locator("#ase-in")).to_be_disabled()
     assert not mock.violations, mock.violations

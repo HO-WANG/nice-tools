@@ -176,11 +176,8 @@ class BatchMixin:
             directory = Path(session.get('export_directory', default_export_directory())).resolve()
             paths = []
             for obj in validated:
-                parent = directory / _component(obj['owner'])
-                if parent.is_symlink() or parent.resolve().parent != directory:
-                    raise ValueError('소유자 OUT 폴더를 사용할 수 없습니다.')
                 filename = '.'.join(_component(obj[key]) for key in ('database', 'owner', 'name')) + '.txt'
-                paths.append(parent / filename)
+                paths.append(directory / filename)
             job = self._new_job(session)
             job.update(concurrency=concurrency, _next_item=0)
             job['items'] = []
@@ -251,15 +248,15 @@ class BatchMixin:
                     return
                 item.update(state='running', phase='starting', message='전송 준비 중', started_at=time.monotonic())
                 target = Path(item['path'])
-                if directory.resolve() != directory or target.parent.is_symlink() or target.parent.resolve().parent != directory:
-                    raise ValueError('소유자 OUT 폴더를 사용할 수 없습니다.')
+                if directory.resolve() != directory or target.parent != directory:
+                    raise ValueError('OUT 폴더를 사용할 수 없습니다.')
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if directory.resolve() != directory or target.parent.is_symlink() or target.parent.resolve().parent != directory:
-                    raise ValueError('소유자 OUT 폴더를 사용할 수 없습니다.')
+                if directory.resolve() != directory or target.parent != directory:
+                    raise ValueError('OUT 폴더를 사용할 수 없습니다.')
                 descriptor, stage = tempfile.mkstemp(prefix='.nice-tools-', suffix='.bcp', dir=target.parent)
                 stage_identity = file_identity(os.fstat(descriptor))
                 os.close(descriptor)
-                reservation = ExportReservation(directory, target.parent, stage, stage_identity)
+                reservation = ExportReservation(directory, stage, stage_identity)
                 item["_reservation"] = reservation
                 payload = {'operation': 'transfer', 'connection': session['connection'], 'object': item['object'],
                            'path': str(target), 'options': dict(options), 'stage_path': stage,

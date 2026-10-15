@@ -401,7 +401,7 @@
     get("ase-append-warning").hidden = direction() !== "in";
     get("ase-path").textContent = direction() === "out" ? state.exportDirectory || "EXE가 있는 폴더" : state.path || "파일을 선택하세요.";
     get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 폴더";
-    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 소유자/DB명.오너명.테이블명.txt로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.";
+    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 출력 폴더에 DB명.오너명.테이블명.txt로 바로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.";
     get("ase-transfer-note").textContent = !state.bcpAvailable ? "DB 객체는 조회할 수 있습니다. 파일 전송을 사용하려면 SAP bcp.exe를 설치하거나 ase-connections.txt의 [sap_client]에 bcp 경로를 지정하세요." : state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
     let readyNote;
     if (active()) readyNote = "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다.";
@@ -680,13 +680,18 @@
       item.textContent = String(event.message ?? "");
       events.append(item);
     }
-    if (Array.isArray(data.items) && data.items.length) {
-      const count = (status) => data.items.filter((entry) => status.includes(entry.state)).length;
-      get("ase-job-status").textContent += ` · 전체 ${data.items.length}개 · 완료 ${count(["succeeded"])} · 실행 ${count(["running"])} · 대기 ${count(["queued"])} · 실패 ${count(["failed"])}`;
+    const entries = Array.isArray(data.items) ? data.items : direction() === "in" && state.object ? [{
+      object: state.object, path: data.result?.path || state.path,
+      state: data.state, phase: data.phase, message: data.message,
+      rows: data.result?.rows ?? data.rows,
+    }] : [];
+    if (entries.length) {
+      const count = (status) => entries.filter((entry) => status.includes(entry.state)).length;
+      get("ase-job-status").textContent += ` · 전체 ${entries.length}개 · 완료 ${count(["succeeded"])} · 실행 ${count(["running"])} · 대기 ${count(["queued"])} · 실패 ${count(["failed"])}`;
     }
     const items = get("ase-job-items");
     items.replaceChildren();
-    if (Array.isArray(data.items)) for (const entry of data.items) {
+    for (const entry of entries) {
       const row = document.createElement("tr");
       const object = entry.object || {};
       cell(row, [object.database, object.owner, object.name].filter(Boolean).join("."));
@@ -714,7 +719,7 @@
       }
       items.append(row);
     }
-    get("ase-job-items-scroll").hidden = !Array.isArray(data.items) || !data.items.length;
+    get("ase-job-items-scroll").hidden = !entries.length;
     if (data.phase === "validating" && !["succeeded", "failed", "cancelled"].includes(data.state)) get("ase-job-status").textContent += " · 자동 검증 중";
     const terminal = ["succeeded", "failed", "cancelled"].includes(data.state);
     const partial = direction() === "in" && ["failed", "cancelled"].includes(data.state);

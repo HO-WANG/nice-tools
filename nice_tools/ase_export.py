@@ -68,16 +68,14 @@ class _Directory:
 
 
 class ExportReservation:
-    def __init__(self, root, owner, stage, stage_identity):
-        self.root, self.owner, self.stage = Path(root), Path(owner), Path(stage)
+    def __init__(self, root, stage, stage_identity):
+        self.root, self.stage = Path(root), Path(stage)
         self.stage_identity = tuple(stage_identity)
-        self.directories = []
+        self.directory = None
         try:
-            self.directories = [_Directory(self.root)]
-            self.directories.append(_Directory(self.owner))
-            self.boundary = {'root': str(self.root), 'owner': str(self.owner),
-                             'root_identity': self.directories[0].identity,
-                             'owner_identity': self.directories[1].identity,
+            self.directory = _Directory(self.root)
+            self.boundary = {'root': str(self.root),
+                             'root_identity': self.directory.identity,
                              'stage_identity': self.stage_identity}
             self.validate()
         except Exception:
@@ -85,18 +83,16 @@ class ExportReservation:
             raise
 
     def validate(self):
-        if (self.root.resolve() != self.root or self.owner.resolve() != self.owner
-                or self.owner.parent != self.root
+        if (self.root.resolve() != self.root or self.stage.parent != self.root
                 or file_identity(self.root.stat()) != self.boundary['root_identity']
-                or file_identity(self.owner.stat()) != self.boundary['owner_identity']
                 or file_identity(self.stage.lstat()) != self.stage_identity):
             raise ValueError('OUT 폴더 또는 임시 파일이 변경되어 결과를 저장하지 않았습니다.')
 
     def cleanup(self):
-        if len(self.directories) == 2:
-            self.directories[1].cleanup(self.stage, self.stage_identity)
+        if self.directory is not None:
+            self.directory.cleanup(self.stage, self.stage_identity)
 
     def close(self):
-        for directory in self.directories:
-            directory.close()
-        self.directories.clear()
+        if self.directory is not None:
+            self.directory.close()
+            self.directory = None

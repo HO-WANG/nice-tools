@@ -939,20 +939,21 @@ def batch_session(manager, directory):
     return token
 
 
-def test_batch_export_creates_owner_files_and_never_overwrites(tmp_path):
+def test_batch_export_saves_directly_in_output_folder_and_never_overwrites(tmp_path):
     manager = manager_for(tmp_path)
     directory = tmp_path / '한글 exports'
-    (directory / 'dbo').mkdir(parents=True)
-    (directory / 'dbo' / 'db.dbo.t.txt').write_bytes(b'original')
+    directory.mkdir(parents=True)
+    (directory / 'db.dbo.t.txt').write_bytes(b'original')
     try:
         token = batch_session(manager, directory)
         job = manager.start_export(token, [batch_object(), batch_object('view', kind='V')], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
         assert [item['state'] for item in result['items']] == ['succeeded', 'succeeded']
-        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'original'
-        assert (directory / 'dbo' / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
-        assert (directory / 'dbo' / 'db.dbo.view.txt').read_bytes() == b'new\n'
+        assert (directory / 'db.dbo.t.txt').read_bytes() == b'original'
+        assert (directory / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
+        assert (directory / 'db.dbo.view.txt').read_bytes() == b'new\n'
+        assert not (directory / 'dbo').exists()
         assert result['items'][0]['statistics']['bytes_written'] == 4
         assert 'secret-pass' not in json.dumps(result)
         assert 'process' not in json.dumps(result)
@@ -973,9 +974,9 @@ def test_batch_publish_retries_external_collision(tmp_path, monkeypatch):
         job = manager.start_export(token, [batch_object()], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'external'
-        assert (directory / 'dbo' / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
-        assert result['items'][0]['path'] == str(directory / 'dbo' / 'db.dbo.t_1.txt')
+        assert (directory / 'db.dbo.t.txt').read_bytes() == b'external'
+        assert (directory / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
+        assert result['items'][0]['path'] == str(directory / 'db.dbo.t_1.txt')
     finally:
         manager.close()
 
@@ -989,8 +990,8 @@ def test_batch_filename_distinguishes_databases_with_same_owner_and_table(tmp_pa
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
         assert {__import__('pathlib').Path(item['path']).name for item in result['items']} == {'db.dbo.t.txt', 'db2.dbo.t.txt'}
-        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'new\n'
-        assert (directory / 'dbo' / 'db2.dbo.t.txt').read_bytes() == b'new\n'
+        assert (directory / 'db.dbo.t.txt').read_bytes() == b'new\n'
+        assert (directory / 'db2.dbo.t.txt').read_bytes() == b'new\n'
     finally:
         manager.close()
 
@@ -1015,7 +1016,7 @@ def test_batch_windows_device_names_are_safe(tmp_path):
         job = manager.start_export(token, [batch_object('CON', owner='NUL')], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert __import__('pathlib').Path(result['items'][0]['path']).relative_to(tmp_path / 'exports').parts == ('_NUL', 'db._NUL._CON.txt')
+        assert __import__('pathlib').Path(result['items'][0]['path']).relative_to(tmp_path / 'exports').parts == ('db._NUL._CON.txt',)
     finally:
         manager.close()
 
@@ -1117,7 +1118,7 @@ def test_batch_global_limit_and_queued_cancellation(tmp_path):
     script.write_text('''import json,sys,time
 from pathlib import Path
 p=json.load(sys.stdin)
-folder=Path(p['stage_path']).parents[2]
+folder=Path(p['stage_path']).parents[1]
 name=p['object']['name']
 (folder / (name+'.started')).touch()
 while not (folder / 'release').exists(): time.sleep(.01)
@@ -1165,8 +1166,8 @@ def test_batch_failed_item_does_not_stop_other_exports(tmp_path):
         result = finished(manager, token, job)
         assert result['state'] == 'failed'
         assert [item['state'] for item in result['items']] == ['failed', 'succeeded']
-        assert (tmp_path / 'exports' / 'dbo' / 'db.dbo.good.txt').exists()
-        assert not (tmp_path / 'exports' / 'dbo' / 'db.dbo.bad.txt').exists()
+        assert (tmp_path / 'exports' / 'db.dbo.good.txt').exists()
+        assert not (tmp_path / 'exports' / 'db.dbo.bad.txt').exists()
         assert 'secret-pass' not in json.dumps(result)
     finally:
         manager.close()
@@ -1202,7 +1203,7 @@ def test_batch_cancellation_kills_children_and_never_starts_queued(tmp_path, act
     script.write_text("\n".join([
         'import json,subprocess,sys,time', 'from pathlib import Path', 'p=json.load(sys.stdin)',
         "child=subprocess.Popen([sys.executable, '-c', " + repr(child) + '])',
-        "folder=Path(p['stage_path']).parents[2]", "name=p['object']['name']",
+        "folder=Path(p['stage_path']).parents[1]", "name=p['object']['name']",
         # Publish readiness only after closing the complete PID file.
         "pid_file=folder / (name+'.pid.tmp')",
         "pid_file.write_text(str(child.pid))",
@@ -1245,7 +1246,7 @@ def test_batch_cancellation_kills_children_and_never_starts_queued(tmp_path, act
                 os.kill(pid, signal.SIGTERM)
 
 
-def test_batch_rejects_symlink_owner_directory(tmp_path):
+def test_flat_batch_ignores_existing_owner_symlink(tmp_path):
     directory = tmp_path / 'exports'
     directory.mkdir()
     external = tmp_path / 'elsewhere'
@@ -1257,8 +1258,10 @@ def test_batch_rejects_symlink_owner_directory(tmp_path):
     manager = manager_for(tmp_path)
     try:
         token = batch_session(manager, directory)
-        with pytest.raises(ValueError):
-            manager.start_export(token, [batch_object()], {})
+        job = manager.start_export(token, [batch_object()], {})['job']
+        assert finished(manager, token, job)['state'] == 'succeeded'
+        assert (directory / 'db.dbo.t.txt').read_bytes() == b'new\n'
+        assert (directory / 'dbo').is_symlink()
         assert not list(external.iterdir())
     finally:
         manager.close()
@@ -1294,7 +1297,7 @@ def test_unexpected_batch_error_settles_job_and_removes_stage(tmp_path, monkeypa
         manager.close()
 
 
-def test_batch_rechecks_owner_containment_after_queue(tmp_path, monkeypatch):
+def test_batch_rechecks_output_folder_containment_after_queue(tmp_path, monkeypatch):
     from pathlib import Path
     manager = manager_for(tmp_path)
     directory = tmp_path / 'exports'
@@ -1307,15 +1310,15 @@ def test_batch_rechecks_owner_containment_after_queue(tmp_path, monkeypatch):
     try:
         token = batch_session(manager, directory)
         job = manager.start_export(token, [batch_object()], {})['job']
-        (directory / 'dbo').mkdir()
         # Model a Windows junction: resolve follows it but is_symlink is False.
         resolved = Path.resolve
-        monkeypatch.setattr(Path, 'resolve', lambda path, *args, **kwargs: external if path == directory / 'dbo' else resolved(path, *args, **kwargs))
+        monkeypatch.setattr(Path, 'resolve', lambda path, *args, **kwargs: external if path == directory else resolved(path, *args, **kwargs))
         for function, args in scheduled:
             function(*args)
         result = manager.job(token, job)
         assert result['state'] == 'failed'
-        assert not list((directory / 'dbo').iterdir())
+        assert not list(directory.iterdir())
+        assert not list(external.iterdir())
     finally:
         manager.close()
 
@@ -1328,7 +1331,7 @@ def test_batch_windows_console_aliases_are_safe(tmp_path, name):
         job = manager.start_export(token, [batch_object(name, owner=name)], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert __import__('pathlib').Path(result['items'][0]['path']).parts[-2:] == ('_' + name, 'db._' + name + '._' + name + '.txt')
+        assert __import__('pathlib').Path(result['items'][0]['path']).parts[-1:] == ('db._' + name + '._' + name + '.txt',)
     finally:
         manager.close()
 
@@ -1369,7 +1372,7 @@ def test_batch_respects_selected_concurrency_and_schedules_remaining(tmp_path, c
     script.write_text('''import json,sys,time
 from pathlib import Path
 p=json.load(sys.stdin)
-folder=Path(p['stage_path']).parents[2]
+folder=Path(p['stage_path']).parents[1]
 name=p['object']['name']
 (folder / (name+'.started')).touch()
 while not (folder / (name+'.release')).exists(): time.sleep(.01)
@@ -1427,7 +1430,7 @@ def test_lower_batch_concurrency_leaves_global_slots_available_and_cancels_unsub
     script.write_text('''import json,sys,time
 from pathlib import Path
 p=json.load(sys.stdin)
-folder=Path(p['stage_path']).parents[2]
+folder=Path(p['stage_path']).parents[1]
 (folder / (p['object']['name']+'.started')).touch()
 while not (folder / 'release').exists(): time.sleep(.01)
 Path(p['stage_path']).write_bytes(b'done')
@@ -1464,7 +1467,7 @@ print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
 def test_active_batch_directory_replacement_does_not_publish_or_unlink_unrelated_stage(tmp_path, replace_root):
     from pathlib import Path
     manager = manager_for(tmp_path, transfer='stream')
-    directory = tmp_path / 'exports'
+    directory = tmp_path / 'parent' / 'exports'
     moved = tmp_path / 'moved'
     try:
         token = batch_session(manager, directory)
@@ -1473,17 +1476,15 @@ def test_active_batch_directory_replacement_does_not_publish_or_unlink_unrelated
         while not (tmp_path / 'copy-started').exists() and time.monotonic() < deadline:
             time.sleep(.01)
         assert (tmp_path / 'copy-started').exists()
-        stage = next((directory / 'dbo').glob('.nice-tools-*.bcp'))
+        stage = next(directory.glob('.nice-tools-*.bcp'))
         if replace_root:
-            directory.rename(moved)
-            replacement_owner = directory / 'dbo'
-            moved_owner = moved / 'dbo'
+            directory.parent.rename(moved)
+            moved_directory = moved / 'exports'
         else:
-            (directory / 'dbo').rename(moved)
-            replacement_owner = directory / 'dbo'
-            moved_owner = moved
-        replacement_owner.mkdir(parents=True)
-        unrelated = replacement_owner / stage.name
+            directory.rename(moved)
+            moved_directory = moved
+        directory.mkdir(parents=True)
+        unrelated = directory / stage.name
         unrelated.write_bytes(b'user data')
         (tmp_path / 'copy-release').touch()
         result = finished(manager, token, handle)
@@ -1491,7 +1492,7 @@ def test_active_batch_directory_replacement_does_not_publish_or_unlink_unrelated
         assert unrelated.read_bytes() == b'user data'
         assert not list(directory.rglob('*.txt'))
         assert not list(moved.rglob('*.txt'))
-        assert not list(moved_owner.glob('.nice-tools-*.bcp'))
+        assert not list(moved_directory.glob('.nice-tools-*.bcp'))
     finally:
         (tmp_path / 'copy-release').touch()
         manager.close()
@@ -1501,15 +1502,12 @@ def test_active_batch_directory_replacement_does_not_publish_or_unlink_unrelated
 def test_windows_export_reservation_blocks_directory_replacement_until_closed(tmp_path):
     from nice_tools.ase_export import ExportReservation, file_identity
     root = tmp_path / 'exports'
-    owner = root / 'dbo'
-    owner.mkdir(parents=True)
-    stage = owner / '.nice-tools-stage.bcp'
+    root.mkdir(parents=True)
+    stage = root / '.nice-tools-stage.bcp'
     stage.write_bytes(b'')
-    reservation = ExportReservation(root, owner, stage, file_identity(stage.stat()))
+    reservation = ExportReservation(root, stage, file_identity(stage.stat()))
     try:
         stage.write_bytes(b'BCP can write')
-        with pytest.raises(OSError):
-            owner.rename(root / 'moved-owner')
         with pytest.raises(OSError):
             root.rename(tmp_path / 'moved-root')
         reservation.validate()
@@ -1517,12 +1515,11 @@ def test_windows_export_reservation_blocks_directory_replacement_until_closed(tm
         assert not stage.exists()
     finally:
         reservation.close()
-    owner.rename(root / 'moved-owner')
     root.rename(tmp_path / 'moved-root')
 
 
 @pytest.mark.skipif(sys.platform == 'win32', reason='Windows directory reservations prevent rename')
-def test_active_owner_symlink_redirect_cannot_publish(tmp_path):
+def test_active_output_folder_symlink_redirect_cannot_publish(tmp_path):
     manager = manager_for(tmp_path, transfer='stream')
     directory = tmp_path / 'exports'
     moved = tmp_path / 'moved-owner'
@@ -1533,8 +1530,8 @@ def test_active_owner_symlink_redirect_cannot_publish(tmp_path):
         while not (tmp_path / 'copy-started').exists() and time.monotonic() < deadline:
             time.sleep(.01)
         assert (tmp_path / 'copy-started').exists()
-        (directory / 'dbo').rename(moved)
-        (directory / 'dbo').symlink_to(moved, target_is_directory=True)
+        directory.rename(moved)
+        directory.symlink_to(moved, target_is_directory=True)
         (tmp_path / 'copy-release').touch()
         assert finished(manager, token, handle)['state'] == 'failed'
         assert not list(moved.glob('*.txt'))

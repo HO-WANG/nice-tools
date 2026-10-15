@@ -178,7 +178,7 @@
           <div id="ase-identity-options" class="ase-instructions" hidden><label class="inline-checkbox"><input id="ase-keep-identity" type="checkbox" disabled>파일의 IDENTITY 값 유지</label><p>기본값은 새 ID를 생성합니다. IN 파일은 IDENTITY 자리도 포함해 위 컬럼 순서대로 준비하세요.</p></div>
           <p id="ase-append-warning" class="ase-warning" hidden>IN은 기존 테이블에 행을 추가합니다. 실패하거나 취소해도 완료된 배치는 남습니다. 같은 파일을 다시 실행하면 중복 행이 생길 수 있습니다.</p>
           <div class="ase-file-row"><div><span id="ase-file-label">저장할 폴더</span><p id="ase-path">EXE가 있는 폴더</p></div><div id="ase-concurrency-field" class="field ase-concurrency-field"><label for="ase-concurrency">동시 작업 수</label><select id="ase-concurrency" disabled><option value="1">1개</option><option value="2">2개</option><option value="3" selected>3개</option><option value="4">4개</option><option value="5">5개</option></select></div><button id="ase-pick-directory" class="secondary-button" type="button" disabled>폴더 선택</button><button id="ase-pick-file" class="secondary-button" type="button" disabled hidden>파일 선택</button></div>
-          <p id="ase-file-note" class="panel-footnote">기본값은 EXE가 있는 폴더입니다. 소유자/DB명.오너명.테이블명.txt로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.</p>
+          <p id="ase-file-note" class="panel-footnote">기본값은 EXE가 있는 폴더입니다. 출력 폴더에 DB명.오너명.테이블명.txt로 바로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.</p>
         </section>
         <div class="action-row"><p id="ase-ready-note">내보낼 객체를 체크하고 시작하세요.</p><button id="ase-start" class="primary-button" type="button" disabled>BCP OUT 시작</button></div>
         <section id="ase-job" class="panel" aria-labelledby="ase-job-title" aria-busy="false" hidden>
@@ -194,7 +194,7 @@
             <p id="ase-bcp-statistics" class="ase-note" hidden></p>
             <p id="ase-out-statistics-note" class="ase-note">작업 시작부터 파일 저장 완료까지 측정합니다. 평균 처리 속도는 내보낸 행 수 ÷ 총 소요 시간입니다.</p>
           </div>
-          <div id="ase-job-items-scroll" class="ase-table-scroll" hidden><table class="ase-table ase-job-items"><caption class="visually-hidden">객체별 내보내기 실행 상태</caption><thead><tr><th scope="col">객체</th><th scope="col">상태</th><th scope="col">저장 경로</th><th scope="col">행 수</th><th scope="col">결과 / 통계</th></tr></thead><tbody id="ase-job-items"></tbody></table></div>
+          <div id="ase-job-items-scroll" class="ase-table-scroll" hidden><table class="ase-table ase-job-items"><caption class="visually-hidden">객체별 BCP 실행 상태</caption><thead><tr><th scope="col">객체</th><th scope="col">상태</th><th scope="col">파일 경로</th><th scope="col">행 수</th><th scope="col">결과 / 통계</th></tr></thead><tbody id="ase-job-items"></tbody></table></div>
           <p id="ase-job-warning" class="ase-warning" hidden></p>
           <ol id="ase-job-events" class="ase-job-events" aria-label="실행 내역"></ol>
         </section>
