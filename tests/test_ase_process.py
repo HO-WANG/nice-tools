@@ -75,7 +75,8 @@ def test_output_callbacks_and_returned_text_redact_split_password(tmp_path):
 
 
 @pytest.mark.parametrize('failed', [False, True])
-def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_path, monkeypatch, capsys, failed):
+@pytest.mark.parametrize('direction', ['in', 'out'])
+def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_path, monkeypatch, capsys, failed, direction):
     """Exercise prompt -> CLI -> JSON records -> parent console without ASE."""
     import io
     from nice_tools import ase_cli, ase_jobs, ase_worker
@@ -86,7 +87,8 @@ def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_p
     argv = client(tmp_path, "pw = password()\nprint('Starting copy...', flush=True)\nprint(pw[:7], end='', flush=True)\ntime.sleep(.05)\nprint(pw[7:], flush=True)\n" + ending)
     monkeypatch.setattr(ase_cli, "_run_client", lambda _argv, password, **kwargs: run_client(argv, password, **kwargs))
     obj = {"database": "db", "owner": "dbo", "name": "t"}
-    options = {"direction": "out", "encoding": "utf-8", "field_hex": "09", "row_hex": "0a"}
+    options = {"direction": direction, "encoding": "utf-8", "field_hex": "09", "row_hex": "0a", "batch_size": 1000, "keep_identity": False}
+    (tmp_path / 'data.bcp').write_bytes(b'1\n')
     def execute(payload, emit):
         return ase_cli._copy(payload["connection"], obj, [], str(tmp_path / "data.bcp"), options,
                              {"bcp_path": "unused-fixture-bcp.exe"}, emit)
@@ -111,6 +113,9 @@ def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_p
     assert "Starting copy..." in output
     assert ('Server Message: SELECT permission denied' if failed else '3 rows copied.') in output
     assert '[BCP command' in output and 'unused-fixture-bcp.exe' in output
+    assert f'"{direction}"' in output
+    if direction == 'in':
+        assert '"-b" "1000"' in output
     assert secret not in output and "native-" not in output
 
 

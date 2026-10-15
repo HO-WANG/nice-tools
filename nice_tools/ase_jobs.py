@@ -414,11 +414,29 @@ class AseManager(BatchMixin):
         result = None
         error = None
         console_output = _RedactedOutput(payload["connection"]["password"], _write_bcp_output)
+        context = '.'.join(payload['object'][key] for key in ('database', 'owner', 'name'))
+        label = f"BCP {payload['options']['direction'].upper()} {context}"
+        pending_status = []
+
+        def console_status(message):
+            # Never interrupt a SAP chunk whose secret suffix is still pending.
+            if console_output.pending:
+                pending_status.append(message)
+                return
+            _write_bcp_output(self._redact(f"\n[{label}] {message}\n", payload['connection']))
+
+        def flush_console():
+            console_output.feed('', final=True)
+            for message in pending_status:
+                console_status(message)
+            pending_status.clear()
+
         try:
             with self.lock:
                 if job["cancelled"] or self.closed or token not in self.sessions:
                     job["cancelled"] = True
                     return
+            console_status('starting')
             process = self._spawn(payload, token)
             with self.lock:
                 job["process"] = process
@@ -438,6 +456,11 @@ class AseManager(BatchMixin):
                         if isinstance(message, str):
                             console_output.feed(message)
                         continue
+                    status_message = event.get('message')
+                    if isinstance(status_message, str) and status_message:
+                        console_status(status_message)
+                    elif type(event.get('rows')) is int and type(event.get('bytes')) is int:
+                        console_status(f"validation: {event['rows']} rows, {event['bytes']} bytes")
                     with self.lock:
                         message = self._redact(event.get("message", "처리 중"), payload["connection"])
                         phase = str(event.get("phase", "transfer"))[:64]
@@ -446,7 +469,7 @@ class AseManager(BatchMixin):
                         job["events"] = job["events"][-50:]
                         if isinstance(event.get("rows"), int):
                             job["rows"] = event["rows"]
-            console_output.feed("", final=True)
+            flush_console()
             process.wait()
             if process.returncode != 0 or error or not isinstance(result, dict):
                 raise ValueError(error or "전송 프로세스가 정상적으로 완료되지 않았습니다.")
@@ -493,7 +516,9 @@ class AseManager(BatchMixin):
                             public_result["statistics"].update({"bcp_seconds": bcp_seconds, "bcp_rows_per_second": bcp_rate})
                     job.update({"state": "succeeded", "phase": "done", "message": "전송 완료", "rows": result.get("rows"),
                                 "result": public_result})
+                    console_status(f"completed: {result.get('rows')} rows")
         except Exception as exc:
+            flush_console()
             with self.lock:
                 if not job["cancelled"]:
                     detail = self._redact(str(exc), payload["connection"], limit=20000) if isinstance(exc, ValueError) else "전송을 완료하지 못했습니다. 대상과 파일 상태를 확인하세요."
@@ -506,7 +531,7 @@ class AseManager(BatchMixin):
                     if "started_at" in job:
                         job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
         finally:
-            console_output.feed("", final=True)
+            flush_console()
             if process:
                 try:
                     self._release_worker(process)

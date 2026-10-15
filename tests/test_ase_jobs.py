@@ -1072,6 +1072,44 @@ def test_direct_import_uses_one_file_background_validation(tmp_path, monkeypatch
         manager.close()
 
 
+@pytest.mark.parametrize('failure', [False, True])
+def test_direct_import_console_shows_validation_command_sap_output_and_outcome(tmp_path, capsys, failure):
+    manager = manager_for(tmp_path, transfer='stream', bcp_chunks=['SAP row log secret-', 'pass\n'])
+    script = tmp_path / 'worker.py'
+    text = script.read_text().replace("elif op=='transfer':", "elif op=='transfer':\n print(json.dumps({'event':'progress','phase':'validating','message':'입력 파일과 스키마 확인 중'}),flush=True)\n print(json.dumps({'event':'progress','rows':1,'bytes':2}),flush=True)\n print(json.dumps({'event':'progress','type':'bcp_command','message':'bcp.exe db.dbo.t in -c -b 1000\\n'}),flush=True)")
+    text = text.replace("'type':'bcp_output','message':chunk}),flush=True)", "'type':'bcp_output','message':chunk}),flush=True)\n  print(json.dumps({'event':'progress','phase':'validating','message':'검사 중 secret-pass'}),flush=True)")
+    if failure:
+        text = text.replace("print(json.dumps({'event':'result','result':r}),flush=True)", "if op=='transfer': print(json.dumps({'event':'error','detail':'Server Message: INSERT permission denied secret-pass'}),flush=True); sys.exit(1)\nprint(json.dumps({'event':'result','result':r}),flush=True)")
+    script.write_text(text, encoding='utf-8')
+    captured = ''
+    try:
+        source = tmp_path / 'input.txt'
+        source.write_bytes(b'1\n')
+        token = batch_session(manager, tmp_path)
+        selected = manager.pick_file(token, 'in', str(source))
+        handle = manager.start_import(token, batch_object(), selected['file'], {})['job']
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'copy-started').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        captured += capsys.readouterr().out
+        assert manager.job(token, handle)['state'] == 'running'
+        assert '[BCP IN db.dbo.t] starting' in captured
+        assert '입력 파일과 스키마 확인 중' in captured
+        assert 'validation: 1 rows, 2 bytes' in captured
+        assert 'bcp.exe db.dbo.t in -c -b 1000' in captured
+        assert 'SAP row log' in captured
+        (tmp_path / 'copy-release').touch()
+        result = finished(manager, token, handle)
+        captured += capsys.readouterr().out
+        assert result['state'] == ('failed' if failure else 'succeeded')
+        assert ('Server Message: INSERT permission denied' if failure else '[BCP IN db.dbo.t] completed: 1 rows') in captured
+        assert 'secret-pass' not in captured and 'secret-' not in captured
+        assert not any(event.get('message', '').startswith('bcp.exe') for event in result['events'])
+    finally:
+        (tmp_path / 'copy-release').touch()
+        manager.close()
+
+
 def test_batch_global_limit_and_queued_cancellation(tmp_path):
     from pathlib import Path
     manager = manager_for(tmp_path)
