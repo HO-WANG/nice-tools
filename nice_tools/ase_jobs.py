@@ -20,6 +20,28 @@ import threading
 import time
 
 
+_CONSOLE_LOCK = threading.Lock()
+
+
+def _write_bcp_output(text):
+    """Flush sanitized BCP text to the launcher console without affecting copy."""
+    with _CONSOLE_LOCK:
+        stream = sys.stdout
+        if stream is None:
+            return
+        try:
+            try:
+                stream.write(text)
+            except UnicodeEncodeError:
+                encoding = getattr(stream, "encoding", None) or "utf-8"
+                stream.write(text.encode(encoding, errors="backslashreplace").decode(encoding))
+            stream.flush()
+        except (OSError, ValueError):
+            # A closed/redirected console must not discard a completed OUT or
+            # interrupt an IN that may already have committed batches.
+            pass
+
+
 def connection_data(value):
     if not isinstance(value, dict):
         raise ValueError("접속 정보를 입력하세요.")
@@ -384,9 +406,12 @@ class AseManager:
         return {"job": job_token}
 
     def _run_job(self, token, session, job, payload):
+        from .ase_process import _RedactedOutput
+
         process = None
         result = None
         error = None
+        console_output = _RedactedOutput(payload["connection"]["password"], _write_bcp_output)
         try:
             process = self._spawn(payload, token)
             with self.lock:
@@ -402,6 +427,11 @@ class AseManager:
                 elif event.get("event") == "error":
                     error = self._redact(event.get("detail", "전송 실패"), payload["connection"])
                 elif event.get("event") == "progress":
+                    if event.get("type") == "bcp_output":
+                        message = event.get("message")
+                        if isinstance(message, str):
+                            console_output.feed(message)
+                        continue
                     with self.lock:
                         message = self._redact(event.get("message", "처리 중"), payload["connection"])
                         phase = str(event.get("phase", "transfer"))[:64]
@@ -410,6 +440,7 @@ class AseManager:
                         job["events"] = job["events"][-50:]
                         if isinstance(event.get("rows"), int):
                             job["rows"] = event["rows"]
+            console_output.feed("", final=True)
             process.wait()
             if process.returncode != 0 or error or not isinstance(result, dict):
                 raise ValueError(error or "전송 프로세스가 정상적으로 완료되지 않았습니다.")
@@ -459,6 +490,7 @@ class AseManager:
                     if "started_at" in job:
                         job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
         finally:
+            console_output.feed("", final=True)
             if process:
                 self._release_worker(process)
             stage = payload.get("stage_path")

@@ -223,8 +223,14 @@ def _copy(connection, obj, columns, path, options, clients, emit=None, register=
             argv.extend(["-T", "2147483647"])
         if emit:
             emit({"type": "status", "phase": "copying"})
+
+        def client_output(text):
+            # run_client removes terminal escapes and redacts credentials across
+            # reads before invoking this callback; never forward its raw parser.
+            if emit:
+                emit({"type": "bcp_output", "message": text})
         result = _run_client(argv, connection["password"], input_text="", timeout=None,
-                             _parse_output=output.feed, register=register)
+                             on_output=client_output, _parse_output=output.feed, register=register)
         # The trusted parser sees terminal text before credential redaction.
         # A password such as "rows" or "Error" must not alter row counts or hide
         # failures. It emits only numeric progress and retains no public text.

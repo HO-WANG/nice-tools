@@ -42,7 +42,8 @@ class FakeClients:
         assert Path(argv[0]).name.lower() == "bcp.exe", "Metadata must not invoke isql.exe"
         if on_output:
             for chunk in self.progress:
-                on_output(chunk)
+                on_output(chunk.replace(password, "[hidden]") if password else chunk)
+            on_output(self.copy_output.replace(password, "[hidden]") if password else self.copy_output)
         if _parse_output:
             for chunk in self.progress:
                 _parse_output(chunk)
@@ -174,6 +175,26 @@ def test_zero_row_out_is_a_valid_completed_export(clients, tmp_path):
     fake.copy_output = "0 rows copied.\n"
     assert module.run_operation(payload("transfer", path=str(tmp_path / "empty.bcp"), columns=COLUMNS,
                                           options={"direction": "out"}))["rows"] == 0
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_bcp_messages_stream_through_the_worker_callback_even_on_failure(clients, tmp_path, failed):
+    module, fake = clients
+    fake.progress = ["Starting copy...\n", "1000 rows total sent.\n"]
+    if failed:
+        fake.copy_output = "CT-LIBRARY error: private-password login rejected\n"
+        fake.copy_returncode = 1
+    events = []
+    request = payload("transfer", path=str(tmp_path / "data.bcp"), columns=COLUMNS, options={"direction": "out"})
+    if failed:
+        with pytest.raises(ValueError):
+            module.run_operation(request, events.append)
+    else:
+        assert module.run_operation(request, events.append)["rows"] == 3
+    messages = [event["message"] for event in events if event.get("type") == "bcp_output"]
+    expected = "".join(fake.progress) + fake.copy_output.replace(CONNECTION["password"], "[hidden]")
+    assert "".join(messages) == expected
+    assert CONNECTION["password"] not in "".join(messages)
 
 
 def test_error_in_stream_is_fatal_even_if_returned_output_tail_reports_success(clients, tmp_path):

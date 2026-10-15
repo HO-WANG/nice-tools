@@ -19,7 +19,7 @@ def sap_client(monkeypatch):
     return module
 
 
-def manager_for(tmp_path, transfer="success", rows=1, contents=b"new\n", catalog_timings=None, transfer_metrics=None):
+def manager_for(tmp_path, transfer="success", rows=1, contents=b"new\n", catalog_timings=None, transfer_metrics=None, bcp_chunks=None):
     from nice_tools.ase_jobs import AseManager
 
     script = tmp_path / "worker.py"
@@ -40,16 +40,19 @@ elif op=='preview':
 elif op=='transfer':
  if 'stage_path' in p:
   open(p['stage_path'],'wb').write(OUTPUT_BYTES)
+ for chunk in BCP_CHUNKS:
+  print(json.dumps({'event':'progress','type':'bcp_output','message':chunk}),flush=True)
  MODE
  r={'rows':ROW_COUNT, **TRANSFER_METRICS}
 else: r={}
 if op in ('databases','owners','objects','columns') and catalog_timings is not None:
  r['timings']=catalog_timings
 print(json.dumps({'event':'result','result':r}),flush=True)
-'''.replace("OUTPUT_BYTES", repr(contents)).replace("ROW_COUNT", repr(rows)).replace("TRANSFER_METRICS", repr(transfer_metrics or {})).replace("CATALOG_TIMINGS", repr(catalog_timings)).replace(" MODE", {
+'''.replace("OUTPUT_BYTES", repr(contents)).replace("BCP_CHUNKS", repr(bcp_chunks or [])).replace("ROW_COUNT", repr(rows)).replace("TRANSFER_METRICS", repr(transfer_metrics or {})).replace("CATALOG_TIMINGS", repr(catalog_timings)).replace(" MODE", {
         "success": " pass",
         "fail": " print(json.dumps({'event':'error','detail':p['connection']['password']+' failed'}),flush=True); sys.exit(1)",
         "wait": " print(json.dumps({'event':'progress','phase':'transfer','message':'running'}),flush=True); time.sleep(60)",
+        "stream": " from pathlib import Path\n Path(__file__).with_name('copy-started').touch()\n deadline=time.monotonic()+5\n while not Path(__file__).with_name('copy-release').exists() and time.monotonic()<deadline: time.sleep(.01)",
     }[transfer]), encoding="utf-8")
     def run_operation(payload, emit=None, register=None):
         operation = payload["operation"]
@@ -118,6 +121,73 @@ def test_review_cannot_be_replayed(tmp_path):
         assert finished(manager, session, job)["state"] == "succeeded"
         with pytest.raises(ValueError):
             manager.start(session, review)
+    finally:
+        manager.close()
+
+
+def test_bcp_output_reaches_console_before_exit_without_truncation_or_ui_events(tmp_path, capsys):
+    chunks = ["Starting copy...\nsecret-", "pass\n", "x" * 5000 + "\n", "1 rows copied.\n"]
+    manager = manager_for(tmp_path, transfer="stream", bcp_chunks=chunks)
+    captured = ""
+    try:
+        session, review = selection(manager, tmp_path / "out.txt")
+        job = manager.start(session, review)["job"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            captured += capsys.readouterr().out
+            if "Starting copy...\n" in captured and (tmp_path / "copy-started").exists():
+                break
+            time.sleep(.01)
+        assert "Starting copy...\n" in captured, "BCP output must be visible before the worker exits"
+        assert manager.job(session, job)["state"] == "running"
+        (tmp_path / "copy-release").touch()
+        result = finished(manager, session, job)
+        captured += capsys.readouterr().out
+        assert result["state"] == "succeeded"
+        assert "x" * 5000 in captured
+        assert "1 rows copied.\n" in captured
+        assert "secret-pass" not in captured
+        assert "secret-" not in captured and "pass\n" not in captured
+        assert not result["events"], "Console chunks must not become browser progress events"
+    finally:
+        (tmp_path / "copy-release").touch()
+        manager.close()
+
+
+@pytest.mark.parametrize("failure", ["closed", "missing", "encoding"])
+def test_unavailable_or_restricted_console_does_not_fail_bcp(tmp_path, monkeypatch, failure):
+    from nice_tools import ase_jobs
+    class Console:
+        encoding = "ascii"
+        def write(self, text):
+            if failure == "closed":
+                raise OSError("console closed")
+            text.encode(self.encoding)
+        def flush(self):
+            pass
+    manager = manager_for(tmp_path, bcp_chunks=["BCP 한글 message\n1 rows copied.\n"])
+    monkeypatch.setattr(ase_jobs, "sys", SimpleNamespace(stdout=None if failure == "missing" else Console()))
+    try:
+        session, review = selection(manager, tmp_path / "out.txt")
+        job = manager.start(session, review)["job"]
+        assert finished(manager, session, job)["state"] == "succeeded"
+    finally:
+        manager.close()
+
+
+def test_failed_bcp_still_prints_its_diagnostic_without_publishing_out(tmp_path, capsys):
+    manager = manager_for(tmp_path, transfer="fail", bcp_chunks=["CT-LIBRARY error: secret-", "pass login rejected\n"])
+    destination = tmp_path / "out.txt"
+    destination.write_bytes(b"original\n")
+    try:
+        session, review = selection(manager, destination)
+        job = manager.start(session, review)["job"]
+        result = finished(manager, session, job)
+        output = capsys.readouterr().out
+        assert "CT-LIBRARY error:" in output and "login rejected\n" in output
+        assert "secret-pass" not in output and "secret-" not in output
+        assert result["state"] == "failed" and destination.read_bytes() == b"original\n"
+        assert not result["events"]
     finally:
         manager.close()
 
