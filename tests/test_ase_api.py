@@ -27,7 +27,7 @@ def test_jobs_start_directly_without_review_token(monkeypatch, direction):
     assert calls == [(direction, expected)]
 
 
-@pytest.mark.parametrize("concurrency", [1, 2, 3])
+@pytest.mark.parametrize("concurrency", [1, 2, 3, 4, 5])
 def test_out_forwards_selected_concurrency(monkeypatch, concurrency):
     from nice_tools import ase_api
     calls = []
@@ -37,7 +37,7 @@ def test_out_forwards_selected_concurrency(monkeypatch, concurrency):
     assert response.status_code == 200 and calls == [("fixture", [], {"direction": "out"}, concurrency)]
 
 
-@pytest.mark.parametrize("concurrency", [True, False, 0, 4, -1, 1.5, "2", None, {}])
+@pytest.mark.parametrize("concurrency", [True, False, 0, 6, -1, 1.5, "2", None, {}])
 def test_out_rejects_invalid_concurrency_before_start(monkeypatch, concurrency):
     from nice_tools import ase_api
     calls = []

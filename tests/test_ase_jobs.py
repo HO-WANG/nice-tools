@@ -1089,15 +1089,15 @@ print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
     manager.worker_command = [sys.executable, str(script)]
     try:
         tokens = [batch_session(manager, tmp_path / 'exports') for _ in range(2)]
-        jobs = [manager.start_export(tokens[0], [batch_object('a'+str(i)) for i in range(5)], {})['job'],
-                manager.start_export(tokens[1], [batch_object('b'+str(i)) for i in range(4)], {})['job']]
+        jobs = [manager.start_export(tokens[0], [batch_object('a'+str(i)) for i in range(5)], {}, concurrency=5)['job'],
+                manager.start_export(tokens[1], [batch_object('b'+str(i)) for i in range(4)], {}, concurrency=5)['job']]
         deadline = time.monotonic() + 5
-        while len(list(tmp_path.glob('*.started'))) < 3 and time.monotonic() < deadline:
+        while len(list(tmp_path.glob('*.started'))) < 5 and time.monotonic() < deadline:
             time.sleep(.01)
-        assert len(list(tmp_path.glob('*.started'))) == 3
+        assert len(list(tmp_path.glob('*.started'))) == 5
         time.sleep(.15)
-        assert len(list(tmp_path.glob('*.started'))) == 3
-        assert len(manager.processes) == 3
+        assert len(list(tmp_path.glob('*.started'))) == 5
+        assert len(manager.processes) == 5
         states = [item['state'] for item in manager.job(tokens[1], jobs[1])['items']]
         assert states == ['queued'] * 4
         with pytest.raises(ValueError):
@@ -1109,7 +1109,7 @@ print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
         assert result['state'] == 'cancelled'
         assert all(item['state'] == 'cancelled' for item in result['items'])
         assert not list((tmp_path / 'exports').rglob('*.txt'))
-        assert len(list(tmp_path.glob('*.started'))) == 3
+        assert len(list(tmp_path.glob('*.started'))) == 5
     finally:
         (tmp_path / 'release').touch()
         manager.close()
@@ -1324,7 +1324,7 @@ def test_successful_publication_survives_stage_unlink_error(tmp_path, monkeypatc
     assert target.read_bytes() == b'complete'
 
 
-@pytest.mark.parametrize('concurrency', [1, 2])
+@pytest.mark.parametrize('concurrency', [1, 2, 3, 4, 5])
 def test_batch_respects_selected_concurrency_and_schedules_remaining(tmp_path, concurrency):
     manager = manager_for(tmp_path)
     script = tmp_path / 'selected-concurrency-worker.py'
@@ -1369,7 +1369,7 @@ print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
         manager.close()
 
 
-@pytest.mark.parametrize('concurrency', [None, True, False, 0, -1, 4, 1.0, '2', [], {}])
+@pytest.mark.parametrize('concurrency', [None, True, False, 0, -1, 6, 1.0, '2', [], {}])
 def test_batch_rejects_invalid_concurrency_before_job_or_files(tmp_path, concurrency):
     manager = manager_for(tmp_path)
     directory = tmp_path / 'exports'
@@ -1400,22 +1400,22 @@ print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
         token1 = batch_session(manager, tmp_path / 'exports')
         token2 = batch_session(manager, tmp_path / 'exports')
         job1 = manager.start_export(token1, [batch_object('a'+str(i)) for i in range(8)], {}, concurrency=1)['job']
-        job2 = manager.start_export(token2, [batch_object('b'+str(i)) for i in range(8)], {}, concurrency=2)['job']
+        job2 = manager.start_export(token2, [batch_object('b'+str(i)) for i in range(8)], {}, concurrency=4)['job']
         deadline = time.monotonic() + 5
-        while len(list(tmp_path.glob('*.started'))) < 3 and time.monotonic() < deadline:
+        while len(list(tmp_path.glob('*.started'))) < 5 and time.monotonic() < deadline:
             time.sleep(.01)
         assert len(list(tmp_path.glob('a*.started'))) == 1
-        assert len(list(tmp_path.glob('b*.started'))) == 2
-        assert len(manager.processes) == 3
+        assert len(list(tmp_path.glob('b*.started'))) == 4
+        assert len(manager.processes) == 5
         assert len(manager._job_tasks(manager.sessions[token1]['jobs'][job1])) == 1
-        assert len(manager._job_tasks(manager.sessions[token2]['jobs'][job2])) == 2
+        assert len(manager._job_tasks(manager.sessions[token2]['jobs'][job2])) == 4
         manager.cancel(token1, job1)
         manager.cancel(token2, job2)
         for token, handle in [(token1, job1), (token2, job2)]:
             result = finished(manager, token, handle)
             assert result['state'] == 'cancelled'
             assert all(item['state'] == 'cancelled' for item in result['items'])
-        assert len(list(tmp_path.glob('*.started'))) == 3
+        assert len(list(tmp_path.glob('*.started'))) == 5
     finally:
         (tmp_path / 'release').touch()
         manager.close()

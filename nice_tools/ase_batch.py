@@ -15,6 +15,7 @@ import time
 
 
 MAX_BATCH_OBJECTS = 1000
+MAX_CONCURRENT_TRANSFERS = 5
 _QUEUE = queue.Queue()
 _POOL_LOCK = threading.Lock()
 _POOL = []
@@ -55,7 +56,7 @@ def _consume():
 def submit(function, *args):
     with _POOL_LOCK:
         if not _POOL:
-            for index in range(3):
+            for index in range(MAX_CONCURRENT_TRANSFERS):
                 thread = threading.Thread(target=_consume, name=f'ase-transfer-{index + 1}', daemon=True)
                 _POOL.append(thread)
                 thread.start()
@@ -149,8 +150,8 @@ class BatchMixin:
         from .ase_files import parse_options
         from .ase_jobs import object_data
         session = self._session(token)
-        if type(concurrency) is not int or not 1 <= concurrency <= 3:
-            raise ValueError('동시 OUT 전송 수는 1, 2, 3 중 선택하세요.')
+        if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENT_TRANSFERS:
+            raise ValueError(f'동시 OUT 전송 수는 1~{MAX_CONCURRENT_TRANSFERS}개 중 선택하세요.')
         if not isinstance(objects, list) or not 1 <= len(objects) <= MAX_BATCH_OBJECTS:
             raise ValueError(f'OUT 오브젝트는 1~{MAX_BATCH_OBJECTS}개 선택하세요.')
         if not isinstance(options, dict):

@@ -266,7 +266,7 @@ class ASEMock:
                 assert direction in {"in", "out"}
                 if direction == "out":
                     assert set(payload) == {"session", "objects", "options", "concurrency"}
-                    assert type(payload["concurrency"]) is int and payload["concurrency"] in {1, 2, 3}
+                    assert type(payload["concurrency"]) is int and payload["concurrency"] in {1, 2, 3, 4, 5}
                     assert payload["objects"] and all(obj["kind"] in {"U", "V"} for obj in payload["objects"])
                 else:
                     assert set(payload) == {"session", "object", "file", "options"}
@@ -1134,6 +1134,9 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
     page.locator("#ase-database").select_option("db1")
     expect(page.locator("#ase-path")).to_have_text(EXPORT_DIRECTORY)
     expect(page.locator("#ase-concurrency")).to_have_value("3")
+    expect(page.locator("#ase-concurrency option")).to_have_text(["1개", "2개", "3개", "4개", "5개"])
+    expect(page.locator("#ase-file-note")).to_contain_text("DB명.오너명.테이블명.txt")
+    expect(page.locator("#ase-file-note")).to_contain_text("1~5개")
     assert page.locator("#ase-path input").count() == 0
     page.locator("#ase-search-button").click()
     expect(page.locator("#ase-object-body tr")).to_have_count(6)
@@ -1213,15 +1216,16 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
             page.screenshot(path=screenshot, full_page=True)
         if width == 390 and mobile_screenshot:
             page.screenshot(path=mobile_screenshot, full_page=True)
-    # Changing to 3 affects the next OUT group; IN stays a single native-file job.
+    # The new 4/5 limits reach the next OUT group; IN stays a single native-file job.
     mock.hold_job = True
     mock.mixed_batch = False
-    page.locator("#ase-concurrency").select_option("3")
-    page.locator("#ase-start").click()
-    expect(page.locator("#ase-cancel")).to_be_enabled()
-    assert mock.endpoint_calls("jobs")[-1]["payload"]["concurrency"] == 3
-    page.locator("#ase-cancel").click()
-    expect(page.locator("#ase-start")).to_be_enabled()
+    for concurrency in (4, 5):
+        page.locator("#ase-concurrency").select_option(str(concurrency))
+        page.locator("#ase-start").click()
+        expect(page.locator("#ase-cancel")).to_be_enabled()
+        assert mock.endpoint_calls("jobs")[-1]["payload"]["concurrency"] == concurrency
+        page.locator("#ase-cancel").click()
+        expect(page.locator("#ase-start")).to_be_enabled()
     page.locator("#ase-in").check()
     expect(page.locator("#ase-concurrency")).to_be_disabled()
     prepare_transfer(page, mock)

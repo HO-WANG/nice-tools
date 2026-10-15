@@ -401,7 +401,7 @@
     get("ase-append-warning").hidden = direction() !== "in";
     get("ase-path").textContent = direction() === "out" ? state.exportDirectory || "EXE가 있는 폴더" : state.path || "파일을 선택하세요.";
     get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 폴더";
-    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 소유자/테이블.txt로 저장하고 같은 이름이 있으면 테이블_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~3개 중 선택할 수 있습니다.";
+    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 소유자/DB명.오너명.테이블명.txt로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.";
     get("ase-transfer-note").textContent = !state.bcpAvailable ? "DB 객체는 조회할 수 있습니다. 파일 전송을 사용하려면 SAP bcp.exe를 설치하거나 ase-connections.txt의 [sap_client]에 bcp 경로를 지정하세요." : state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
     get("ase-ready-note").textContent = active() ? "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다." : direction() === "out" ? "내보낼 객체를 체크하고 시작하세요. 실행 시 스키마를 자동 검증합니다." : "테이블과 파일을 선택하고 시작하세요. 실행 시 스키마와 전체 파일을 자동 검증합니다.";
     get("ase-cancel").hidden = !active();

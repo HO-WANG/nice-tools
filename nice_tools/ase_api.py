@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from .ase_jobs import manager, object_data
+from .ase_batch import MAX_CONCURRENT_TRANSFERS
 
 router = APIRouter(prefix="/api/ase")
 HEADERS = {"Cache-Control": "no-store"}
@@ -202,8 +203,8 @@ async def operation(request: Request, operation: str):
                     if set(data) - {"session", "objects", "options", "concurrency"}:
                         raise ValueError("내보낼 객체와 전송 설정을 선택하세요.")
                     concurrency = data.get("concurrency", 3)
-                    if type(concurrency) is not int or not 1 <= concurrency <= 3:
-                        raise ValueError("동시 OUT 작업 수는 1~3개로 선택하세요.")
+                    if type(concurrency) is not int or not 1 <= concurrency <= MAX_CONCURRENT_TRANSFERS:
+                        raise ValueError(f"동시 OUT 작업 수는 1~{MAX_CONCURRENT_TRANSFERS}개로 선택하세요.")
                     result = await run_in_threadpool(manager.start_export, session, data.get("objects"), options, concurrency)
                 elif options.get("direction") == "in":
                     if set(data) - {"session", "object", "file", "options"}:
