@@ -68,6 +68,7 @@ class ASEMock:
     job_concurrencies: dict = field(default_factory=dict)
     mixed_batch: bool = False
     extra_table: bool = False
+    objects_override: list | None = None
     profiles: list = field(default_factory=list)
     profiles_exist: bool = False
     fail_profiles: bool = False
@@ -221,7 +222,7 @@ class ASEMock:
                 assert payload["owner_id"] is None or isinstance(payload["owner_id"], int)
                 assert isinstance(payload["search"], str) and len(payload["search"]) <= 255
                 assert payload["kind"] in {"all", "U", "V", "P"}
-                objects = [TABLE, DUPLICATE_TABLE, HOSTILE_TABLE, VIEW, PROCEDURE] if payload["database"] == "db1" else []
+                objects = (self.objects_override if self.objects_override is not None else [TABLE, DUPLICATE_TABLE, HOSTILE_TABLE, VIEW, PROCEDURE]) if payload["database"] == "db1" else []
                 objects = objects + [{**TABLE, "id": 15, "name": "orders"}] if self.extra_table and payload["database"] == "db1" else objects
                 objects = [obj for obj in objects if (payload["owner_id"] is None or obj["owner_id"] == payload["owner_id"]) and (payload["kind"] == "all" or obj["kind"] == payload["kind"]) and payload["search"].casefold() in obj["name"].casefold()]
                 response = self.timed({"objects": objects})
@@ -1240,6 +1241,56 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
     assert not errors, errors
 
 
+def validate_object_scroll(page, url, width=1440):
+    """A checkbox must keep the scrolled list and keyboard focus in place."""
+    objects = [{**TABLE, "id": 100 + index, "name": f"table_{index:03d}"} for index in range(80)]
+    mock = ASEMock(objects_override=objects)
+    page.set_viewport_size({"width": width, "height": 900})
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-object-body tr")).to_have_count(80)
+    # Clear the optional timing line before measuring so its intentional
+    # removal does not change document height during the selection assertion.
+    page.locator("#ase-concurrency").select_option("2")
+    checkbox = page.get_by_role("checkbox", name="dbo.table_050 OUT 선택", exact=True)
+    checkbox.scroll_into_view_if_needed()
+    container = page.locator(".ase-object-layout > .ase-table-scroll")
+    before = container.evaluate("node => node.scrollTop")
+    assert before > 500, "The regression must use a genuinely scrolled object list"
+    checkbox.check()
+    page.evaluate("() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))")
+    after = container.evaluate("node => node.scrollTop")
+    assert abs(after - before) <= 1, f"Object selection reset list scroll: {before} -> {after} (width {width})"
+    expect(checkbox).to_be_checked()
+    expect(checkbox).to_be_focused()
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 1개 선택")
+    document_scroll = page.evaluate("window.scrollY")
+    checkbox.press("Space")
+    expect(checkbox).not_to_be_checked()
+    expect(checkbox).to_be_focused()
+    assert abs(container.evaluate("node => node.scrollTop") - before) <= 1
+    assert abs(page.evaluate("window.scrollY") - document_scroll) <= 1
+    page.locator("#ase-select-all").check()
+    expect(page.locator("#ase-object-body input:checked")).to_have_count(80)
+    assert abs(container.evaluate("node => node.scrollTop") - before) <= 1
+    page.locator("#ase-clear-selection").click()
+    expect(page.locator("#ase-object-body input:checked")).to_have_count(0)
+    assert abs(container.evaluate("node => node.scrollTop") - before) <= 1
+    page.locator("#ase-search").fill("table_000")
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-object-body tr")).to_have_count(1)
+    expect(page.get_by_role("checkbox", name="dbo.table_000 OUT 선택", exact=True)).not_to_be_checked()
+    assert not mock.violations, mock.violations
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000")
@@ -1252,6 +1303,8 @@ def main():
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         validate(context.new_page(), ASEMock(auto_save=True), args.url, args.screenshot, args.mobile_screenshot)
         validate_batch(context.new_page(), args.url, args.screenshot, args.mobile_screenshot)
+        validate_object_scroll(context.new_page(), args.url)
+        validate_object_scroll(context.new_page(), args.url, width=390)
         validate_profiles(context.new_page(), args.url)
         validate_saved_connections(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url)

@@ -9,6 +9,8 @@
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
     profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "",
   };
+  let renderedObjects = null;
+  let objectRows = [];
   const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password"];
   const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity", "ase-concurrency"];
   const kindNames = { U: "테이블", V: "뷰", P: "프로시저" };
@@ -295,40 +297,49 @@
 
   function renderObjects() {
     const body = get("ase-object-body");
-    body.replaceChildren();
     const objects = state.objects;
-    for (const object of objects) {
-      const row = document.createElement("tr");
+    if (renderedObjects !== objects) {
+      const fragment = document.createDocumentFragment();
+      objectRows = objects.map((object) => {
+        const row = document.createElement("tr");
+        const selection = cell(row, "");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.className = "ase-export-checkbox";
+        checkbox.setAttribute("aria-label", `${object.owner}.${object.name} OUT 선택`);
+        checkbox.addEventListener("change", () => {
+          if (locked()) return;
+          if (checkbox.checked) state.exports.add(objectKey(object));
+          else state.exports.delete(objectKey(object));
+          reset("options");
+        });
+        selection.append(checkbox);
+        const name = cell(row, "");
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ase-object-button";
+        button.textContent = String(object.name);
+        button.addEventListener("click", () => selectObject(object));
+        name.append(button);
+        cell(row, object.owner);
+        cell(row, kindNames[object.kind] || object.kind);
+        fragment.append(row);
+        return { row, checkbox, button };
+      });
+      // Rebuild only for new search results. Removing a focused checkbox on
+      // every state update loses focus and can reset its scroll container.
+      body.replaceChildren(fragment);
+      renderedObjects = objects;
+    }
+    objectRows.forEach(({ row, checkbox, button }, index) => {
+      const object = objects[index];
       const selected = state.object?.id === object.id && state.object?.owner_id === object.owner_id;
       row.classList.toggle("selected-row", selected);
-      const selection = cell(row, "");
-      const checkbox = document.createElement("input");
-      checkbox.type = "checkbox";
-      checkbox.className = "ase-export-checkbox";
-      checkbox.setAttribute("aria-label", `${object.owner}.${object.name} OUT 선택`);
       checkbox.checked = state.exports.has(objectKey(object));
       checkbox.disabled = locked() || direction() !== "out" || !["U", "V"].includes(object.kind) || !state.bcpAvailable;
-      checkbox.addEventListener("change", () => {
-        if (locked()) return;
-        reset("options");
-        if (checkbox.checked) state.exports.add(objectKey(object));
-        else state.exports.delete(objectKey(object));
-        render();
-      });
-      selection.append(checkbox);
-      const name = cell(row, "");
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "ase-object-button";
-      button.textContent = String(object.name);
       button.setAttribute("aria-pressed", String(selected));
       button.disabled = locked();
-      button.addEventListener("click", () => selectObject(object));
-      name.append(button);
-      cell(row, object.owner);
-      cell(row, kindNames[object.kind] || object.kind);
-      body.append(row);
-    }
+    });
     const eligible = objects.filter((object) => ["U", "V"].includes(object.kind));
     const count = exportObjects().length;
     get("ase-select-all").checked = eligible.length > 0 && count === eligible.length;
