@@ -5,19 +5,21 @@
   if (!get("ase-tool")) return;
   const state = {
     available: false, bcpAvailable: false, session: null, databases: [], owners: [], ownersLoaded: false, objects: [], searched: false, object: null,
-    columns: [], columnsLoaded: false, file: null, path: "", review: null,
+    columns: [], columnsLoaded: false, file: null, path: "", exports: new Set(), exportDirectory: "", defaultDirectory: "",
     job: null, jobStatus: null, busy: "", generation: 0, timer: null, controllers: new Set(),
     profiles: [], profileId: "", profileLoading: false, profileGeneration: 0, profileController: null, clientPaths: {}, configuredPaths: {}, odbcDriver: "", configuredDriver: "",
   };
   const connectionIds = ["ase-host", "ase-port", "ase-user", "ase-password"];
-  const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity"];
+  const optionIds = ["ase-encoding", "ase-field-terminator", "ase-row-terminator", "ase-batch-size", "ase-keep-identity", "ase-concurrency"];
   const kindNames = { U: "테이블", V: "뷰", P: "프로시저" };
   const direction = () => get("ase-in").checked ? "in" : "out";
   const active = () => Boolean(state.job);
-  const locked = () => active() || ["connect", "start", "disconnect", "cancel"].includes(state.busy);
-  const profileLocked = () => active() || ["start", "disconnect", "cancel"].includes(state.busy);
+  const locked = () => active() || ["connect", "start", "disconnect", "cancel", "directory", "picker"].includes(state.busy);
+  const profileLocked = () => active() || ["start", "disconnect", "cancel", "directory", "picker"].includes(state.busy);
   const selectedProfile = () => state.profiles.find((profile) => profile.id === state.profileId);
-  const transferable = () => state.bcpAvailable && state.columnsLoaded && state.object && (state.object.kind === "U" || (state.object.kind === "V" && direction() === "out"));
+  const objectKey = (object) => JSON.stringify([object.database, object.owner_id, object.id]);
+  const exportObjects = () => state.objects.filter((object) => ["U", "V"].includes(object.kind) && state.exports.has(objectKey(object)));
+  const transferable = () => state.bcpAvailable && (direction() === "out" ? exportObjects().length > 0 : state.columnsLoaded && state.object?.kind === "U");
   const stale = () => new DOMException("요청이 변경되었습니다.", "AbortError");
 
   function feedback(message = "", error = false) {
@@ -103,16 +105,6 @@
     return state.generation;
   }
 
-  function clearReview() {
-    state.review = null;
-    get("ase-review").hidden = true;
-    get("ase-review-details").replaceChildren();
-    get("ase-review-warnings").replaceChildren();
-    get("ase-sample-head").replaceChildren();
-    get("ase-sample-body").replaceChildren();
-    get("ase-sample").hidden = true;
-  }
-
   function clearStatistics() {
     get("ase-out-statistics").hidden = true;
     get("ase-bcp-statistics").hidden = true;
@@ -144,17 +136,18 @@
 
   function reset(level) {
     nextGeneration();
-    clearReview();
     state.job = null;
     state.jobStatus = null;
     get("ase-job").hidden = true;
     get("ase-job-status").textContent = "";
     get("ase-job-events").replaceChildren();
+    get("ase-job-items").replaceChildren();
     clearStatistics();
     clearTimings();
     feedback();
     if (level === "connection") {
       state.session = null;
+      state.exportDirectory = state.defaultDirectory;
       state.databases = [];
       setChoices("ase-database", [], "DB 선택", "name");
     }
@@ -166,13 +159,13 @@
     if (["connection", "database", "search"].includes(level)) {
       state.objects = [];
       state.searched = false;
+      state.exports.clear();
     }
     if (["connection", "database", "search", "object"].includes(level)) {
       state.object = null;
       state.columns = [];
       state.columnsLoaded = false;
       get("ase-column-body").replaceChildren();
-      get("ase-out").checked = true;
       get("ase-keep-identity").checked = false;
     }
     if (level !== "options") {
@@ -308,6 +301,21 @@
       const row = document.createElement("tr");
       const selected = state.object?.id === object.id && state.object?.owner_id === object.owner_id;
       row.classList.toggle("selected-row", selected);
+      const selection = cell(row, "");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "ase-export-checkbox";
+      checkbox.setAttribute("aria-label", `${object.owner}.${object.name} OUT 선택`);
+      checkbox.checked = state.exports.has(objectKey(object));
+      checkbox.disabled = locked() || direction() !== "out" || !["U", "V"].includes(object.kind) || !state.bcpAvailable;
+      checkbox.addEventListener("change", () => {
+        if (locked()) return;
+        reset("options");
+        if (checkbox.checked) state.exports.add(objectKey(object));
+        else state.exports.delete(objectKey(object));
+        render();
+      });
+      selection.append(checkbox);
       const name = cell(row, "");
       const button = document.createElement("button");
       button.type = "button";
@@ -321,6 +329,13 @@
       cell(row, kindNames[object.kind] || object.kind);
       body.append(row);
     }
+    const eligible = objects.filter((object) => ["U", "V"].includes(object.kind));
+    const count = exportObjects().length;
+    get("ase-select-all").checked = eligible.length > 0 && count === eligible.length;
+    get("ase-select-all").indeterminate = count > 0 && count < eligible.length;
+    get("ase-select-all").disabled = locked() || direction() !== "out" || !state.bcpAvailable || !eligible.length;
+    get("ase-selection-count").textContent = `OUT ${count.toLocaleString()}개 선택`;
+    get("ase-clear-selection").disabled = locked() || !count;
     get("ase-object-empty").hidden = objects.length > 0;
     get("ase-object-empty").textContent = !state.session ? "서버에 연결한 뒤 DB를 선택하세요." : state.busy === "objects" ? "객체를 검색하는 중입니다." : !get("ase-database").value ? "DB를 선택하세요. 소유자는 선택하지 않아도 됩니다." : !state.searched ? "검색을 누르면 객체를 조회합니다. 소유자는 선택하지 않아도 됩니다." : "조건에 맞는 객체가 없습니다.";
     get("ase-object-count").textContent = !state.session ? "연결 후 선택할 수 있습니다." : !state.searched ? "검색 후 선택할 수 있습니다." : `${objects.length.toLocaleString()}개 객체`;
@@ -356,24 +371,28 @@
     get("ase-search").disabled = !databaseSelected || isLocked;
     get("ase-search-button").disabled = !databaseSelected || isLocked || Boolean(state.busy);
     get("ase-search-button").textContent = state.busy === "objects" ? "검색 중…" : "검색";
-    get("ase-out").disabled = !state.bcpAvailable || !state.columnsLoaded || !["U", "V"].includes(state.object?.kind) || isLocked;
+    get("ase-out").disabled = !state.bcpAvailable || !state.session || isLocked;
     get("ase-in").disabled = !state.bcpAvailable || !state.columnsLoaded || state.object?.kind !== "U" || isLocked;
     for (const id of optionIds) get(id).disabled = !canTransfer || isLocked || (id === "ase-keep-identity" && direction() !== "in");
     get("ase-crlf").disabled = !canTransfer || isLocked;
     get("ase-batch-size").disabled = !canTransfer || isLocked || direction() !== "in";
+    get("ase-concurrency-field").hidden = direction() !== "out";
+    get("ase-concurrency").disabled = !state.bcpAvailable || !state.session || Boolean(state.busy) || isLocked || direction() !== "out";
+    get("ase-pick-file").hidden = direction() !== "in";
+    get("ase-pick-directory").hidden = direction() !== "out";
     get("ase-pick-file").disabled = !canTransfer || Boolean(state.busy) || isLocked;
     get("ase-pick-file").textContent = state.busy === "picker" ? "선택 창 열림…" : "파일 선택";
-    get("ase-preview").disabled = !canTransfer || !state.file || Boolean(state.busy) || isLocked;
-    get("ase-preview").textContent = state.busy === "preview" ? "확인 중…" : "실행 내용 확인";
-    get("ase-start").disabled = !state.bcpAvailable || !state.review || Boolean(state.busy) || isLocked;
-    get("ase-start").textContent = state.busy === "start" ? "시작 중…" : direction() === "in" ? "BCP IN · 행 추가 시작" : "BCP OUT 시작";
+    get("ase-pick-directory").disabled = !state.session || !state.bcpAvailable || Boolean(state.busy) || isLocked;
+    get("ase-pick-directory").textContent = state.busy === "directory" ? "선택 창 열림…" : "폴더 선택";
+    get("ase-start").disabled = !canTransfer || (direction() === "in" && !state.file) || Boolean(state.busy) || isLocked;
+    get("ase-start").textContent = state.busy === "start" ? "시작 중…" : direction() === "in" ? "BCP IN · 행 추가 시작" : `BCP OUT · ${exportObjects().length.toLocaleString()}개 시작`;
     get("ase-identity-options").hidden = direction() !== "in";
     get("ase-append-warning").hidden = direction() !== "in";
-    get("ase-path").textContent = state.path || "파일을 선택하세요.";
-    get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 파일";
-    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. OUT은 성공했을 때만 대상 파일을 교체합니다.";
+    get("ase-path").textContent = direction() === "out" ? state.exportDirectory || "EXE가 있는 폴더" : state.path || "파일을 선택하세요.";
+    get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 폴더";
+    get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 소유자/테이블.txt로 저장하고 같은 이름이 있으면 테이블_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~3개 중 선택할 수 있습니다.";
     get("ase-transfer-note").textContent = !state.bcpAvailable ? "DB 객체는 조회할 수 있습니다. 파일 전송을 사용하려면 SAP bcp.exe를 설치하거나 ase-connections.txt의 [sap_client]에 bcp 경로를 지정하세요." : state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
-    get("ase-ready-note").textContent = active() ? "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다." : state.review ? "확인한 내용으로 BCP를 실행할 수 있습니다." : "객체와 파일을 선택한 뒤 실행 내용을 확인하세요.";
+    get("ase-ready-note").textContent = active() ? "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다." : direction() === "out" ? "내보낼 객체를 체크하고 시작하세요. 실행 시 스키마를 자동 검증합니다." : "테이블과 파일을 선택하고 시작하세요. 실행 시 스키마와 전체 파일을 자동 검증합니다.";
     get("ase-cancel").hidden = !active();
     get("ase-cancel").disabled = ["cancel", "disconnect"].includes(state.busy);
     get("ase-cancel").textContent = state.busy === "cancel" ? "취소 요청 중…" : "실행 취소";
@@ -551,8 +570,35 @@
     reset("options");
   });
 
+  get("ase-select-all").addEventListener("change", (event) => {
+    if (locked() || direction() !== "out" || !state.bcpAvailable) return;
+    const checked = event.target.checked;
+    reset("options");
+    for (const object of state.objects.filter((item) => ["U", "V"].includes(item.kind))) {
+      if (checked) state.exports.add(objectKey(object));
+      else state.exports.delete(objectKey(object));
+    }
+    render();
+  });
+  get("ase-clear-selection").addEventListener("click", () => {
+    if (locked()) return;
+    reset("options");
+    state.exports.clear();
+    render();
+  });
+  get("ase-pick-directory").addEventListener("click", async () => {
+    if (!state.session || !state.bcpAvailable || locked() || state.busy) return;
+    reset("options");
+    await perform("directory", async (generation) => {
+      const data = await api("pick-directory", { session: state.session }, generation);
+      if (data.cancelled) { feedback("폴더 선택을 취소했습니다."); return; }
+      if (typeof data.path !== "string" || !data.path) throw new Error("폴더 선택 결과를 확인할 수 없습니다.");
+      state.exportDirectory = data.path;
+    });
+  });
+
   get("ase-pick-file").addEventListener("click", async () => {
-    if (!transferable() || locked() || state.busy) return;
+    if (direction() !== "in" || !transferable() || locked() || state.busy) return;
     reset("file");
     await perform("picker", async (generation) => {
       const data = await api("pick-file", { session: state.session, direction: direction(), suggested_name: `${state.object.name}.txt` }, generation);
@@ -574,79 +620,6 @@
     };
   }
 
-  function reviewDetail(label, value) {
-    const term = document.createElement("dt");
-    term.textContent = label;
-    const description = document.createElement("dd");
-    description.textContent = String(value);
-    get("ase-review-details").append(term, description);
-  }
-
-  function showReview(data) {
-    const settings = options();
-    const object = data.object || state.object;
-    reviewDetail("작업", settings.direction === "in" ? "BCP IN · 기존 테이블에 행 추가" : "BCP OUT · 텍스트 파일 저장");
-    reviewDetail("객체", `${object.database}.${object.owner}.${object.name}`);
-    reviewDetail("파일", data.path || state.path);
-    reviewDetail("인코딩", settings.encoding.toUpperCase());
-    reviewDetail("구분자", `컬럼 ${settings.field_terminator} / 행 ${settings.row_terminator}`);
-    if (settings.direction === "in") {
-      reviewDetail("배치", `${settings.batch_size.toLocaleString()}행`);
-      reviewDetail("IDENTITY", settings.keep_identity ? "파일 값 유지" : "새 ID 생성 (파일의 IDENTITY 자리 포함)");
-    }
-    if (Number.isFinite(data.rows)) reviewDetail("파일 행 수", `${data.rows.toLocaleString()}행`);
-    if (Number.isFinite(data.bytes)) reviewDetail("파일 크기", `${data.bytes.toLocaleString()}바이트`);
-    const warnings = Array.isArray(data.warnings) ? [...data.warnings] : [];
-    if (settings.direction === "in") warnings.unshift("기존 행은 유지되고 새 행이 추가됩니다. 실패·취소 시 완료된 배치는 남으며 재실행하면 중복될 수 있습니다.");
-    get("ase-review-warnings").hidden = !warnings.length;
-    for (const warning of warnings) {
-      const item = document.createElement("li");
-      item.textContent = String(warning);
-      get("ase-review-warnings").append(item);
-    }
-    if (Array.isArray(data.sample) && data.sample.length) {
-      const columns = Array.isArray(data.columns) ? data.columns : state.columns;
-      const header = document.createElement("tr");
-      for (const column of columns) {
-        const th = document.createElement("th");
-        th.scope = "col";
-        th.textContent = String(column.name);
-        header.append(th);
-      }
-      get("ase-sample-head").append(header);
-      for (const values of data.sample) {
-        const row = document.createElement("tr");
-        if (Array.isArray(values)) for (const value of values) cell(row, value);
-        get("ase-sample-body").append(row);
-      }
-      get("ase-sample").hidden = false;
-    }
-    get("ase-review").hidden = false;
-  }
-
-  get("ase-preview").addEventListener("click", async () => {
-    if (!transferable() || !state.file || locked() || state.busy) return;
-    for (const id of ["ase-field-terminator", "ase-row-terminator"]) {
-      if (!get(id).value) {
-        feedback("컬럼 구분자와 행 구분자를 입력하세요.", true);
-        get(id).focus();
-        return;
-      }
-    }
-    if (!get("ase-batch-size").checkValidity() || !Number.isInteger(Number(get("ase-batch-size").value))) {
-      feedback("배치 행 수를 1~1,000,000 사이의 정수로 입력하세요.", true);
-      get("ase-batch-size").focus();
-      return;
-    }
-    reset("options");
-    await perform("preview", async (generation) => {
-      const data = await api("preview", { session: state.session, object: state.object, file: state.file, options: options() }, generation);
-      if (!data.review) throw new Error("실행 확인 결과를 받지 못했습니다.");
-      state.review = data.review;
-      showReview(data);
-    });
-  });
-
   function showStatistics(data) {
     clearStatistics();
     const result = data.result;
@@ -662,9 +635,11 @@
     const unit = bytes === 0 ? 0 : Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
     get("ase-stat-bytes").textContent = `${number(bytes / (1024 ** unit))} ${units[unit]}`;
     get("ase-stat-bytes-exact").textContent = `${number(bytes, 0)} 바이트`;
-    if (Number.isFinite(result.bcp_seconds) && result.bcp_seconds >= 0 && Number.isFinite(result.bcp_rows_per_second) && result.bcp_rows_per_second >= 0) {
-      const duration = result.bcp_seconds > 0 && result.bcp_seconds < 0.01 ? "0.01초 미만" : `${result.bcp_seconds.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}초`;
-      const speed = result.bcp_rows_per_second > 0 && result.bcp_rows_per_second < 0.01 ? "0.01행/초 미만" : `${number(result.bcp_rows_per_second)}행/초`;
+    const bcpSeconds = statistics.bcp_seconds ?? result.bcp_seconds;
+    const bcpRate = statistics.bcp_rows_per_second ?? result.bcp_rows_per_second;
+    if (Number.isFinite(bcpSeconds) && bcpSeconds >= 0 && Number.isFinite(bcpRate) && bcpRate >= 0) {
+      const duration = bcpSeconds > 0 && bcpSeconds < 0.01 ? "0.01초 미만" : `${bcpSeconds.toLocaleString("ko-KR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}초`;
+      const speed = bcpRate > 0 && bcpRate < 0.01 ? "0.01행/초 미만" : `${number(bcpRate)}행/초`;
       get("ase-bcp-statistics").textContent = `bcp.exe 실행 시간 ${duration} · bcp.exe 실행 속도 ${speed} (프로세스 시작·로그인 포함)`;
       get("ase-bcp-statistics").hidden = false;
     }
@@ -675,7 +650,7 @@
     state.jobStatus = data;
     showStatistics(data);
     get("ase-job").hidden = false;
-    const names = { running: "실행 중", succeeded: "완료", failed: "실패", cancelled: "취소됨" };
+    const names = { queued: "대기 중", validating: "검증 중", running: "실행 중", succeeded: "완료", failed: "실패", cancelled: "취소됨" };
     const rows = Number.isFinite(data.rows) ? ` · ${data.rows.toLocaleString()}행` : "";
     get("ase-job-status").textContent = `${names[data.state] || "실행 중"}${rows}${data.message ? ` · ${data.message}` : ""}`;
     get("ase-job-status").dataset.state = data.state;
@@ -686,6 +661,42 @@
       item.textContent = String(event.message ?? "");
       events.append(item);
     }
+    if (Array.isArray(data.items) && data.items.length) {
+      const count = (status) => data.items.filter((entry) => status.includes(entry.state)).length;
+      get("ase-job-status").textContent += ` · 전체 ${data.items.length}개 · 완료 ${count(["succeeded"])} · 실행 ${count(["running"])} · 대기 ${count(["queued"])} · 실패 ${count(["failed"])}`;
+    }
+    const items = get("ase-job-items");
+    items.replaceChildren();
+    if (Array.isArray(data.items)) for (const entry of data.items) {
+      const row = document.createElement("tr");
+      const object = entry.object || {};
+      cell(row, [object.database, object.owner, object.name].filter(Boolean).join("."));
+      cell(row, names[entry.state] || entry.state || "대기 중");
+      cell(row, typeof entry.path === "string" ? entry.path : "—");
+      cell(row, Number.isFinite(entry.rows) ? `${entry.rows.toLocaleString()}행` : "—");
+      const detail = cell(row, entry.message || "");
+      const statistics = entry.statistics || entry.result?.statistics;
+      if (entry.state === "succeeded" && statistics) {
+        const parts = [];
+        const measured = (value, unit) => value > 0 && value < 0.01 ? `0.01${unit} 미만` : `${value.toLocaleString("ko-KR", { maximumFractionDigits: 2 })}${unit}`;
+        if (Number.isFinite(statistics.elapsed_seconds) && statistics.elapsed_seconds >= 0) parts.push(measured(statistics.elapsed_seconds, "초"));
+        if (statistics.rows_per_second === null) parts.push("속도 측정 불가");
+        else if (Number.isFinite(statistics.rows_per_second) && statistics.rows_per_second >= 0) parts.push(measured(statistics.rows_per_second, "행/초"));
+        if (Number.isSafeInteger(statistics.bytes_written) && statistics.bytes_written >= 0) parts.push(`${statistics.bytes_written.toLocaleString()} 바이트`);
+        if (Number.isFinite(statistics.bcp_seconds) && statistics.bcp_seconds >= 0) parts.push(`bcp.exe 실행 ${measured(statistics.bcp_seconds, "초")} (시작·로그인 포함)`);
+        if (statistics.bcp_rows_per_second === null) parts.push("bcp.exe 속도 측정 불가");
+        else if (Number.isFinite(statistics.bcp_rows_per_second) && statistics.bcp_rows_per_second >= 0) parts.push(`bcp.exe ${measured(statistics.bcp_rows_per_second, "행/초")}`);
+        if (parts.length) {
+          const metrics = document.createElement("p");
+          metrics.className = "ase-item-statistics";
+          metrics.textContent = parts.join(" · ");
+          detail.append(metrics);
+        }
+      }
+      items.append(row);
+    }
+    get("ase-job-items-scroll").hidden = !Array.isArray(data.items) || !data.items.length;
+    if (data.phase === "validating" && !["succeeded", "failed", "cancelled"].includes(data.state)) get("ase-job-status").textContent += " · 자동 검증 중";
     const terminal = ["succeeded", "failed", "cancelled"].includes(data.state);
     const partial = direction() === "in" && ["failed", "cancelled"].includes(data.state);
     get("ase-job-warning").hidden = !partial;
@@ -694,7 +705,6 @@
       state.job = null;
       clearTimeout(state.timer);
       state.timer = null;
-      clearReview();
     }
     render();
     return terminal;
@@ -718,21 +728,27 @@
   }
 
   get("ase-start").addEventListener("click", async () => {
-    if (!state.bcpAvailable || !state.review || locked() || state.busy) return;
-    const review = state.review;
+    if (!transferable() || (direction() === "in" && !state.file) || locked() || state.busy) return;
+    for (const id of ["ase-field-terminator", "ase-row-terminator"]) {
+      if (!get(id).value) {
+        feedback("컬럼 구분자와 행 구분자를 입력하세요.", true);
+        get(id).focus();
+        return;
+      }
+    }
+    if (direction() === "in" && (!get("ase-batch-size").checkValidity() || !Number.isInteger(Number(get("ase-batch-size").value)))) {
+      feedback("배치 행 수를 1~1,000,000 사이의 정수로 입력하세요.", true);
+      get("ase-batch-size").focus();
+      return;
+    }
+    const payload = { session: state.session, options: options(), ...(direction() === "out" ? { objects: exportObjects(), concurrency: Number(get("ase-concurrency").value) } : { object: state.object, file: state.file }) };
     clearStatistics();
     await perform("start", async (generation) => {
-      try {
-        const data = await api("jobs", { session: state.session, review }, generation);
-        if (!data.job) throw new Error("실행 번호를 받지 못했습니다.");
-        state.job = data.job;
-        clearReview();
-        showJob({ state: "running", message: "BCP 실행 상태를 확인하는 중입니다.", events: [] });
-        schedulePoll(generation);
-      } catch (error) {
-        if (generation === state.generation) clearReview();
-        throw error;
-      }
+      const data = await api("jobs", payload, generation);
+      if (!data.job) throw new Error("실행 번호를 받지 못했습니다.");
+      state.job = data.job;
+      showJob({ state: "running", phase: "validating", message: "실행 조건을 자동 검증하는 중입니다.", events: [] });
+      schedulePoll(generation);
     });
   });
 
@@ -770,6 +786,10 @@
       const data = await response.json();
       state.available = response.ok && data.available === true;
       state.bcpAvailable = response.ok && data.bcp_available === true;
+      if (typeof data.export_directory === "string") {
+        state.defaultDirectory = data.export_directory;
+        if (!state.session) state.exportDirectory = data.export_directory;
+      }
       get("ase-runtime").textContent = state.available ? "SAP ASE ODBC 사용 가능 · 연결을 유지하며 DB 객체를 조회합니다." : typeof data.detail === "string" ? data.detail : "SAP ASE 64비트 ODBC 드라이버를 찾을 수 없습니다. 드라이버를 설치하거나 ase-connections.txt의 [odbc]에 드라이버 이름을 지정하세요.";
       showOdbcDriver(data.odbc);
       showClientPaths(data);

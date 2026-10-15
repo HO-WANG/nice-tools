@@ -183,10 +183,34 @@ async def operation(request: Request, operation: str):
             result = await run_in_threadpool(manager.catalog, session, operation, object=object_data(data.get("object")))
         elif operation == "pick-file":
             result = await run_in_threadpool(manager.pick_file, session, data.get("direction"), data.get("suggested_name"))
+        elif operation == "pick-directory":
+            if set(data) - {"session"}:
+                raise ValueError("출력 폴더는 도구의 폴더 선택 창에서 선택하세요.")
+            result = await run_in_threadpool(manager.pick_directory, session)
         elif operation == "preview":
             result = await run_in_threadpool(manager.preview, session, data.get("object"), data.get("file"), data.get("options"))
         elif operation == "jobs":
-            result = await run_in_threadpool(manager.start, session, data.get("review"))
+            if "review" in data and set(data) <= {"session", "review"}:
+                # Existing developer integrations may still hold a review;
+                # the current UI starts automatically validated jobs directly.
+                result = await run_in_threadpool(manager.start, session, data.get("review"))
+            else:
+                options = data.get("options")
+                if not isinstance(options, dict):
+                    raise ValueError("IN 또는 OUT과 전송 설정을 선택하세요.")
+                if options.get("direction") == "out":
+                    if set(data) - {"session", "objects", "options", "concurrency"}:
+                        raise ValueError("내보낼 객체와 전송 설정을 선택하세요.")
+                    concurrency = data.get("concurrency", 3)
+                    if type(concurrency) is not int or not 1 <= concurrency <= 3:
+                        raise ValueError("동시 OUT 작업 수는 1~3개로 선택하세요.")
+                    result = await run_in_threadpool(manager.start_export, session, data.get("objects"), options, concurrency)
+                elif options.get("direction") == "in":
+                    if set(data) - {"session", "object", "file", "options"}:
+                        raise ValueError("IN은 테이블 하나와 입력 파일 하나를 선택하세요.")
+                    result = await run_in_threadpool(manager.start_import, session, object_data(data.get("object")), data.get("file"), options)
+                else:
+                    raise ValueError("IN 또는 OUT을 선택하세요.")
         elif operation == "job":
             result = await run_in_threadpool(manager.job, session, data.get("job"))
         elif operation == "cancel":

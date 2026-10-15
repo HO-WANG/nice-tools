@@ -10,6 +10,71 @@ import pytest
 from nice_tools.main import app
 
 
+@pytest.mark.parametrize("direction", ["in", "out"])
+def test_jobs_start_directly_without_review_token(monkeypatch, direction):
+    from nice_tools import ase_api
+    calls = []
+    obj = {"database": "db", "owner": "dbo", "owner_id": 1, "id": 2, "name": "t", "kind": "U"}
+    monkeypatch.setattr(ase_api.manager, "start_export", lambda *args: calls.append(("out", args)) or {"job": "batch-job"}, raising=False)
+    monkeypatch.setattr(ase_api.manager, "start_import", lambda *args: calls.append(("in", args)) or {"job": "import-job"}, raising=False)
+    data = {"session": "fixture-session", "options": {"direction": direction}}
+    data.update({"objects": [obj]} if direction == "out" else {"object": obj, "file": "native-input-token"})
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/jobs", json=data, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert response.json() == {"job": "batch-job" if direction == "out" else "import-job"}
+    expected = ("fixture-session", [obj], data["options"], 3) if direction == "out" else ("fixture-session", obj, "native-input-token", data["options"])
+    assert calls == [(direction, expected)]
+
+
+@pytest.mark.parametrize("concurrency", [1, 2, 3])
+def test_out_forwards_selected_concurrency(monkeypatch, concurrency):
+    from nice_tools import ase_api
+    calls = []
+    monkeypatch.setattr(ase_api.manager, "start_export", lambda *args: calls.append(args) or {"job": "batch"}, raising=False)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/jobs", json={"session": "fixture", "objects": [], "options": {"direction": "out"}, "concurrency": concurrency}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200 and calls == [("fixture", [], {"direction": "out"}, concurrency)]
+
+
+@pytest.mark.parametrize("concurrency", [True, False, 0, 4, -1, 1.5, "2", None, {}])
+def test_out_rejects_invalid_concurrency_before_start(monkeypatch, concurrency):
+    from nice_tools import ase_api
+    calls = []
+    monkeypatch.setattr(ase_api.manager, "start_export", lambda *args: calls.append(args), raising=False)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/jobs", json={"session": "fixture", "objects": [], "options": {"direction": "out"}, "concurrency": concurrency}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 400 and not calls
+
+
+def test_in_rejects_multiple_object_and_concurrency_fields():
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/jobs", json={"session": "fixture", "objects": [], "options": {"direction": "in"}, "concurrency": 2}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 400 and "테이블 하나" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("extra", [{"path": "private-path"}, {"objects": []}, {"password": "do-not-echo"}])
+def test_directory_picker_rejects_caller_paths_and_other_fields(monkeypatch, extra):
+    from nice_tools import ase_api
+    calls = []
+    monkeypatch.setattr(ase_api.manager, "pick_directory", lambda *args: calls.append(args) or {"cancelled": True}, raising=False)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/pick-directory", json={"session": "fixture", **extra}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 400 and not calls
+    assert "private-path" not in response.text and "do-not-echo" not in response.text
+
+
+def test_directory_picker_uses_owned_manager_and_no_store(monkeypatch):
+    from nice_tools import ase_api
+    calls = []
+    chosen = {"cancelled": False, "path": "C:\\내보내기"}
+    monkeypatch.setattr(ase_api.manager, "pick_directory", lambda token: calls.append(token) or chosen, raising=False)
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        response = client.post("/api/ase/pick-directory", json={"session": "fixture"}, headers={"X-Nice-Tools": "ase"})
+    assert response.status_code == 200 and response.json() == chosen and calls == ["fixture"]
+    assert response.headers["cache-control"] == "no-store"
+
+
 def test_ase_api_requires_custom_header():
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         response = client.post("/api/ase/connect", json={"password": "do-not-echo"})

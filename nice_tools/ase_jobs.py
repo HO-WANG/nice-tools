@@ -20,6 +20,9 @@ import threading
 import time
 
 
+from .ase_batch import BatchMixin, default_export_directory, public_job, publish_available, submit
+
+
 _CONSOLE_LOCK = threading.Lock()
 
 
@@ -98,7 +101,7 @@ def target_fingerprint(path):
     return {"exists": True, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
-class AseManager:
+class AseManager(BatchMixin):
     def __init__(self, worker_command=None):
         self.worker_command = worker_command or (
             [sys.executable, "--ase-worker"] if getattr(sys, "frozen", False)
@@ -252,7 +255,7 @@ class AseManager:
 
     def status(self):
         from .ase_cli import client_status
-        return {**client_status(), "platform": sys.platform}
+        return {**client_status(), "platform": sys.platform, "export_directory": default_export_directory()}
 
     def connect(self, payload):
         from . import ase_odbc
@@ -400,9 +403,7 @@ class AseManager:
             if started_at is not None:
                 job["started_at"] = started_at
             session["jobs"][job_token] = job
-            thread = threading.Thread(target=self._run_job, args=(token, session, job, payload), daemon=True)
-            job["thread"] = thread
-            thread.start()
+            job["thread"] = submit(self._run_job, token, session, job, payload)
         return {"job": job_token}
 
     def _run_job(self, token, session, job, payload):
@@ -413,6 +414,10 @@ class AseManager:
         error = None
         console_output = _RedactedOutput(payload["connection"]["password"], _write_bcp_output)
         try:
+            with self.lock:
+                if job["cancelled"] or self.closed or token not in self.sessions:
+                    job["cancelled"] = True
+                    return
             process = self._spawn(payload, token)
             with self.lock:
                 job["process"] = process
@@ -455,12 +460,17 @@ class AseManager:
                             rate_rows = float(rows)
                         except OverflowError:
                             raise ValueError("내보낸 행 수를 확인하지 못해 결과를 저장하지 않았습니다.") from None
-                        if target_fingerprint(payload["path"]) != payload["out_target_fingerprint"]:
+                        if not payload.get("no_replace") and target_fingerprint(payload["path"]) != payload["out_target_fingerprint"]:
                             raise ValueError("대상 파일이 변경되어 결과를 저장하지 않았습니다.")
                         # Capture the completed stage size before publishing so
                         # later user edits cannot alter the export statistics.
+                        if job.get("_reservation") is not None:
+                            job["_reservation"].validate()
                         bytes_written = Path(payload["stage_path"]).stat().st_size
-                        os.replace(payload["stage_path"], payload["path"])
+                        if payload.get("no_replace"):
+                            public_result["path"] = publish_available(payload["stage_path"], payload["path"])
+                        else:
+                            os.replace(payload["stage_path"], payload["path"])
                         elapsed = max(0.0, time.monotonic() - job["started_at"])
                         job["elapsed_seconds"] = elapsed
                         rate = rate_rows / elapsed if elapsed > 0 else None
@@ -482,7 +492,7 @@ class AseManager:
                             public_result["statistics"].update({"bcp_seconds": bcp_seconds, "bcp_rows_per_second": bcp_rate})
                     job.update({"state": "succeeded", "phase": "done", "message": "전송 완료", "rows": result.get("rows"),
                                 "result": public_result})
-        except (OSError, ValueError, TypeError, KeyError) as exc:
+        except Exception as exc:
             with self.lock:
                 if not job["cancelled"]:
                     detail = self._redact(str(exc), payload["connection"]) if isinstance(exc, ValueError) else "전송을 완료하지 못했습니다. 대상과 파일 상태를 확인하세요."
@@ -492,11 +502,18 @@ class AseManager:
         finally:
             console_output.feed("", final=True)
             if process:
-                self._release_worker(process)
+                try:
+                    self._release_worker(process)
+                except Exception:
+                    with self.lock:
+                        job["events"].append({"message": "전송 프로세스 정리 상태를 확인하지 못했습니다."})
             stage = payload.get("stage_path")
             if stage:
                 try:
-                    Path(stage).unlink(missing_ok=True)
+                    if job.get("_reservation") is not None:
+                        job["_reservation"].cleanup()
+                    else:
+                        Path(stage).unlink(missing_ok=True)
                 except OSError:
                     with self.lock:
                         job["events"].append({"message": "임시 OUT 파일을 지우지 못했습니다: " + stage})
@@ -517,7 +534,7 @@ class AseManager:
             job = session["jobs"].get(job_token) if isinstance(job_token, str) else None
             if not job:
                 raise ValueError("전송 작업을 찾을 수 없습니다.")
-            return copy.deepcopy({key: value for key, value in job.items() if key not in ("cancelled", "process", "thread", "started_at")})
+            return public_job(job)
 
     def cancel(self, token, job_token):
         session = self._session(token)
@@ -526,11 +543,7 @@ class AseManager:
             if not job:
                 raise ValueError("전송 작업을 찾을 수 없습니다.")
             if job["state"] == "running":
-                job["cancelled"] = True
-                job["message"] = "취소 중"
-                process = job["process"]
-                if process:
-                    self._terminate(process)
+                self._cancel_job(job)
         return self.job(token, job_token)
 
     def disconnect(self, token):
@@ -538,7 +551,7 @@ class AseManager:
         with self.lock:
             for job in session["jobs"].values():
                 if job["state"] == "running":
-                    job["cancelled"] = True
+                    self._cancel_job(job)
             for process, owner in list(self.processes.items()):
                 if owner == token:
                     self._terminate(process)
@@ -555,10 +568,9 @@ class AseManager:
             threads = []
             for session in self.sessions.values():
                 for job in session["jobs"].values():
-                    if job.get("thread"):
-                        threads.append(job["thread"])
+                    threads.extend(self._job_tasks(job))
                     if job["state"] == "running":
-                        job["cancelled"] = True
+                        self._cancel_job(job)
             processes = list(self.processes)
             for process in processes:
                 self._terminate(process)

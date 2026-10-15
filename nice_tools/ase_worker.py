@@ -151,8 +151,13 @@ def _preview(payload: dict, emit: Callable, catalog=None) -> dict:
 def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
     target = _path(payload.get("path"))
     expected = payload.get("out_target_fingerprint")
-    _check_target(target, expected)
+    if payload.get("no_replace") and payload.get("defer_publish") is not True:
+        raise ValueError("No-replace exports require atomic publication by the parent.")
+    if not payload.get("no_replace"):
+        _check_target(target, expected)
+    from .ase_export import cleanup_owned_path, file_identity
     stage = None
+    stage_identity = None
     preserve_stage = False
     try:
         if payload.get("stage_path") is not None:
@@ -168,6 +173,10 @@ def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
                 or (target.exists() and candidate.samefile(target))
             ):
                 raise ValueError("The export staging file must be an empty reserved file beside the destination.")
+            if payload.get("no_replace"):
+                boundary = payload.get("output_boundary")
+                if not isinstance(boundary, dict) or file_identity(candidate.stat()) != tuple(boundary.get("stage_identity", ())):
+                    raise ValueError("The reserved export staging file changed before transfer.")
             # Only adopt cleanup ownership after checking the reservation. An
             # invalid request must never unlink the target or another user file.
             stage = candidate
@@ -175,11 +184,13 @@ def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
             descriptor, filename = tempfile.mkstemp(prefix=".nice-tools-", suffix=".bcp", dir=target.parent)
             os.close(descriptor)
             stage = Path(filename)
+        stage_identity = file_identity(stage.stat())
         request = {**payload, "path": str(stage)}
         result = _module("ase_cli").run_operation(request, emit, register=register)
         if not isinstance(result, dict):
             raise ValueError("ASE did not return a valid transfer result.")
-        _check_target(target, expected)
+        if not payload.get("no_replace"):
+            _check_target(target, expected)
         result = {**result, "path": str(target)}
         if payload.get("defer_publish") is True:
             # The parent publishes under its cancellation lock, then removes the
@@ -190,9 +201,8 @@ def _output_transfer(payload: dict, emit: Callable, register=None) -> dict:
             os.replace(stage, target)
         return result
     finally:
-        if stage is not None and not preserve_stage:
-            with contextlib.suppress(OSError):
-                stage.unlink(missing_ok=True)
+        if stage is not None and stage_identity is not None and not preserve_stage:
+            cleanup_owned_path(stage, stage_identity)
 
 
 def execute(payload: dict, emit: Callable | None = None, register=None, catalog=None) -> dict:
@@ -205,6 +215,8 @@ def execute(payload: dict, emit: Callable | None = None, register=None, catalog=
         return _module("ase_cli").client_status()
     if operation == "pick":
         return _module("ase_picker").pick_file(payload.get("direction"), payload.get("suggested_name"))
+    if operation == "pick-directory":
+        return _module("ase_picker").pick_directory(payload.get("initial_directory"))
     if operation == "preview":
         return _preview(payload, emit, catalog=catalog)
     if operation == "transfer":
@@ -214,6 +226,10 @@ def execute(payload: dict, emit: Callable | None = None, register=None, catalog=
             return _output_transfer(payload, emit, register=register)
         path = _path(payload.get("path"))
         with _input_guard(path):
+            if payload.get("auto_validate") is True:
+                emit({"phase": "validating", "message": "입력 파일과 스키마 확인 중"})
+                preview = _preview(payload, emit, catalog=catalog)
+                payload = {**payload, "columns": preview["columns"], "fingerprint": preview.get("fingerprint")}
             _check_input(path, payload.get("fingerprint"))
             return _module("ase_cli").run_operation(payload, emit, register=register)
     if operation in CATALOG_OPERATIONS:

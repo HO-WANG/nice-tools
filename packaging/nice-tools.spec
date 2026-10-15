@@ -14,6 +14,8 @@ analysis = Analysis(
         "uvicorn.protocols.http.h11_impl",
         "uvicorn.lifespan.on",
         "nice_tools.ase_worker",
+        "nice_tools.ase_batch",
+        "nice_tools.ase_export",
         "nice_tools.ase_cli",
         "nice_tools.ase_odbc",
         "pyodbc",

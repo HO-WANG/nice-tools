@@ -439,3 +439,81 @@ def test_preview_uses_injected_persistent_odbc_catalog(worker, monkeypatch, tmp_
     result = worker.execute({"operation":"preview", "options":{"direction":"out"}, "path":str(source)}, catalog=run)
     assert result["columns"] == []
     assert calls == ["columns"]
+
+
+def test_directory_picker_dispatch(worker, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'nice_tools.ase_picker', SimpleNamespace(pick_directory=lambda directory: {'cancelled': False, 'path': directory}))
+    assert worker.execute({'operation': 'pick-directory', 'initial_directory': '/tmp'}) == {'cancelled': False, 'path': '/tmp'}
+
+
+def test_automatic_import_inspects_complete_file_under_guard(worker, monkeypatch, tmp_path):
+    import contextlib
+    path = tmp_path / 'input.txt'
+    path.write_bytes(b'1\n')
+    order = []
+    @contextlib.contextmanager
+    def guard(path):
+        order.append('guard')
+        yield
+        order.append('release')
+    monkeypatch.setattr(worker, '_input_guard', guard)
+    def operation(request, emit):
+        if request['operation'] == 'columns':
+            order.append('metadata')
+            return {'object': request['object'], 'columns': [{'name': 'x'}]}
+        order.append('copy')
+        assert request['fingerprint'] == fingerprint(path)
+        assert request['columns'] == [{'name': 'x'}]
+        return {'rows': 1}
+    client(monkeypatch, operation=operation)
+    def inspect(*args):
+        order.append('inspect')
+        return {'fingerprint': fingerprint(path)}
+    monkeypatch.setitem(sys.modules, 'nice_tools.ase_files', SimpleNamespace(inspect_file=inspect, parse_options=lambda value: value))
+    payload = transfer_payload(path, 'in')
+    payload.pop('columns')
+    payload['auto_validate'] = True
+    assert worker.execute(payload)['rows'] == 1
+    assert order == ['guard', 'metadata', 'inspect', 'copy', 'release']
+
+
+def test_automatic_import_rejects_invalid_full_file_before_bcp(worker, monkeypatch, tmp_path):
+    path = tmp_path / 'input.txt'
+    path.write_bytes(b'1\nmalformed\n')
+    client(monkeypatch, operation=lambda request, emit: {'columns': [{'name': 'x'}]} if request['operation'] == 'columns' else pytest.fail('Invalid input reached BCP'))
+    def inspect(*args):
+        raise ValueError('Invalid row at end')
+    monkeypatch.setitem(sys.modules, 'nice_tools.ase_files', SimpleNamespace(inspect_file=inspect, parse_options=lambda value: value))
+    payload = transfer_payload(path, 'in')
+    payload['auto_validate'] = True
+    with pytest.raises(ValueError, match='Invalid row'):
+        worker.execute(payload)
+
+
+def test_no_replace_export_requires_parent_publication(worker, monkeypatch, tmp_path):
+    target = tmp_path / 'existing.txt'
+    target.write_bytes(b'original')
+    client(monkeypatch, operation=lambda request, emit: pytest.fail('No-replace OUT must publish in the parent'))
+    payload = transfer_payload(target, 'out')
+    payload['no_replace'] = True
+    with pytest.raises(ValueError, match='parent'):
+        worker.execute(payload)
+    assert target.read_bytes() == b'original'
+
+
+def test_worker_rejects_replaced_reserved_stage_without_deleting_it(worker, monkeypatch, tmp_path):
+    from nice_tools.ase_export import file_identity
+    target = tmp_path / 'output.txt'
+    stage = tmp_path / '.nice-tools-owned.bcp'
+    stage.write_bytes(b'')
+    expected = file_identity(stage.stat())
+    moved = tmp_path / 'original-stage.bcp'
+    stage.rename(moved)
+    stage.write_bytes(b'')
+    client(monkeypatch, operation=lambda request, emit: pytest.fail('Replaced stage reached BCP'))
+    payload = transfer_payload(target, 'out')
+    payload.update(no_replace=True, defer_publish=True, stage_path=str(stage), output_boundary={'stage_identity': expected})
+    with pytest.raises(ValueError):
+        worker.execute(payload)
+    assert stage.exists()
+    assert moved.exists()

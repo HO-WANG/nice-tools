@@ -17,6 +17,8 @@ from playwright.sync_api import expect, sync_playwright
 SESSION = "session-1"
 PASSWORD = "browser-only-password-7!"
 FIXED_PROFILE_KEY = "nice1234!!"
+EXPORT_DIRECTORY = r"C:\nice-tools"
+CHOSEN_DIRECTORY = r"C:\exports"
 PROFILE_PATH = r"C:\nice-tools\ase-connections.txt"
 CLIENT_PATHS = {"bcp_path": r"C:\SAP\OCS-16_0\bin\bcp.exe"}
 REMOVED_CONNECTION_CONTROLS = "#ase-dsn, #ase-dsn-help, #ase-sql-ini, #ase-sql-ini-help, #ase-sql-ini-path, #ase-pick-sql-ini, #ase-sql-ini-reload"
@@ -49,19 +51,23 @@ class ASEMock:
     calls: list = field(default_factory=list)
     violations: list = field(default_factory=list)
     picker_number: int = 0
-    preview_number: int = 0
     job_number: int = 0
     status_polls: dict = field(default_factory=dict)
     hold_job: bool = False
     cancel_picker: bool = False
+    delay_directory: bool = False
+    pending_directories: list = field(default_factory=list)
+    export_directory: str = EXPORT_DIRECTORY
+    job_directories: dict = field(default_factory=dict)
     fail_columns: bool = False
     delay_owners: bool = False
-    delay_preview: bool = False
     pending_owners: list = field(default_factory=list)
     delay_objects: bool = False
     pending_objects: list = field(default_factory=list)
-    pending_previews: list = field(default_factory=list)
-    reviews: dict = field(default_factory=dict)
+    job_objects: dict = field(default_factory=dict)
+    job_concurrencies: dict = field(default_factory=dict)
+    mixed_batch: bool = False
+    extra_table: bool = False
     profiles: list = field(default_factory=list)
     profiles_exist: bool = False
     fail_profiles: bool = False
@@ -97,6 +103,11 @@ class ASEMock:
     def respond(self, route, payload, status=200):
         route.fulfill(status=status, json=payload, headers={"Cache-Control": "no-store"})
 
+    def finish_directory(self, route, response):
+        if not response.get("cancelled"):
+            self.export_directory = response["path"]
+        self.respond(route, response)
+
     def status(self, job, state="running"):
         direction = self.job_directions.get(job, "out")
         result = {"rows": self.completed_rows, "path": FILE_PATH, "direction": direction} if state == "succeeded" else {}
@@ -109,6 +120,13 @@ class ASEMock:
             "rows": self.completed_rows if state == "succeeded" else 2,
             "events": [{"phase": "export", "message": HOSTILE_SAMPLE}],
             "result": result,
+            **({"items": [
+                {"object": obj, "path": self.job_directories.get(job, EXPORT_DIRECTORY) + "\\" + obj["owner"] + "\\" + ("customer_rows_1.txt" if index == 0 else obj["name"] + ".txt"),
+                 "state": ("queued" if index >= self.job_concurrencies.get(job, 3) else "running") if state == "running" else ("failed" if self.mixed_batch and index == 1 else "succeeded" if self.mixed_batch and state == "failed" else state),
+                 "message": HOSTILE_ERROR if self.mixed_batch and index == 1 and state != "running" else f"mock item {state}",
+                 "rows": self.completed_rows if state == "succeeded" or self.mixed_batch and state == "failed" and index != 1 else 0,
+                 **({"statistics": {**self.completed_statistics, **(self.completed_bcp_statistics or {})}} if (state == "succeeded" or self.mixed_batch and state == "failed" and index != 1) and self.completed_statistics is not None else {})}
+                for index, obj in enumerate(self.job_objects.get(job, []))]} if direction == "out" else {}),
         }
 
     def handle(self, route):
@@ -119,6 +137,7 @@ class ASEMock:
         headers = request.headers
         self.calls.append({"endpoint": endpoint, "method": request.method, "payload": payload, "url": request.url, "headers": headers})
         try:
+            assert endpoint not in {"preview", "review"}, "Direct execution must never request a preview or review"
             assert endpoint not in REMOVED_CONNECTION_ENDPOINTS, "Removed SQL.ini/DSN APIs must not be requested"
             assert not parsed.query, "ASE request has a query string"
             assert PASSWORD not in request.url, "Password leaked into URL"
@@ -129,7 +148,7 @@ class ASEMock:
             assert headers.get("x-nice-tools") == "ase", "ASE request is missing its browser-origin guard"
             if endpoint == "status":
                 assert request.method == "GET"
-                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "odbc": ODBC, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
+                return self.respond(route, {"available": self.runtime_available, "backend": "ODBC", "detail": "ready" if self.runtime_available else "SAP ASE ODBC 드라이버를 찾을 수 없습니다.", "platform": "win32", "export_directory": EXPORT_DIRECTORY, "odbc": ODBC, "bcp_available": self.bcp_available, "bcp_detail": "ready" if self.bcp_available else "SAP bcp.exe를 찾을 수 없습니다.", **(CLIENT_PATHS if self.bcp_available else {})})
             if endpoint == "profiles":
                 assert request.method == "GET"
                 if self.delay_profiles:
@@ -203,6 +222,7 @@ class ASEMock:
                 assert isinstance(payload["search"], str) and len(payload["search"]) <= 255
                 assert payload["kind"] in {"all", "U", "V", "P"}
                 objects = [TABLE, DUPLICATE_TABLE, HOSTILE_TABLE, VIEW, PROCEDURE] if payload["database"] == "db1" else []
+                objects = objects + [{**TABLE, "id": 15, "name": "orders"}] if self.extra_table and payload["database"] == "db1" else objects
                 objects = [obj for obj in objects if (payload["owner_id"] is None or obj["owner_id"] == payload["owner_id"]) and (payload["kind"] == "all" or obj["kind"] == payload["kind"]) and payload["search"].casefold() in obj["name"].casefold()]
                 response = self.timed({"objects": objects})
                 if self.delay_objects:
@@ -218,40 +238,47 @@ class ASEMock:
                 return self.respond(route, self.timed({"object": payload["object"], "columns": COLUMNS}))
             if endpoint == "pick-file":
                 assert set(payload) == {"session", "direction", "suggested_name"}
-                assert payload["direction"] in {"in", "out"}
+                assert payload["direction"] == "in"
                 if self.cancel_picker:
                     self.cancel_picker = False
                     return self.respond(route, {"cancelled": True})
                 self.picker_number += 1
                 return self.respond(route, {"cancelled": False, "file": f"native-file-token-{self.picker_number}", "path": FILE_PATH})
-            if endpoint == "preview":
-                assert set(payload) == {"session", "object", "file", "options"}
-                assert payload["file"] == f"native-file-token-{self.picker_number}", "Preview must use the native token"
-                assert payload["file"] != FILE_PATH and "path" not in payload, "Display paths must never select files"
+            if endpoint == "pick-directory":
+                assert set(payload) == {"session"}, "Folder selection must remain native and session-bound"
+                if self.cancel_picker:
+                    self.cancel_picker = False
+                    return self.respond(route, {"cancelled": True})
+                response = {"cancelled": False, "path": CHOSEN_DIRECTORY}
+                if self.delay_directory:
+                    self.delay_directory = False
+                    self.pending_directories.append((route, response))
+                    return
+                return self.finish_directory(route, response)
+            if endpoint == "jobs":
                 options = payload["options"]
                 assert set(options) == {"direction", "encoding", "field_terminator", "row_terminator", "batch_size", "keep_identity"}
                 assert options["encoding"] in {"utf-8", "cp949", "euc-kr"}
                 assert isinstance(options["batch_size"], int)
                 assert isinstance(options["keep_identity"], bool)
-                assert options["direction"] in {"in", "out"}
-                assert payload["object"]["kind"] == "U" or options["direction"] == "out"
-                assert payload["object"]["kind"] != "P", "Procedures cannot use BCP"
-                self.preview_number += 1
-                review = f"review-{self.preview_number}"
-                self.reviews[review] = payload
-                response = {"review": review, "object": payload["object"], "columns": COLUMNS, "path": FILE_PATH, "rows": 3, "bytes": 100, "sample": [["1", HOSTILE_SAMPLE]], "warnings": []}
-                if self.delay_preview:
-                    self.delay_preview = False
-                    self.pending_previews.append((route, response))
-                    return
-                return self.respond(route, response)
-            if endpoint == "jobs":
-                assert set(payload) == {"session", "review"}
-                assert payload["review"] in self.reviews, "A reviewed preview is required before starting"
+                direction = options["direction"]
+                assert direction in {"in", "out"}
+                if direction == "out":
+                    assert set(payload) == {"session", "objects", "options", "concurrency"}
+                    assert type(payload["concurrency"]) is int and payload["concurrency"] in {1, 2, 3}
+                    assert payload["objects"] and all(obj["kind"] in {"U", "V"} for obj in payload["objects"])
+                else:
+                    assert set(payload) == {"session", "object", "file", "options"}
+                    assert payload["object"]["kind"] == "U"
+                    assert payload["file"] == f"native-file-token-{self.picker_number}"
+                    assert payload["file"] != FILE_PATH
                 self.job_number += 1
                 job = f"job-{self.job_number}"
                 self.status_polls[job] = 0
-                self.job_directions[job] = self.reviews[payload["review"]]["options"]["direction"]
+                self.job_directions[job] = direction
+                self.job_objects[job] = payload.get("objects", [])
+                self.job_concurrencies[job] = payload.get("concurrency", 1)
+                self.job_directories[job] = self.export_directory
                 if self.delay_start:
                     self.delay_start = False
                     self.pending_starts.append((route, {"job": job}))
@@ -294,20 +321,24 @@ def focus_owner(page):
     page.locator("#ase-owner").focus()
 
 
-def pick_and_preview(page, mock):
-    page.locator("#ase-pick-file").click()
-    expect(page.locator("#ase-path")).to_contain_text(FILE_PATH)
-    expect(page.locator("#ase-preview")).to_be_enabled()
-    page.locator("#ase-preview").click()
-    expect(page.locator("#ase-review")).to_be_visible()
-    expect(page.locator("#ase-review")).to_contain_text(HOSTILE_SAMPLE)
-    assert page.locator("#ase-review svg, #ase-review script, #ase-review img").count() == 0
-    assert PASSWORD not in page.locator("#ase-review").inner_text()
+def prepare_transfer(page, mock):
+    """Select a native IN file or OUT directory; execution needs no review."""
+    assert page.locator("#ase-preview, #ase-review").count() == 0
+    if page.locator("#ase-in").is_checked():
+        page.locator("#ase-pick-file").click()
+        expect(page.locator("#ase-path")).to_contain_text(FILE_PATH)
+    else:
+        selected = page.locator("#ase-object-body .selected-row input[type='checkbox']")
+        if not page.locator("#ase-object-body input:checked").count():
+            selected.check()
+        page.locator("#ase-pick-directory").click()
+        expect(page.locator("#ase-path")).to_have_text(CHOSEN_DIRECTORY)
+    expect(page.locator("#ase-start")).to_be_enabled()
     assert not mock.violations, mock.violations
 
 
 def assert_invalidated(page):
-    expect(page.locator("#ase-review")).to_be_hidden()
+    assert page.locator("#ase-preview, #ase-review").count() == 0
     expect(page.locator("#ase-start")).to_be_disabled()
 
 
@@ -396,7 +427,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-object-body button")).to_have_count(1)
     assert mock.endpoint_calls("objects")[-1]["payload"] == {"session": SESSION, "database": "db1", "owner_id": 1, "search": "customer_rows", "kind": "U"}
     select_table(page)
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-search").fill("customer")
     expect(page.locator("#ase-object-body button")).to_have_count(0)
     assert_invalidated(page)
@@ -430,76 +461,35 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     expect(page.locator("#ase-catalog-timings")).to_contain_text("앱 준비 4.85초")
     mock.timings = {"login_seconds": 0, "query_seconds": 0.5, "total_seconds": 0.75}
 
-    # User tables import/export, views export, and procedures remain browse-only.
+    # Focus is for columns/IN; OUT uses only its checked set and needs no columns.
     select_table(page)
-    expect(page.locator("#ase-in")).to_be_enabled()
     page.locator("#ase-in").check()
-    expect(page.locator("#ase-in")).to_be_checked()
     select_table(page, VIEW["name"])
-    expect(page.locator("#ase-in")).to_be_disabled()
-    expect(page.locator("#ase-out")).to_be_checked()
-    expect(page.locator("#ase-pick-file")).to_be_enabled()
-    select_table(page, PROCEDURE["name"])
-    expect(page.locator("#ase-in")).to_be_disabled()
+    expect(page.locator("#ase-in")).to_be_checked()
     expect(page.locator("#ase-pick-file")).to_be_disabled()
-    expect(page.locator("#ase-preview")).to_be_disabled()
+    page.locator("#ase-out").check()
+    select_table(page, PROCEDURE["name"])
+    expect(page.locator("#ase-object-body .selected-row input")).to_be_disabled()
+    expect(page.locator("#ase-start")).to_be_disabled()
     select_table(page)
-
-    # A new review is required whenever an option, mode, file, or object changes.
     page.locator("#ase-in").check()
-    mutations = [
-        lambda: page.locator("#ase-encoding").select_option("cp949"),
-        lambda: page.locator("#ase-field-terminator").fill("|"),
-        lambda: page.locator("#ase-row-terminator").fill(r"\r\n"),
-        lambda: page.locator("#ase-batch-size").fill("2000"),
-        lambda: page.locator("#ase-keep-identity").check(),
-        lambda: page.locator("#ase-out").check(),
-        lambda: page.locator("#ase-in").check(),
-    ]
-    for index, mutate in enumerate(mutations):
-        pick_and_preview(page, mock)
-        if index == 0:
-            for width in (390, 768, 1440):
-                page.set_viewport_size({"width": width, "height": 844})
-                assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth"), f"ASE review overflow at {width}px"
-            if screenshot:
-                page.screenshot(path=screenshot, full_page=True)
-            if mobile_screenshot:
-                page.set_viewport_size({"width": 390, "height": 844})
-                page.screenshot(path=mobile_screenshot, full_page=True)
-                page.set_viewport_size({"width": 1440, "height": 1000})
-        mutate()
-        assert_invalidated(page)
-    pick_and_preview(page, mock)
-    page.locator("#ase-pick-file").click()
-    assert_invalidated(page)
-    pick_and_preview(page, mock)
-    select_table(page, HOSTILE)
-    assert_invalidated(page)
-    select_table(page)
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
+    for selector, value in [("#ase-field-terminator", "|"), ("#ase-row-terminator", r"\r\n"), ("#ase-batch-size", "2000")]:
+        page.locator(selector).fill(value)
+        expect(page.locator("#ase-start")).to_be_enabled()
+    page.locator("#ase-encoding").select_option("cp949")
+    page.locator("#ase-keep-identity").check()
+    expect(page.locator("#ase-append-warning")).to_contain_text("완료된 배치")
     mock.cancel_picker = True
     page.locator("#ase-pick-file").click()
     assert_invalidated(page)
-    expect(page.locator("#ase-preview")).to_be_disabled()
-    assert FILE_PATH not in page.locator("#ase-path").inner_text()
-
-    # A late preview must not revive a review invalidated by changed settings.
-    page.locator("#ase-pick-file").click()
-    expect(page.locator("#ase-preview")).to_be_enabled()
-    mock.delay_preview = True
-    page.locator("#ase-preview").click()
-    page.wait_for_function("document.querySelector('#ase-preview').disabled")
-    page.locator("#ase-encoding").select_option("euc-kr")
-    assert mock.pending_previews
-    route, response = mock.pending_previews.pop()
-    mock.respond(route, response)
-    page.wait_for_timeout(100)
-    assert_invalidated(page)
+    expect(page.locator("#ase-path")).not_to_contain_text(FILE_PATH)
+    page.locator("#ase-out").check()
+    expect(page.locator("#ase-path")).to_have_text(CHOSEN_DIRECTORY)
 
     # Successful jobs poll repeatedly, render event text safely, then unlock.
     page.locator("#ase-out").check()
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     expect(page.locator("#ase-start")).to_be_enabled()
     mock.delay_start = True
     page.locator("#ase-start").click()
@@ -541,7 +531,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     mock.completed_rows = 12
     mock.completed_statistics = {"elapsed_seconds": 5, "rows_per_second": 2.4, "bytes_written": 100}
     mock.completed_bcp_statistics = {"bcp_seconds": 2, "bcp_rows_per_second": 6}
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
     expect(page.locator("#ase-stat-elapsed")).to_have_text("5.00초")
@@ -561,7 +551,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
 
     for cli_statistics in ({"bcp_seconds": -1, "bcp_rows_per_second": 6}, {"bcp_seconds": 2, "bcp_rows_per_second": HOSTILE_SAMPLE}):
         mock.completed_bcp_statistics = cli_statistics
-        pick_and_preview(page, mock)
+        prepare_transfer(page, mock)
         page.locator("#ase-start").click()
         expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
         expect(page.locator("#ase-out-statistics")).to_be_visible()
@@ -575,7 +565,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     mock.completed_rows = 0
     mock.completed_bcp_statistics = None
     mock.completed_statistics = {"elapsed_seconds": 0.5, "rows_per_second": 0, "bytes_written": 0}
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-out-statistics")).to_be_hidden()
     expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
@@ -588,7 +578,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
 
     # An unmeasurably short duration must never display infinity or invented speed.
     mock.completed_statistics = {"elapsed_seconds": 0, "rows_per_second": None, "bytes_written": 0}
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
     expect(page.locator("#ase-out-statistics")).to_be_visible()
@@ -597,7 +587,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     # Old/invalid server responses and failed/cancelled exports cannot claim success metrics.
     for statistics in (None, {"elapsed_seconds": -1, "rows_per_second": 3, "bytes_written": 0}, {"elapsed_seconds": 1, "rows_per_second": HOSTILE_SAMPLE, "bytes_written": 0}):
         mock.completed_statistics = statistics
-        pick_and_preview(page, mock)
+        prepare_transfer(page, mock)
         page.locator("#ase-start").click()
         expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
         expect(page.locator("#ase-out-statistics")).to_be_hidden()
@@ -605,13 +595,13 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     mock.completed_statistics = {"elapsed_seconds": 1.25, "rows_per_second": 2.4, "bytes_written": 100}
     for terminal_state in ("failed", "cancelled"):
         mock.terminal_state = terminal_state
-        pick_and_preview(page, mock)
+        prepare_transfer(page, mock)
         page.locator("#ase-start").click()
         expect(page.locator("#ase-job-status")).to_contain_text(terminal_state, timeout=10000)
         expect(page.locator("#ase-out-statistics")).to_be_hidden()
     mock.terminal_state = "succeeded"
     page.locator("#ase-in").check()
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-job-status")).to_contain_text("succeeded", timeout=10000)
     expect(page.locator("#ase-out-statistics")).to_be_hidden()
@@ -619,7 +609,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     # Cancel an active job, and make metadata errors literal display text.
     mock.hold_job = True
     page.locator("#ase-in").check()
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-cancel")).to_be_enabled()
     page.locator("#ase-cancel").click()
@@ -691,7 +681,7 @@ def validate(page, mock, url, screenshot, mobile_screenshot=None):
     page.locator("#ase-search-button").click()
     select_table(page)
     page.locator("#ase-in").check()
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-start").click()
     expect(page.locator("#ase-cancel")).to_be_enabled()
     page.locator("#ase-disconnect").click()
@@ -763,7 +753,7 @@ def validate_profiles(page, url):
     assert not mock.endpoint_calls("objects"), "Choosing an owner must await Search"
     page.locator("#ase-search-button").click()
     select_table(page)
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     page.locator("#ase-profile-reload").click()
     expect(page.locator("#ase-database")).to_be_disabled()
     expect(page.locator("#ase-database")).to_have_value("")
@@ -1089,7 +1079,7 @@ def validate_driver_status(page, url):
     select_table(page)
     expect(page.locator("#ase-column-body")).to_contain_text("varchar(255)")
     expect(page.locator("#ase-pick-file")).to_be_disabled()
-    expect(page.locator("#ase-preview")).to_be_disabled()
+    assert page.locator("#ase-preview, #ase-review").count() == 0
     expect(page.locator("#ase-start")).to_be_disabled()
     expect(page.locator("#ase-transfer-note")).to_contain_text("bcp.exe")
     assert not mock.endpoint_calls("pick-file")
@@ -1101,7 +1091,7 @@ def validate_driver_status(page, url):
 
 
 def validate_removed_owner(page, url):
-    """A full owner refresh must invalidate a now-missing selected owner's review."""
+    """A full owner refresh must clear a now-missing selected owner and OUT selection."""
     mock = ASEMock(owners_override=[{"id": 1, "name": "dbo"}])
     page.route("**/api/ase/**", mock.handle)
     page.goto(url, wait_until="networkidle")
@@ -1118,13 +1108,136 @@ def validate_removed_owner(page, url):
     page.locator("#ase-owner").select_option("2")
     page.locator("#ase-search-button").click()
     select_table(page, owner="analytics")
-    pick_and_preview(page, mock)
+    prepare_transfer(page, mock)
     focus_owner(page)
     expect(page.locator("#ase-owner")).to_have_value("")
     expect(page.locator("#ase-object-body button")).to_have_count(0)
     assert_invalidated(page)
     expect(page.locator("#ase-pick-file")).to_be_disabled()
     assert not mock.violations, mock.violations
+
+
+def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
+    """Exercise batch rendering; backend tests verify the actual process limit."""
+    mock = ASEMock(extra_table=True, hold_job=True, completed_bcp_statistics={"bcp_seconds": 0.5, "bcp_rows_per_second": 20})
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-database")).to_be_enabled()
+    page.locator("#ase-database").select_option("db1")
+    expect(page.locator("#ase-path")).to_have_text(EXPORT_DIRECTORY)
+    expect(page.locator("#ase-concurrency")).to_have_value("3")
+    assert page.locator("#ase-path input").count() == 0
+    page.locator("#ase-search-button").click()
+    expect(page.locator("#ase-object-body tr")).to_have_count(6)
+    page.locator("#ase-select-all").check()
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 5개 선택")
+    expect(page.locator("#ase-object-body input:checked")).to_have_count(5)
+    expect(page.locator("#ase-object-body tr").filter(has_text=PROCEDURE["name"]).locator("input")).to_be_disabled()
+    page.locator("#ase-clear-selection").click()
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 0개 선택")
+    page.locator("#ase-kind").select_option("U")
+    page.locator("#ase-search-button").click()
+    page.locator("#ase-select-all").check()
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 4개 선택")
+    assert not mock.endpoint_calls("columns"), "Batch exports must not require a column request per object"
+    expect(page.locator("#ase-start")).to_be_enabled()
+    select_table(page)
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 4개 선택")
+    page.locator("#ase-in").check()
+    expect(page.locator("#ase-concurrency-field")).to_be_hidden()
+    expect(page.locator("#ase-concurrency")).to_be_disabled()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    page.locator("#ase-out").check()
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 4개 선택")
+    # A native folder dialog owns this generation until it returns or disconnects.
+    mock.delay_directory = True
+    page.locator("#ase-pick-directory").click()
+    assert mock.pending_directories
+    for selector in ("#ase-encoding", "#ase-field-terminator", "#ase-select-all", "#ase-clear-selection", "#ase-search", "#ase-kind", "#ase-owner", "#ase-database", "#ase-in", "#ase-out", "#ase-concurrency", "#ase-profile", "#ase-profile-reload", "#ase-object-body input", "#ase-object-body button"):
+        for control in page.locator(selector).all():
+            expect(control).to_be_disabled()
+    # Dispatched changes must also leave the picker request and selections intact.
+    page.locator("#ase-encoding").dispatch_event("input")
+    page.locator("#ase-select-all").dispatch_event("change")
+    route, response = mock.pending_directories.pop()
+    mock.finish_directory(route, response)
+    expect(page.locator("#ase-path")).to_have_text(mock.export_directory)
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 4개 선택")
+    expect(page.locator("#ase-concurrency")).to_be_enabled()
+    expect(page.locator("#ase-path")).to_have_text(CHOSEN_DIRECTORY)
+    mock.cancel_picker = True
+    page.locator("#ase-pick-directory").click()
+    expect(page.locator("#ase-path")).to_have_text(CHOSEN_DIRECTORY)
+    page.locator("#ase-concurrency").select_option("1")
+    page.locator("#ase-start").click()
+    expect(page.locator("#ase-job-status")).to_contain_text("자동 검증")
+    expect(page.locator("#ase-job-items tr")).to_have_count(4, timeout=5000)
+    expect(page.locator("#ase-job-items")).to_contain_text("대기 중")
+    assert len(mock.endpoint_calls("jobs")[-1]["payload"]["objects"]) == 4
+    assert "file" not in mock.endpoint_calls("jobs")[-1]["payload"]
+    assert mock.endpoint_calls("jobs")[-1]["payload"]["concurrency"] == 1
+    expect(page.locator("#ase-concurrency")).to_be_disabled()
+    expect(page.locator("#ase-job-items tr").filter(has=page.get_by_role("cell", name="실행 중", exact=True))).to_have_count(1)
+    expect(page.locator("#ase-select-all")).to_be_disabled()
+    expect(page.locator("#ase-pick-directory")).to_be_disabled()
+    expect(page.locator("#ase-clear-selection")).to_be_disabled()
+    page.locator("#ase-cancel").click()
+    expect(page.locator("#ase-job-items")).to_contain_text("취소됨")
+    expect(page.locator("#ase-start")).to_be_enabled()
+    mock.hold_job = False
+    mock.mixed_batch = True
+    mock.terminal_state = "failed"
+    page.locator("#ase-concurrency").select_option("2")
+    page.locator("#ase-start").click()
+    assert mock.endpoint_calls("jobs")[-1]["payload"]["concurrency"] == 2
+    expect(page.locator("#ase-job-status")).to_contain_text("failed", timeout=10000)
+    expect(page.locator("#ase-job-items")).to_contain_text("완료")
+    expect(page.locator("#ase-job-items")).to_contain_text(HOSTILE_ERROR)
+    expect(page.locator("#ase-job-items")).to_contain_text("customer_rows_1.txt")
+    expect(page.locator("#ase-job-items")).to_contain_text("바이트")
+    expect(page.locator("#ase-job-items")).to_contain_text("bcp.exe 실행 0.5초")
+    expect(page.locator("#ase-job-items script, #ase-job-items img")).to_have_count(0)
+    for width in (390, 768, 1440):
+        page.set_viewport_size({"width": width, "height": 844})
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        if width == 1440 and screenshot:
+            page.screenshot(path=screenshot, full_page=True)
+        if width == 390 and mobile_screenshot:
+            page.screenshot(path=mobile_screenshot, full_page=True)
+    # Changing to 3 affects the next OUT group; IN stays a single native-file job.
+    mock.hold_job = True
+    mock.mixed_batch = False
+    page.locator("#ase-concurrency").select_option("3")
+    page.locator("#ase-start").click()
+    expect(page.locator("#ase-cancel")).to_be_enabled()
+    assert mock.endpoint_calls("jobs")[-1]["payload"]["concurrency"] == 3
+    page.locator("#ase-cancel").click()
+    expect(page.locator("#ase-start")).to_be_enabled()
+    page.locator("#ase-in").check()
+    expect(page.locator("#ase-concurrency")).to_be_disabled()
+    prepare_transfer(page, mock)
+    page.locator("#ase-start").click()
+    expect(page.locator("#ase-cancel")).to_be_enabled()
+    import_payload = mock.endpoint_calls("jobs")[-1]["payload"]
+    assert set(import_payload) == {"session", "object", "file", "options"}
+    assert import_payload["object"] == TABLE
+    page.locator("#ase-cancel").click()
+    expect(page.locator("#ase-cancel")).to_be_hidden()
+    page.locator("#ase-out").check()
+    page.locator("#ase-search").fill("changed")
+    expect(page.locator("#ase-selection-count")).to_have_text("OUT 0개 선택")
+    expect(page.locator("#ase-start")).to_be_disabled()
+    assert not mock.endpoint_calls("preview") and not mock.endpoint_calls("review")
+    assert len(mock.endpoint_calls("pick-file")) == 1
+    assert not mock.violations, mock.violations
+    assert not errors, errors
 
 
 def main():
@@ -1138,6 +1251,7 @@ def main():
         browser = playwright.chromium.launch(executable_path=args.chromium, headless=True)
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         validate(context.new_page(), ASEMock(auto_save=True), args.url, args.screenshot, args.mobile_screenshot)
+        validate_batch(context.new_page(), args.url, args.screenshot, args.mobile_screenshot)
         validate_profiles(context.new_page(), args.url)
         validate_saved_connections(context.new_page(), args.url)
         validate_saved_profile_race(context.new_page(), args.url)
@@ -1146,7 +1260,7 @@ def main():
         validate_driver_status(context.new_page(), args.url)
         validate_removed_owner(context.new_page(), args.url)
         browser.close()
-    print("ASE browser: direct four-field connections, removed SQL.ini/DSN controls and API calls, explicit Search/Enter with IME guard, optional/lazy owners, filters, stale responses, ODBC/BCP status and timings, saved profiles, fixed-key contract, job locks, OUT statistics, native file tokens, safe text, previews, polling/cancel, storage and responsive widths passed.")
+    print("ASE browser: direct four-field connections, removed SQL.ini/DSN controls and API calls, explicit Search/Enter with IME guard, optional/lazy owners, filters, stale responses, ODBC/BCP status and timings, saved profiles, fixed-key contract, job locks, batch OUT selection/queued/mixed results/collision paths, OUT statistics, native file tokens, safe text, direct starts, polling/cancel, storage and responsive widths passed.")
 
 
 if __name__ == "__main__":

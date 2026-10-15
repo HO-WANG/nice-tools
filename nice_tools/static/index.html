@@ -159,8 +159,9 @@
             <button id="ase-search-button" class="primary-button" type="button" disabled>검색</button>
           </div>
           <p id="ase-search-note" class="ase-note">DB를 선택한 뒤 검색을 누르세요. 소유자는 선택하지 않아도 전체를 조회합니다.</p>
+          <div class="ase-selection-toolbar"><label class="inline-checkbox"><input id="ase-select-all" type="checkbox" disabled>표시된 테이블·뷰 전체 선택</label><span id="ase-selection-count">OUT 0개 선택</span><button id="ase-clear-selection" class="secondary-button" type="button" disabled>선택 해제</button></div>
           <div class="ase-object-layout">
-            <div class="ase-table-scroll"><table class="ase-table"><caption class="visually-hidden">객체를 선택하여 컬럼 확인</caption><thead><tr><th scope="col">객체 이름</th><th scope="col">소유자</th><th scope="col">종류</th></tr></thead><tbody id="ase-object-body"></tbody></table><p id="ase-object-empty" class="ase-empty">서버에 연결한 뒤 DB를 선택하세요.</p></div>
+            <div class="ase-table-scroll"><table class="ase-table"><caption class="visually-hidden">체크박스로 OUT 선택, 객체 이름으로 컬럼과 IN 대상 선택</caption><thead><tr><th scope="col">OUT</th><th scope="col">객체 이름</th><th scope="col">소유자</th><th scope="col">종류</th></tr></thead><tbody id="ase-object-body"></tbody></table><p id="ase-object-empty" class="ase-empty">서버에 연결한 뒤 DB를 선택하세요.</p></div>
             <section class="ase-columns" aria-labelledby="ase-columns-title"><div class="ase-subheading"><h3 id="ase-columns-title">컬럼 정보</h3><p id="ase-object-name" class="section-note"></p></div><p id="ase-column-empty" class="ase-empty">목록에서 객체를 선택하세요.</p><div id="ase-column-scroll" class="ase-table-scroll" hidden><table class="ase-table ase-column-table"><caption class="visually-hidden">선택한 객체의 컬럼 순서와 자료형</caption><thead><tr><th scope="col">순서</th><th scope="col">컬럼</th><th scope="col">자료형</th><th scope="col">NULL</th><th scope="col">IDENTITY</th></tr></thead><tbody id="ase-column-body"></tbody></table></div></section>
           </div>
         </section>
@@ -176,17 +177,10 @@
           <p id="ase-delimiter-note" class="ase-note">탭은 \t, 줄바꿈은 \n, Windows 줄바꿈은 \r\n으로 입력하세요. 쉼표 등 문자도 사용할 수 있습니다.</p>
           <div id="ase-identity-options" class="ase-instructions" hidden><label class="inline-checkbox"><input id="ase-keep-identity" type="checkbox" disabled>파일의 IDENTITY 값 유지</label><p>기본값은 새 ID를 생성합니다. IN 파일은 IDENTITY 자리도 포함해 위 컬럼 순서대로 준비하세요.</p></div>
           <p id="ase-append-warning" class="ase-warning" hidden>IN은 기존 테이블에 행을 추가합니다. 실패하거나 취소해도 완료된 배치는 남습니다. 같은 파일을 다시 실행하면 중복 행이 생길 수 있습니다.</p>
-          <div class="ase-file-row"><div><span id="ase-file-label">저장할 파일</span><p id="ase-path">파일을 선택하세요.</p></div><button id="ase-pick-file" class="secondary-button" type="button" disabled>파일 선택</button></div>
-          <p id="ase-file-note" class="panel-footnote">Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. OUT은 성공했을 때만 대상 파일을 교체합니다.</p>
+          <div class="ase-file-row"><div><span id="ase-file-label">저장할 폴더</span><p id="ase-path">EXE가 있는 폴더</p></div><div id="ase-concurrency-field" class="field ase-concurrency-field"><label for="ase-concurrency">동시 작업 수</label><select id="ase-concurrency" disabled><option value="1">1개</option><option value="2">2개</option><option value="3" selected>3개</option></select></div><button id="ase-pick-directory" class="secondary-button" type="button" disabled>폴더 선택</button><button id="ase-pick-file" class="secondary-button" type="button" disabled hidden>파일 선택</button></div>
+          <p id="ase-file-note" class="panel-footnote">기본값은 EXE가 있는 폴더입니다. 소유자/테이블.txt로 저장하고 같은 이름이 있으면 테이블_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~3개 중 선택할 수 있습니다.</p>
         </section>
-        <div class="action-row"><p id="ase-ready-note">객체와 파일을 선택한 뒤 실행 내용을 확인하세요.</p><button id="ase-preview" class="secondary-button" type="button" disabled>실행 내용 확인</button></div>
-        <section id="ase-review" class="panel" aria-labelledby="ase-review-title" hidden>
-          <div class="section-heading"><h2 id="ase-review-title">실행 전 확인</h2><button id="ase-start" class="primary-button" type="button" disabled>BCP OUT 시작</button></div>
-          <dl id="ase-review-details" class="ase-review-details"></dl>
-          <ul id="ase-review-warnings" class="ase-review-warnings" hidden></ul>
-          <div id="ase-sample" class="ase-table-scroll" hidden><table class="ase-table"><caption>IN 파일 미리보기 · 일부 행</caption><thead id="ase-sample-head"></thead><tbody id="ase-sample-body"></tbody></table></div>
-          <p id="ase-review-note" class="panel-footnote">설정, 객체 또는 파일을 바꾸면 다시 확인해야 합니다.</p>
-        </section>
+        <div class="action-row"><p id="ase-ready-note">내보낼 객체를 체크하고 시작하세요.</p><button id="ase-start" class="primary-button" type="button" disabled>BCP OUT 시작</button></div>
         <section id="ase-job" class="panel" aria-labelledby="ase-job-title" aria-busy="false" hidden>
           <div class="section-heading"><h2 id="ase-job-title">실행 상태</h2><button id="ase-cancel" class="secondary-button" type="button" hidden>실행 취소</button></div>
           <p id="ase-job-status" class="ase-job-status" role="status" aria-live="polite"></p>
@@ -200,6 +194,7 @@
             <p id="ase-bcp-statistics" class="ase-note" hidden></p>
             <p id="ase-out-statistics-note" class="ase-note">작업 시작부터 파일 저장 완료까지 측정합니다. 평균 처리 속도는 내보낸 행 수 ÷ 총 소요 시간입니다.</p>
           </div>
+          <div id="ase-job-items-scroll" class="ase-table-scroll" hidden><table class="ase-table ase-job-items"><caption class="visually-hidden">객체별 내보내기 실행 상태</caption><thead><tr><th scope="col">객체</th><th scope="col">상태</th><th scope="col">저장 경로</th><th scope="col">행 수</th><th scope="col">결과 / 통계</th></tr></thead><tbody id="ase-job-items"></tbody></table></div>
           <p id="ase-job-warning" class="ase-warning" hidden></p>
           <ol id="ase-job-events" class="ase-job-events" aria-label="실행 내역"></ol>
         </section>

@@ -71,3 +71,64 @@ def test_linux_picker_has_descriptive_platform_error(picker, monkeypatch):
 def test_picker_rejects_invalid_direction(picker):
     with pytest.raises(ValueError, match="direction"):
         picker.pick_file("invalid")
+
+
+def directory_libraries(picker, chosen, *, path_success=True, initialized=0):
+    calls = []
+    def browse(pointer):
+        request = ctypes.cast(pointer, ctypes.POINTER(picker.BROWSEINFOW)).contents
+        assert request.ulFlags & 0x01 and request.ulFlags & 0x40
+        request.lpfn(123, 1, 0, request.lParam)
+        calls.append("browse")
+        return 456 if chosen is not None else None
+    def get_path(pidl, buffer, length, flags):
+        assert pidl == 456 and length == 32768
+        buffer.value = chosen
+        return int(path_success)
+    def select(hwnd, message, unicode_path, value):
+        assert hwnd == 123 and message == 0x467 and unicode_path == 1
+        calls.append(("initial", ctypes.wstring_at(value)))
+        return 1
+    shell = SimpleNamespace(SHBrowseForFolderW=Call(browse), SHGetPathFromIDListEx=Call(get_path))
+    ole = SimpleNamespace(CoInitializeEx=Call(lambda *_: initialized),
+                          CoTaskMemFree=Call(lambda pidl: calls.append(("free", pidl))),
+                          CoUninitialize=Call(lambda: calls.append("uninitialize")))
+    user = SimpleNamespace(SendMessageW=Call(select))
+    return (shell, ole, user), calls
+
+
+@pytest.mark.parametrize("chosen", ["C:\\资料 目录\\导出", None])
+@pytest.mark.parametrize("initialized", [0, 1])
+def test_folder_picker_initial_unicode_directory_and_com_cleanup(picker, monkeypatch, chosen, initialized):
+    libraries, calls = directory_libraries(picker, chosen, initialized=initialized)
+    monkeypatch.setattr(picker.sys, "platform", "win32")
+    monkeypatch.setattr(picker, "_load_directory_libraries", lambda: libraries, raising=False)
+    result = picker.pick_directory("C:\\程序 目录")
+    assert result == ({"cancelled": True} if chosen is None else {"cancelled": False, "path": chosen})
+    assert ("initial", "C:\\程序 目录") in calls
+    assert (("free", 456) in calls) == (chosen is not None)
+    assert calls[-1] == "uninitialize"
+
+
+def test_folder_picker_frees_pidl_if_path_conversion_fails(picker, monkeypatch):
+    libraries, calls = directory_libraries(picker, "C:\\not-a-filesystem-folder", path_success=False)
+    monkeypatch.setattr(picker.sys, "platform", "win32")
+    monkeypatch.setattr(picker, "_load_directory_libraries", lambda: libraries, raising=False)
+    with pytest.raises(ValueError, match="folder"):
+        picker.pick_directory("C:\\default")
+    assert calls[-2:] == [("free", 456), "uninitialize"]
+
+
+def test_folder_picker_requires_windows(picker, monkeypatch):
+    monkeypatch.setattr(picker.sys, "platform", "linux")
+    with pytest.raises(ValueError, match="Windows"):
+        picker.pick_directory()
+
+
+def test_folder_picker_does_not_uninitialize_failed_com_start(picker, monkeypatch):
+    libraries, calls = directory_libraries(picker, None, initialized=-2147417850)
+    monkeypatch.setattr(picker.sys, "platform", "win32")
+    monkeypatch.setattr(picker, "_load_directory_libraries", lambda: libraries)
+    with pytest.raises(ValueError, match="initialization"):
+        picker.pick_directory()
+    assert not calls

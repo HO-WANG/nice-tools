@@ -131,6 +131,7 @@ def profile_checks(base, directory, clients=None, executable=None, require_odbc=
         assert set(profile) == {'id', 'name', 'host', 'port', 'user', 'database'}
         assert profile['name'] == '패키지 검사 서버' and profile['database'] == 'fixture_db'
         status = json_request(base, '/api/ase/status')
+        assert Path(status['export_directory']).resolve() == directory, 'Default batch OUT folder must be beside the actual executable'
         odbc = status['odbc']
         assert 'sql_ini' not in status and 'data_sources' not in odbc, 'Removed DSN/SQL.INI discovery remains enabled'
         assert isinstance(odbc['drivers'], list) and odbc['available'] is False
@@ -225,6 +226,8 @@ def main(argv=None):
         assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page
         assert b'id="ase-search-button"' in page and b'id="ase-catalog-timings"' in page and b'id="ase-out-statistics"' in page
         assert b'id="ase-master-password"' not in page, 'ASE still asks for a profile encryption key'
+        assert all(f'id="{name}"'.encode() in page for name in ('ase-select-all', 'ase-concurrency', 'ase-start', 'ase-job-items'))
+        assert b'id="ase-preview"' not in page and b'id="ase-review"' not in page, 'Retired confirmation step remains in the executable'
     for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()

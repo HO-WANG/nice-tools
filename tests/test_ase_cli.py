@@ -281,3 +281,19 @@ def test_transfer_schema_uses_fresh_odbc_metadata_without_an_isql_path(clients, 
     assert len(fake.calls) == 1
     assert fake.calls[0]["argv"][0] == "C:/SAP/bcp.exe"
     assert not fake.calls[0]["ini_path"].exists()
+
+
+def test_automatic_out_fetches_fresh_schema_once(clients, tmp_path):
+    module, fake = clients
+    result = module.run_operation(payload('transfer', path=str(tmp_path / 'data.bcp'), auto_validate=True, options={'direction': 'out'}))
+    assert result['rows'] == 3
+    assert len(fake.metadata_calls) == 1
+    assert len(fake.calls) == 1
+
+
+def test_automatic_out_still_rejects_empty_or_wrong_object_schema(clients, tmp_path):
+    module, fake = clients
+    fake.observed_columns = []
+    with pytest.raises(ValueError):
+        module.run_operation(payload('transfer', path=str(tmp_path / 'data.bcp'), auto_validate=True, options={'direction': 'out'}))
+    assert not fake.calls

@@ -515,7 +515,7 @@ def test_catalog_reuses_odbc_without_application_worker(tmp_path, monkeypatch, o
 def test_status_resolves_clients_without_application_worker(tmp_path, monkeypatch):
     manager = manager_for(tmp_path)
     monkeypatch.setattr(manager, "_spawn", lambda *args, **kwargs: pytest.fail("Status must not start the application EXE"))
-    assert manager.status() == {"available": True, "platform": sys.platform}
+    assert manager.status() == {"available": True, "platform": sys.platform, "export_directory": str(__import__("pathlib").Path(__file__).resolve().parents[1])}
 
 
 def test_preview_reuses_odbc_without_application_worker(tmp_path, monkeypatch):
@@ -904,4 +904,563 @@ def test_shutdown_owns_and_cancels_odbc_adapter_during_initial_open(tmp_path, mo
     finally:
         cancelled.set()
         thread.join(timeout=5)
+        manager.close()
+
+
+def batch_object(name='t', owner='dbo', kind='U'):
+    return {'database': 'db', 'owner': owner, 'owner_id': 1, 'id': 10, 'name': name, 'kind': kind}
+
+
+def batch_session(manager, directory):
+    token = manager.connect({'host': 'localhost', 'user': 'u', 'password': 'secret-pass'})['session']
+    manager.sessions[token]['export_directory'] = str(directory)
+    return token
+
+
+def test_batch_export_creates_owner_files_and_never_overwrites(tmp_path):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / '한글 exports'
+    (directory / 'dbo').mkdir(parents=True)
+    (directory / 'dbo' / 't.txt').write_bytes(b'original')
+    try:
+        token = batch_session(manager, directory)
+        job = manager.start_export(token, [batch_object(), batch_object('view', kind='V')], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'succeeded'
+        assert [item['state'] for item in result['items']] == ['succeeded', 'succeeded']
+        assert (directory / 'dbo' / 't.txt').read_bytes() == b'original'
+        assert (directory / 'dbo' / 't_1.txt').read_bytes() == b'new\n'
+        assert (directory / 'dbo' / 'view.txt').read_bytes() == b'new\n'
+        assert result['items'][0]['statistics']['bytes_written'] == 4
+        assert 'secret-pass' not in json.dumps(result)
+        assert 'process' not in json.dumps(result)
+    finally:
+        manager.close()
+
+
+def test_batch_publish_retries_external_collision(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    original = manager._run_job
+    def race(token, session, job, payload):
+        __import__('pathlib').Path(payload['path']).write_bytes(b'external')
+        return original(token, session, job, payload)
+    monkeypatch.setattr(manager, '_run_job', race)
+    try:
+        token = batch_session(manager, directory)
+        job = manager.start_export(token, [batch_object()], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'succeeded'
+        assert (directory / 'dbo' / 't.txt').read_bytes() == b'external'
+        assert (directory / 'dbo' / 't_1.txt').read_bytes() == b'new\n'
+        assert result['items'][0]['path'] == str(directory / 'dbo' / 't_1.txt')
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize('objects', [[batch_object('../escape')], [batch_object(owner='../escape')], [batch_object(kind='P')], [], [batch_object()] * 1001])
+def test_batch_rejects_invalid_objects_before_creating_directories(tmp_path, objects):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    try:
+        token = batch_session(manager, directory)
+        with pytest.raises(ValueError):
+            manager.start_export(token, objects, {})
+        assert not directory.exists()
+    finally:
+        manager.close()
+
+
+def test_batch_windows_device_names_are_safe(tmp_path):
+    manager = manager_for(tmp_path)
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        job = manager.start_export(token, [batch_object('CON', owner='NUL')], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'succeeded'
+        assert __import__('pathlib').Path(result['items'][0]['path']).relative_to(tmp_path / 'exports').parts == ('_NUL', '_CON.txt')
+    finally:
+        manager.close()
+
+
+def test_export_directory_picker_is_owned_without_timeout(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    token = batch_session(manager, tmp_path)
+    calls = []
+    def invoke(payload, session, timeout):
+        calls.append((payload, session, timeout))
+        return {'cancelled': False, 'path': str(tmp_path)}
+    monkeypatch.setattr(manager, '_invoke', invoke)
+    try:
+        assert manager.pick_directory(token) == {'cancelled': False, 'path': str(tmp_path)}
+        assert calls == [({'operation': 'pick-directory', 'initial_directory': str(tmp_path)}, token, None)]
+        assert manager.sessions[token]['export_directory'] == str(tmp_path)
+    finally:
+        manager.close()
+
+
+def test_default_export_directory_follows_actual_executable(tmp_path, monkeypatch):
+    from nice_tools import ase_jobs
+    manager = manager_for(tmp_path)
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'real' / 'nice-tools.exe'))
+    monkeypatch.chdir(tmp_path)
+    try:
+        assert manager.status()['export_directory'] == str(tmp_path / 'real')
+    finally:
+        manager.close()
+
+
+def test_direct_import_uses_one_file_background_validation(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    path = tmp_path / 'input.txt'
+    path.write_bytes(b'1\n')
+    token = batch_session(manager, tmp_path)
+    selected = manager.pick_file(token, 'in', str(path))
+    original = manager._spawn
+    observed = []
+    def spawn(payload, session=None):
+        observed.append(dict(payload))
+        return original(payload, session)
+    monkeypatch.setattr(manager, '_spawn', spawn)
+    try:
+        job = manager.start_import(token, batch_object(), selected['file'], {})['job']
+        assert finished(manager, token, job)['state'] == 'succeeded'
+        assert observed[0]['auto_validate'] is True
+        assert observed[0]['options']['direction'] == 'in'
+        assert observed[0]['path'] == str(path)
+        with pytest.raises(ValueError):
+            manager.start_import(token, [batch_object()], selected['file'], {})
+    finally:
+        manager.close()
+
+
+def test_batch_global_limit_and_queued_cancellation(tmp_path):
+    from pathlib import Path
+    manager = manager_for(tmp_path)
+    script = tmp_path / 'batch-worker.py'
+    script.write_text('''import json,sys,time
+from pathlib import Path
+p=json.load(sys.stdin)
+folder=Path(p['stage_path']).parents[2]
+name=p['object']['name']
+(folder / (name+'.started')).touch()
+while not (folder / 'release').exists(): time.sleep(.01)
+Path(p['stage_path']).write_bytes(b'done')
+print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
+''', encoding='utf-8')
+    manager.worker_command = [sys.executable, str(script)]
+    try:
+        tokens = [batch_session(manager, tmp_path / 'exports') for _ in range(2)]
+        jobs = [manager.start_export(tokens[0], [batch_object('a'+str(i)) for i in range(5)], {})['job'],
+                manager.start_export(tokens[1], [batch_object('b'+str(i)) for i in range(4)], {})['job']]
+        deadline = time.monotonic() + 5
+        while len(list(tmp_path.glob('*.started'))) < 3 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(list(tmp_path.glob('*.started'))) == 3
+        time.sleep(.15)
+        assert len(list(tmp_path.glob('*.started'))) == 3
+        assert len(manager.processes) == 3
+        states = [item['state'] for item in manager.job(tokens[1], jobs[1])['items']]
+        assert states == ['queued'] * 4
+        with pytest.raises(ValueError):
+            manager.start_export(tokens[0], [batch_object('more')], {})
+        manager.cancel(tokens[1], jobs[1])
+        assert finished(manager, tokens[1], jobs[1])['state'] == 'cancelled'
+        manager.cancel(tokens[0], jobs[0])
+        result = finished(manager, tokens[0], jobs[0])
+        assert result['state'] == 'cancelled'
+        assert all(item['state'] == 'cancelled' for item in result['items'])
+        assert not list((tmp_path / 'exports').rglob('*.txt'))
+        assert len(list(tmp_path.glob('*.started'))) == 3
+    finally:
+        (tmp_path / 'release').touch()
+        manager.close()
+
+
+def test_batch_failed_item_does_not_stop_other_exports(tmp_path):
+    manager = manager_for(tmp_path)
+    script = tmp_path / 'worker.py'
+    text = script.read_text()
+    text = text.replace("if 'stage_path' in p:", "if p['object']['name']=='bad':\n  print(json.dumps({'event':'error','detail':'secret-pass failure'}),flush=True); sys.exit(1)\n if 'stage_path' in p:")
+    script.write_text(text)
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        job = manager.start_export(token, [batch_object('bad'), batch_object('good')], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'failed'
+        assert [item['state'] for item in result['items']] == ['failed', 'succeeded']
+        assert (tmp_path / 'exports' / 'dbo' / 'good.txt').exists()
+        assert not (tmp_path / 'exports' / 'dbo' / 'bad.txt').exists()
+        assert 'secret-pass' not in json.dumps(result)
+    finally:
+        manager.close()
+
+
+def test_atomic_publish_retries_collision_after_candidate_check(tmp_path, monkeypatch):
+    from nice_tools import ase_batch
+    stage = tmp_path / '.nice-tools-test.bcp'
+    target = tmp_path / 't.txt'
+    stage.write_bytes(b'complete')
+    publish = ase_batch.os.rename if sys.platform == 'win32' else ase_batch.os.link
+    first = True
+    def race(source, destination):
+        nonlocal first
+        if first:
+            first = False
+            __import__('pathlib').Path(destination).write_bytes(b'external')
+        return publish(source, destination)
+    monkeypatch.setattr(ase_batch.os, 'rename' if sys.platform == 'win32' else 'link', race)
+    published = ase_batch.publish_available(stage, target)
+    assert target.read_bytes() == b'external'
+    assert __import__('pathlib').Path(published).name == 't_1.txt'
+    assert __import__('pathlib').Path(published).read_bytes() == b'complete'
+    assert not stage.exists()
+
+
+@pytest.mark.parametrize('action', ['cancel', 'disconnect', 'close'])
+def test_batch_cancellation_kills_children_and_never_starts_queued(tmp_path, action):
+    from pathlib import Path
+    manager = manager_for(tmp_path)
+    script = tmp_path / 'batch-worker.py'
+    child = "import time; time.sleep(60)"
+    script.write_text("\n".join([
+        'import json,subprocess,sys,time', 'from pathlib import Path', 'p=json.load(sys.stdin)',
+        "child=subprocess.Popen([sys.executable, '-c', " + repr(child) + '])',
+        "folder=Path(p['stage_path']).parents[2]", "name=p['object']['name']",
+        "(folder / (name+'.pid')).write_text(str(child.pid))",
+        "Path(p['stage_path']).write_bytes(b'partial')", 'time.sleep(60)',
+    ]), encoding='utf-8')
+    manager.worker_command = [sys.executable, str(script)]
+    pids = []
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        handle = manager.start_export(token, [batch_object('t'+str(i)) for i in range(7)], {})['job']
+        group = manager.sessions[token]['jobs'][handle]
+        deadline = time.monotonic() + 5
+        while len(list(tmp_path.glob('*.pid'))) < 3 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(list(tmp_path.glob('*.pid'))) == 3
+        pids = [int(file.read_text()) for file in tmp_path.glob('*.pid')]
+        tasks = manager._job_tasks(group)
+        if action == 'cancel':
+            manager.cancel(token, handle)
+        elif action == 'disconnect':
+            manager.disconnect(token)
+        else:
+            manager.close()
+        for task in tasks:
+            task.join(timeout=5)
+            assert not task.is_alive()
+        assert group['state'] == 'cancelled'
+        assert all(item['state'] == 'cancelled' for item in group['items'])
+        assert not any(_child_running(pid) for pid in pids)
+        assert len(list(tmp_path.glob('*.pid'))) == 3
+        assert not list((tmp_path / 'exports').rglob('*.txt'))
+        assert not list((tmp_path / 'exports').rglob('.nice-tools-*.bcp'))
+        assert not manager.processes
+    finally:
+        manager.close()
+        for pid in pids:
+            if _child_running(pid):
+                import os, signal
+                os.kill(pid, signal.SIGTERM)
+
+
+def test_batch_rejects_symlink_owner_directory(tmp_path):
+    directory = tmp_path / 'exports'
+    directory.mkdir()
+    external = tmp_path / 'elsewhere'
+    external.mkdir()
+    try:
+        (directory / 'dbo').symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip('Creating symlinks requires privileges on this machine')
+    manager = manager_for(tmp_path)
+    try:
+        token = batch_session(manager, directory)
+        with pytest.raises(ValueError):
+            manager.start_export(token, [batch_object()], {})
+        assert not list(external.iterdir())
+    finally:
+        manager.close()
+
+
+def test_scheduler_survives_callback_exceptions():
+    from nice_tools import ase_batch
+    def fail():
+        raise RuntimeError('private task details')
+    failures = [ase_batch.submit(fail) for _ in range(3)]
+    for task in failures:
+        task.join(timeout=2)
+        assert not task.is_alive()
+    reached = threading.Event()
+    following = ase_batch.submit(reached.set)
+    following.join(timeout=2)
+    assert reached.is_set()
+
+
+def test_unexpected_batch_error_settles_job_and_removes_stage(tmp_path, monkeypatch):
+    manager = manager_for(tmp_path)
+    def fail(*args):
+        raise RuntimeError('private-password internal error')
+    monkeypatch.setattr(manager, '_run_job', fail)
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        job = manager.start_export(token, [batch_object()], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'failed'
+        assert 'private-password' not in json.dumps(result)
+        assert not list((tmp_path / 'exports').rglob('.nice-tools-*'))
+    finally:
+        manager.close()
+
+
+def test_batch_rechecks_owner_containment_after_queue(tmp_path, monkeypatch):
+    from pathlib import Path
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    directory.mkdir()
+    external = tmp_path / 'external'
+    external.mkdir()
+    scheduled = []
+    from nice_tools import ase_batch
+    monkeypatch.setattr(ase_batch, 'submit', lambda function, *args: scheduled.append((function, args)))
+    try:
+        token = batch_session(manager, directory)
+        job = manager.start_export(token, [batch_object()], {})['job']
+        (directory / 'dbo').mkdir()
+        # Model a Windows junction: resolve follows it but is_symlink is False.
+        resolved = Path.resolve
+        monkeypatch.setattr(Path, 'resolve', lambda path, *args, **kwargs: external if path == directory / 'dbo' else resolved(path, *args, **kwargs))
+        for function, args in scheduled:
+            function(*args)
+        result = manager.job(token, job)
+        assert result['state'] == 'failed'
+        assert not list((directory / 'dbo').iterdir())
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize('name', ['CONIN$', 'CONOUT$', 'COM¹', 'COM²', 'LPT³'])
+def test_batch_windows_console_aliases_are_safe(tmp_path, name):
+    manager = manager_for(tmp_path)
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        job = manager.start_export(token, [batch_object(name, owner=name)], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'succeeded'
+        assert __import__('pathlib').Path(result['items'][0]['path']).parts[-2:] == ('_' + name, '_' + name + '.txt')
+    finally:
+        manager.close()
+
+
+def test_batch_rejects_duplicate_objects_before_directory_creation(tmp_path):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    try:
+        token = batch_session(manager, directory)
+        with pytest.raises(ValueError):
+            manager.start_export(token, [batch_object(), batch_object()], {})
+        assert not directory.exists()
+    finally:
+        manager.close()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='POSIX atomic link publication')
+def test_successful_publication_survives_stage_unlink_error(tmp_path, monkeypatch):
+    from nice_tools import ase_batch
+    from pathlib import Path
+    stage = tmp_path / '.nice-tools-stage.bcp'
+    target = tmp_path / 't.txt'
+    stage.write_bytes(b'complete')
+    unlink = Path.unlink
+    def fail(path, *args, **kwargs):
+        if path == stage:
+            raise PermissionError('stage locked')
+        return unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, 'unlink', fail)
+    assert ase_batch.publish_available(stage, target) == str(target)
+    assert target.read_bytes() == b'complete'
+
+
+@pytest.mark.parametrize('concurrency', [1, 2])
+def test_batch_respects_selected_concurrency_and_schedules_remaining(tmp_path, concurrency):
+    manager = manager_for(tmp_path)
+    script = tmp_path / 'selected-concurrency-worker.py'
+    script.write_text('''import json,sys,time
+from pathlib import Path
+p=json.load(sys.stdin)
+folder=Path(p['stage_path']).parents[2]
+name=p['object']['name']
+(folder / (name+'.started')).touch()
+while not (folder / (name+'.release')).exists(): time.sleep(.01)
+Path(p['stage_path']).write_bytes(b'done')
+print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
+''', encoding='utf-8')
+    manager.worker_command = [sys.executable, str(script)]
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        handle = manager.start_export(token, [batch_object('t'+str(i)) for i in range(6)], {}, concurrency=concurrency)['job']
+        group = manager.sessions[token]['jobs'][handle]
+        deadline = time.monotonic() + 5
+        while len(list(tmp_path.glob('*.started'))) < concurrency and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(list(tmp_path.glob('*.started'))) == concurrency
+        time.sleep(.1)
+        assert len(list(tmp_path.glob('*.started'))) == concurrency
+        assert len(manager._job_tasks(group)) == concurrency
+        assert manager.job(token, handle)['concurrency'] == concurrency
+        observed_peak = 0
+        while time.monotonic() < deadline:
+            state = manager.job(token, handle)
+            observed_peak = max(observed_peak, state['running'])
+            assert len(manager.processes) <= concurrency
+            for started in tmp_path.glob('*.started'):
+                started.with_suffix('.release').touch()
+            if state['state'] != 'running':
+                break
+            time.sleep(.01)
+        assert state['state'] == 'succeeded'
+        assert len(list(tmp_path.glob('*.started'))) == 6
+        assert observed_peak <= concurrency
+        assert all(item['state'] == 'succeeded' for item in state['items'])
+    finally:
+        manager.close()
+
+
+@pytest.mark.parametrize('concurrency', [None, True, False, 0, -1, 4, 1.0, '2', [], {}])
+def test_batch_rejects_invalid_concurrency_before_job_or_files(tmp_path, concurrency):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    try:
+        token = batch_session(manager, directory)
+        with pytest.raises(ValueError):
+            manager.start_export(token, [batch_object()], {}, concurrency=concurrency)
+        assert manager.sessions[token]['jobs'] == {}
+        assert not directory.exists()
+    finally:
+        manager.close()
+
+
+def test_lower_batch_concurrency_leaves_global_slots_available_and_cancels_unsubmitted(tmp_path):
+    manager = manager_for(tmp_path)
+    script = tmp_path / 'shared-concurrency-worker.py'
+    script.write_text('''import json,sys,time
+from pathlib import Path
+p=json.load(sys.stdin)
+folder=Path(p['stage_path']).parents[2]
+(folder / (p['object']['name']+'.started')).touch()
+while not (folder / 'release').exists(): time.sleep(.01)
+Path(p['stage_path']).write_bytes(b'done')
+print(json.dumps({'event':'result','result':{'rows':1}}),flush=True)
+''', encoding='utf-8')
+    manager.worker_command = [sys.executable, str(script)]
+    try:
+        token1 = batch_session(manager, tmp_path / 'exports')
+        token2 = batch_session(manager, tmp_path / 'exports')
+        job1 = manager.start_export(token1, [batch_object('a'+str(i)) for i in range(8)], {}, concurrency=1)['job']
+        job2 = manager.start_export(token2, [batch_object('b'+str(i)) for i in range(8)], {}, concurrency=2)['job']
+        deadline = time.monotonic() + 5
+        while len(list(tmp_path.glob('*.started'))) < 3 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(list(tmp_path.glob('a*.started'))) == 1
+        assert len(list(tmp_path.glob('b*.started'))) == 2
+        assert len(manager.processes) == 3
+        assert len(manager._job_tasks(manager.sessions[token1]['jobs'][job1])) == 1
+        assert len(manager._job_tasks(manager.sessions[token2]['jobs'][job2])) == 2
+        manager.cancel(token1, job1)
+        manager.cancel(token2, job2)
+        for token, handle in [(token1, job1), (token2, job2)]:
+            result = finished(manager, token, handle)
+            assert result['state'] == 'cancelled'
+            assert all(item['state'] == 'cancelled' for item in result['items'])
+        assert len(list(tmp_path.glob('*.started'))) == 3
+    finally:
+        (tmp_path / 'release').touch()
+        manager.close()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Windows directory reservations prevent rename')
+@pytest.mark.parametrize('replace_root', [False, True])
+def test_active_batch_directory_replacement_does_not_publish_or_unlink_unrelated_stage(tmp_path, replace_root):
+    from pathlib import Path
+    manager = manager_for(tmp_path, transfer='stream')
+    directory = tmp_path / 'exports'
+    moved = tmp_path / 'moved'
+    try:
+        token = batch_session(manager, directory)
+        handle = manager.start_export(token, [batch_object()], {}, concurrency=1)['job']
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'copy-started').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert (tmp_path / 'copy-started').exists()
+        stage = next((directory / 'dbo').glob('.nice-tools-*.bcp'))
+        if replace_root:
+            directory.rename(moved)
+            replacement_owner = directory / 'dbo'
+            moved_owner = moved / 'dbo'
+        else:
+            (directory / 'dbo').rename(moved)
+            replacement_owner = directory / 'dbo'
+            moved_owner = moved
+        replacement_owner.mkdir(parents=True)
+        unrelated = replacement_owner / stage.name
+        unrelated.write_bytes(b'user data')
+        (tmp_path / 'copy-release').touch()
+        result = finished(manager, token, handle)
+        assert result['state'] == 'failed'
+        assert unrelated.read_bytes() == b'user data'
+        assert not list(directory.rglob('*.txt'))
+        assert not list(moved.rglob('*.txt'))
+        assert not list(moved_owner.glob('.nice-tools-*.bcp'))
+    finally:
+        (tmp_path / 'copy-release').touch()
+        manager.close()
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Native Windows directory sharing')
+def test_windows_export_reservation_blocks_directory_replacement_until_closed(tmp_path):
+    from nice_tools.ase_export import ExportReservation, file_identity
+    root = tmp_path / 'exports'
+    owner = root / 'dbo'
+    owner.mkdir(parents=True)
+    stage = owner / '.nice-tools-stage.bcp'
+    stage.write_bytes(b'')
+    reservation = ExportReservation(root, owner, stage, file_identity(stage.stat()))
+    try:
+        stage.write_bytes(b'BCP can write')
+        with pytest.raises(OSError):
+            owner.rename(root / 'moved-owner')
+        with pytest.raises(OSError):
+            root.rename(tmp_path / 'moved-root')
+        reservation.validate()
+        reservation.cleanup()
+        assert not stage.exists()
+    finally:
+        reservation.close()
+    owner.rename(root / 'moved-owner')
+    root.rename(tmp_path / 'moved-root')
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Windows directory reservations prevent rename')
+def test_active_owner_symlink_redirect_cannot_publish(tmp_path):
+    manager = manager_for(tmp_path, transfer='stream')
+    directory = tmp_path / 'exports'
+    moved = tmp_path / 'moved-owner'
+    try:
+        token = batch_session(manager, directory)
+        handle = manager.start_export(token, [batch_object()], {}, concurrency=1)['job']
+        deadline = time.monotonic() + 5
+        while not (tmp_path / 'copy-started').exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert (tmp_path / 'copy-started').exists()
+        (directory / 'dbo').rename(moved)
+        (directory / 'dbo').symlink_to(moved, target_is_directory=True)
+        (tmp_path / 'copy-release').touch()
+        assert finished(manager, token, handle)['state'] == 'failed'
+        assert not list(moved.glob('*.txt'))
+        assert not list(moved.glob('.nice-tools-*'))
+    finally:
+        (tmp_path / 'copy-release').touch()
         manager.close()

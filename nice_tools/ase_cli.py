@@ -256,9 +256,10 @@ def run_operation(payload, emit=None, register=None):
     if obj["kind"] == "P" or (obj["kind"] == "V" and options["direction"] == "in"):
         raise AseClientError("BCP IN requires a table; BCP OUT supports tables and views.")
     raw_columns = payload.get("columns")
-    if not isinstance(raw_columns, list) or not raw_columns:
+    automatic_out = payload.get("auto_validate") is True and options["direction"] == "out" and raw_columns is None
+    if not automatic_out and (not isinstance(raw_columns, list) or not raw_columns):
         raise AseClientError("Review the complete column schema before bulk copy.")
-    expected = [_column(column) for column in raw_columns]
+    expected = None if automatic_out else [_column(column) for column in raw_columns]
     if options["direction"] == "in" and any(column["type_id"] == 80 or column["type_name"].lower() == "timestamp" for column in expected):
         raise AseClientError("Timestamp columns are not supported for BCP IN.")
     path = payload.get("path")
@@ -274,6 +275,8 @@ def run_operation(payload, emit=None, register=None):
     if not isinstance(raw_current, list):
         raise AseClientError("ASE did not return a complete column schema.")
     columns = [_column(column) for column in raw_current]
-    if columns != expected:
+    if not columns:
+        raise AseClientError("ASE did not return a complete column schema.")
+    if expected is not None and columns != expected:
         raise AseClientError("The reviewed column schema changed. Review the file again before bulk copy.")
     return _copy(connection, obj, columns, payload["path"], options, clients, emit, register)
