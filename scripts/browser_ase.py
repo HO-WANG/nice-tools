@@ -1246,6 +1246,63 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
     assert not errors, errors
 
 
+def validate_in_mode(page, url):
+    """Enter IN before selecting a table; execution still needs schema and file."""
+    mock = ASEMock(hold_job=True)
+    page.route("**/api/ase/**", mock.handle)
+    page.goto(url, wait_until="networkidle")
+    page.locator('a[data-tool="ase-tool"]').click()
+    expect(page.locator("#ase-encoding")).to_have_value("euc-kr")
+    expect(page.locator("#ase-field-terminator")).to_have_value("|")
+    expect(page.locator("#ase-in")).to_be_disabled()
+    page.locator("#ase-host").fill("ase.example.internal")
+    page.locator("#ase-user").fill("tester")
+    page.locator("#ase-password").fill(PASSWORD)
+    page.locator("#ase-connect").click()
+    expect(page.locator("#ase-in")).to_be_enabled()
+    page.locator("#ase-in").check()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    expect(page.locator("#ase-ready-note")).to_contain_text("테이블 이름")
+    page.locator("#ase-database").select_option("db1")
+    page.locator("#ase-search-button").click()
+    page.locator("#ase-object-body").get_by_role("button", name=VIEW['name'], exact=True).click()
+    expect(page.locator("#ase-column-body tr")).to_have_count(len(COLUMNS))
+    expect(page.locator("#ase-in")).to_be_enabled()
+    expect(page.locator("#ase-in")).to_be_checked()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    mock.fail_columns = True
+    page.locator("#ase-object-body tr").filter(has=page.get_by_role("cell", name="dbo", exact=True)).get_by_role("button", name=TABLE['name'], exact=True).click()
+    expect(page.locator("#ase-feedback")).to_contain_text(HOSTILE_ERROR)
+    expect(page.locator("#ase-ready-note")).to_contain_text("다시 클릭")
+    expect(page.locator("#ase-pick-file")).to_be_disabled()
+    mock.fail_columns = False
+    select_table(page)
+    expect(page.locator("#ase-pick-file")).to_be_enabled()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    expect(page.locator("#ase-ready-note")).to_contain_text("파일 선택")
+    prepare_transfer(page, mock)
+    page.locator("#ase-out").check()
+    page.get_by_role("checkbox", name="dbo.customer_rows OUT 선택", exact=True).check()
+    page.locator("#ase-in").check()
+    expect(page.locator("#ase-start")).to_be_disabled()
+    prepare_transfer(page, mock)
+    page.locator("#ase-start").click()
+    expect(page.locator("#ase-cancel")).to_be_enabled()
+    expect(page.locator("#ase-in")).to_be_disabled()
+    request = mock.endpoint_calls("jobs")[-1]['payload']
+    assert set(request) == {'session', 'object', 'file', 'options'}
+    assert request['object'] == TABLE and request['options']['direction'] == 'in'
+    assert request['options']['encoding'] == 'euc-kr'
+    assert request['options']['field_terminator'] == '|'
+    page.locator("#ase-cancel").click()
+    expect(page.locator("#ase-in")).to_be_enabled()
+    page.locator("#ase-disconnect").click()
+    expect(page.locator("#ase-in")).to_be_disabled()
+    assert not mock.violations, mock.violations
+
+
 def validate_object_scroll(page, url, width=1440):
     """A checkbox must keep the scrolled list and keyboard focus in place."""
     objects = [{**TABLE, "id": 100 + index, "name": f"table_{index:03d}"} for index in range(80)]
@@ -1308,6 +1365,7 @@ def main():
         context = browser.new_context(viewport={"width": 1440, "height": 1000})
         validate(context.new_page(), ASEMock(auto_save=True), args.url, args.screenshot, args.mobile_screenshot)
         validate_batch(context.new_page(), args.url, args.screenshot, args.mobile_screenshot)
+        validate_in_mode(context.new_page(), args.url)
         validate_object_scroll(context.new_page(), args.url)
         validate_object_scroll(context.new_page(), args.url, width=390)
         validate_profiles(context.new_page(), args.url)

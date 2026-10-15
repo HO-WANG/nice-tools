@@ -169,8 +169,8 @@
           <div class="section-heading"><h2 id="ase-transfer-title">BCP 텍스트 파일 · 문자 형식 (-c)</h2><fieldset class="operation-switch"><legend class="visually-hidden">BCP 방향</legend><label><input id="ase-out" type="radio" name="ase-direction" value="out" checked disabled>OUT · 내보내기</label><label><input id="ase-in" type="radio" name="ase-direction" value="in" disabled>IN · 추가하기</label></fieldset></div>
           <p id="ase-transfer-note" class="ase-note">테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.</p>
           <div class="ase-options-grid">
-            <div class="field"><label for="ase-encoding">파일 인코딩</label><select id="ase-encoding" disabled><option value="utf-8">UTF-8</option><option value="cp949">CP949 (Windows 한글)</option><option value="euc-kr">EUC-KR</option></select></div>
-            <div class="field"><label for="ase-field-terminator">컬럼 구분자</label><input id="ase-field-terminator" type="text" value="\t" spellcheck="false" aria-describedby="ase-delimiter-note" disabled></div>
+            <div class="field"><label for="ase-encoding">파일 인코딩</label><select id="ase-encoding" disabled><option value="utf-8">UTF-8</option><option value="cp949">CP949 (Windows 한글)</option><option value="euc-kr" selected>EUC-KR</option></select></div>
+            <div class="field"><label for="ase-field-terminator">컬럼 구분자</label><input id="ase-field-terminator" type="text" value="|" spellcheck="false" aria-describedby="ase-delimiter-note" disabled></div>
             <div class="field"><label for="ase-row-terminator">행 구분자</label><div class="ase-inline-field"><input id="ase-row-terminator" type="text" value="\n" spellcheck="false" aria-describedby="ase-delimiter-note" disabled><button id="ase-crlf" class="secondary-button" type="button" disabled>CRLF</button></div></div>
             <div class="field"><label for="ase-batch-size">배치 행 수</label><input id="ase-batch-size" type="number" min="1" max="1000000" step="1" value="1000" inputmode="numeric" disabled></div>
           </div>

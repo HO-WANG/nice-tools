@@ -177,12 +177,22 @@ def test_zero_row_out_is_a_valid_completed_export(clients, tmp_path):
                                           options={"direction": "out"}))["rows"] == 0
 
 
+def test_default_character_export_uses_euc_kr_and_pipe(clients, tmp_path):
+    module, fake = clients
+    module.run_operation(payload('transfer', path=str(tmp_path / 'default.bcp'), columns=COLUMNS,
+                                options={'direction': 'out'}))
+    argv = fake.calls[0]['argv']
+    assert argv[argv.index('-J') + 1] == 'eucksc'
+    assert argv[argv.index('-t') + 1] == '|'
+    assert argv[argv.index('-r') + 1] == '\n'
+
+
 def test_command_diagnostic_includes_all_arguments_and_endpoint_without_password(clients, tmp_path):
     module, fake = clients
     events = []
     path = str(tmp_path / '한글 data.bcp')
     module.run_operation(payload('transfer', path=path, columns=COLUMNS,
-                                options={'direction': 'out'}), events.append)
+                                options={'direction': 'out', 'field_terminator': r'\t'}), events.append)
     command = next(event['message'] for event in events if event.get('type') == 'bcp_command')
     assert 'C:/SAP/bcp.exe' in command and '연구db.dbo.orders' in command
     assert path in command and 'ase.internal:5000' in command

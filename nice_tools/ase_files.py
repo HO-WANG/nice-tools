@@ -73,11 +73,11 @@ def parse_options(payload: dict) -> dict:
     direction = payload.get("direction", "in")
     if not isinstance(direction, str) or direction.lower() not in {"in", "out"}:
         raise ValueError("BCP 방향은 in 또는 out이어야 합니다.")
-    encoding = payload.get("encoding", "utf-8")
+    encoding = payload.get("encoding", "euc-kr")
     if not isinstance(encoding, str) or encoding not in _ENCODINGS:
         raise ValueError("인코딩은 utf-8, cp949 또는 euc-kr이어야 합니다.")
     terminators = []
-    for name, default in (("field", r"\t"), ("row", r"\n")):
+    for name, default in (("field", "|"), ("row", r"\n")):
         if f"{name}_hex" in payload:
             encoded = payload[f"{name}_hex"]
             if not isinstance(encoded, str) or re.fullmatch(r"(?:[0-9a-fA-F]{2}){1,32}", encoded) is None:

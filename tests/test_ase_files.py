@@ -26,12 +26,15 @@ def column(name="value", type_name="varchar", type_id=39, **changes):
 def inspect(ase_files, tmp_path, data, columns=None, **options):
     path = tmp_path / "data.bcp"
     path.write_bytes(data)
-    return ase_files.inspect_file(path, columns or [column()], ase_files.parse_options(options))
+    # Most fixtures below deliberately exercise the UTF-8/tab format.
+    return ase_files.inspect_file(path, columns or [column()], ase_files.parse_options({
+        'encoding': 'utf-8', 'field_terminator': r'\t', **options,
+    }))
 
 
 def test_options_normalize_terminators_and_defaults(ase_files):
     assert ase_files.parse_options({}) == {
-        "direction": "in", "encoding": "utf-8", "field_hex": "09", "row_hex": "0a",
+        "direction": "in", "encoding": "euc-kr", "field_hex": "7c", "row_hex": "0a",
         "batch_size": 1000, "keep_identity": False,
     }
     assert ase_files.parse_options({
@@ -43,11 +46,19 @@ def test_options_normalize_terminators_and_defaults(ase_files):
     }
 
 
+def test_default_options_inspect_euc_kr_pipe_records(ase_files, tmp_path):
+    path = tmp_path / 'default.bcp'
+    path.write_bytes('한국어|서울\n한글|부산\n'.encode('euc-kr'))
+    result = ase_files.inspect_file(path, [column(), column(position=2)], ase_files.parse_options({}))
+    assert result['rows'] == 2
+    assert result['sample'] == [['한국어', '서울'], ['한글', '부산']]
+
+
 @pytest.mark.parametrize("options", [
     {"direction": "other"}, {"encoding": "utf-16"}, {"field_terminator": ""},
     {"row_terminator": ""}, {"field_terminator": "\0"}, {"row_terminator": "\\0"},
     {"field_terminator": "\\x09"}, {"field_terminator": "\\"},
-    {"row_terminator": "\\t"}, {"row_terminator": "a" * 33},
+    {"row_terminator": "|"}, {"row_terminator": "a" * 33},
     {"batch_size": 0}, {"batch_size": True}, {"batch_size": 1.5},
     {"keep_identity": "false"}, {"encoding": "euc-kr", "field_terminator": "😀"},
 ])
@@ -60,7 +71,7 @@ def test_real_file_fingerprint_rows_and_bcp_last_field_rule(ase_files, tmp_path)
     data = b"line1\nline2\tlast\tfield\nsecond\tend\n"
     path = tmp_path / "input.bcp"
     path.write_bytes(data)
-    result = ase_files.inspect_file(path, [column(), column(position=2)], ase_files.parse_options({}))
+    result = ase_files.inspect_file(path, [column(), column(position=2)], ase_files.parse_options({'field_terminator': r'\t'}))
     assert result["rows"] == 2
     assert result["bytes"] == len(data)
     assert result["sample"] == [["line1\nline2", "last\tfield"], ["second", "end"]]

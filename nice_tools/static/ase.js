@@ -382,8 +382,8 @@
     get("ase-search").disabled = !databaseSelected || isLocked;
     get("ase-search-button").disabled = !databaseSelected || isLocked || Boolean(state.busy);
     get("ase-search-button").textContent = state.busy === "objects" ? "검색 중…" : "검색";
-    get("ase-out").disabled = !state.bcpAvailable || !state.session || isLocked;
-    get("ase-in").disabled = !state.bcpAvailable || !state.columnsLoaded || state.object?.kind !== "U" || isLocked;
+    get("ase-out").disabled = !state.bcpAvailable || !state.session || Boolean(state.busy) || isLocked;
+    get("ase-in").disabled = !state.bcpAvailable || !state.session || Boolean(state.busy) || isLocked;
     for (const id of optionIds) get(id).disabled = !canTransfer || isLocked || (id === "ase-keep-identity" && direction() !== "in");
     get("ase-crlf").disabled = !canTransfer || isLocked;
     get("ase-batch-size").disabled = !canTransfer || isLocked || direction() !== "in";
@@ -403,7 +403,15 @@
     get("ase-file-label").textContent = direction() === "in" ? "읽을 파일" : "저장할 폴더";
     get("ase-file-note").textContent = direction() === "in" ? "Windows 파일 선택 창에서 내 PC의 파일을 지정합니다. 컬럼 순서와 구분자가 일치해야 합니다." : "기본값은 EXE가 있는 폴더입니다. 소유자/DB명.오너명.테이블명.txt로 저장하고 같은 이름이 있으면 DB명.오너명.테이블명_1.txt처럼 번호를 붙입니다. 동시 작업 수는 1~5개 중 선택할 수 있습니다.";
     get("ase-transfer-note").textContent = !state.bcpAvailable ? "DB 객체는 조회할 수 있습니다. 파일 전송을 사용하려면 SAP bcp.exe를 설치하거나 ase-connections.txt의 [sap_client]에 bcp 경로를 지정하세요." : state.object?.kind === "P" ? "프로시저는 조회만 가능합니다. BCP를 실행할 수 없습니다." : state.object?.kind === "V" ? "뷰는 BCP OUT만 사용할 수 있습니다." : "테이블은 OUT / IN, 뷰는 OUT을 사용할 수 있습니다. 프로시저는 조회만 가능합니다.";
-    get("ase-ready-note").textContent = active() ? "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다." : direction() === "out" ? "내보낼 객체를 체크하고 시작하세요. 실행 시 스키마를 자동 검증합니다." : "테이블과 파일을 선택하고 시작하세요. 실행 시 스키마와 전체 파일을 자동 검증합니다.";
+    let readyNote;
+    if (active()) readyNote = "실행 중에는 객체, 파일과 설정을 바꿀 수 없습니다.";
+    else if (!state.session) readyNote = "서버에 연결한 뒤 IN 또는 OUT을 선택하세요.";
+    else if (direction() === "out") readyNote = "내보낼 객체를 체크하고 시작하세요. 실행 시 스키마를 자동 검증합니다.";
+    else if (state.object?.kind !== "U") readyNote = "목록에서 가져올 테이블 이름을 클릭하세요. 체크박스는 OUT 전용입니다.";
+    else if (!state.columnsLoaded) readyNote = state.busy === "columns" ? "테이블 구조를 조회하는 중입니다." : "테이블 구조를 확인하지 못했습니다. 테이블 이름을 다시 클릭하세요.";
+    else if (!state.file) readyNote = "파일 선택을 눌러 가져올 텍스트 파일을 선택하세요.";
+    else readyNote = "선택한 테이블에 파일 데이터를 추가합니다. 시작 시 스키마와 전체 파일을 자동 검증합니다.";
+    get("ase-ready-note").textContent = readyNote;
     get("ase-cancel").hidden = !active();
     get("ase-cancel").disabled = ["cancel", "disconnect"].includes(state.busy);
     get("ase-cancel").textContent = state.busy === "cancel" ? "취소 요청 중…" : "실행 취소";
