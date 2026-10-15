@@ -122,9 +122,9 @@ class ASEMock:
             "events": [{"phase": "export", "message": HOSTILE_SAMPLE}],
             "result": result,
             **({"items": [
-                {"object": obj, "path": self.job_directories.get(job, EXPORT_DIRECTORY) + "\\" + obj["owner"] + "\\" + ("customer_rows_1.txt" if index == 0 else obj["name"] + ".txt"),
+                {"object": obj, "path": self.job_directories.get(job, EXPORT_DIRECTORY) + "\\" + obj["owner"] + "\\" + (obj["database"] + "." + obj["owner"] + "." + obj["name"] + ("_1.txt" if index == 0 else ".txt")),
                  "state": ("queued" if index >= self.job_concurrencies.get(job, 3) else "running") if state == "running" else ("failed" if self.mixed_batch and index == 1 else "succeeded" if self.mixed_batch and state == "failed" else state),
-                 "message": HOSTILE_ERROR if self.mixed_batch and index == 1 and state != "running" else f"mock item {state}",
+                 "message": f"SAP BCP failed\nSAP BCP console log:\nServer Message: SELECT permission denied\n{HOSTILE_ERROR}" if self.mixed_batch and index == 1 and state != "running" else f"mock item {state}",
                  "rows": self.completed_rows if state == "succeeded" or self.mixed_batch and state == "failed" and index != 1 else 0,
                  **({"statistics": {**self.completed_statistics, **(self.completed_bcp_statistics or {})}} if (state == "succeeded" or self.mixed_batch and state == "failed" and index != 1) and self.completed_statistics is not None else {})}
                 for index, obj in enumerate(self.job_objects.get(job, []))]} if direction == "out" else {}),
@@ -1201,7 +1201,8 @@ def validate_batch(page, url, screenshot=None, mobile_screenshot=None):
     expect(page.locator("#ase-job-status")).to_contain_text("failed", timeout=10000)
     expect(page.locator("#ase-job-items")).to_contain_text("완료")
     expect(page.locator("#ase-job-items")).to_contain_text(HOSTILE_ERROR)
-    expect(page.locator("#ase-job-items")).to_contain_text("customer_rows_1.txt")
+    expect(page.locator("#ase-job-items")).to_contain_text("Server Message: SELECT permission denied")
+    expect(page.locator("#ase-job-items")).to_contain_text("db1.dbo.customer_rows_1.txt")
     expect(page.locator("#ase-job-items")).to_contain_text("바이트")
     expect(page.locator("#ase-job-items")).to_contain_text("bcp.exe 실행 0.5초")
     expect(page.locator("#ase-job-items script, #ase-job-items img")).to_have_count(0)

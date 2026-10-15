@@ -178,7 +178,8 @@ class BatchMixin:
                 parent = directory / _component(obj['owner'])
                 if parent.is_symlink() or parent.resolve().parent != directory:
                     raise ValueError('소유자 OUT 폴더를 사용할 수 없습니다.')
-                paths.append(parent / (_component(obj['name']) + '.txt'))
+                filename = '.'.join(_component(obj[key]) for key in ('database', 'owner', 'name')) + '.txt'
+                paths.append(parent / filename)
             job = self._new_job(session)
             job.update(concurrency=concurrency, _next_item=0)
             job['items'] = []

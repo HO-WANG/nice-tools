@@ -41,7 +41,7 @@
 .ase-file-row > div > span { font-size: 13px; font-weight: 500; }
 #ase-path { font-size: 13px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
 .ase-file-row > button { flex-shrink: 0; }
-.ase-job-status { padding: 0 20px 16px; font-size: 13px; overflow-wrap: anywhere; }
+.ase-job-status { padding: 0 20px 16px; font-size: 13px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .ase-out-statistics { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 16px; margin: 0; padding: 0 20px 12px; }
 .ase-out-statistics > div { min-width: 0; padding-top: 12px; border-top: 1px solid var(--line); }
 .ase-out-statistics dt { margin-bottom: 6px; font-size: 12px; color: var(--muted); }

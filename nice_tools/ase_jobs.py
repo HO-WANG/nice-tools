@@ -115,12 +115,13 @@ class AseManager(BatchMixin):
         self.pending_adapters = set()
 
     @staticmethod
-    def _redact(text, connection):
+    def _redact(text, connection, limit=2000):
         text = str(text)
         password = connection.get("password", "")
         if password:
-            text = text.replace(password, "[비밀번호 숨김]")
-        return text[:2000]
+            hidden = "" if password in "[비밀번호 숨김]" else "[비밀번호 숨김]"
+            text = text.replace(password, hidden)
+        return text[:limit]
 
     def _session(self, token):
         if not isinstance(token, str):
@@ -430,9 +431,9 @@ class AseManager(BatchMixin):
                 if event.get("event") == "result":
                     result = event.get("result")
                 elif event.get("event") == "error":
-                    error = self._redact(event.get("detail", "전송 실패"), payload["connection"])
+                    error = self._redact(event.get("detail", "전송 실패"), payload["connection"], limit=20000)
                 elif event.get("event") == "progress":
-                    if event.get("type") == "bcp_output":
+                    if event.get("type") in ("bcp_output", "bcp_command"):
                         message = event.get("message")
                         if isinstance(message, str):
                             console_output.feed(message)
@@ -495,8 +496,13 @@ class AseManager(BatchMixin):
         except Exception as exc:
             with self.lock:
                 if not job["cancelled"]:
-                    detail = self._redact(str(exc), payload["connection"]) if isinstance(exc, ValueError) else "전송을 완료하지 못했습니다. 대상과 파일 상태를 확인하세요."
+                    detail = self._redact(str(exc), payload["connection"], limit=20000) if isinstance(exc, ValueError) else "전송을 완료하지 못했습니다. 대상과 파일 상태를 확인하세요."
                     job.update({"state": "failed", "phase": "done", "message": error or detail})
+                    obj = payload['object']
+                    context = '.'.join(obj[key] for key in ('database', 'owner', 'name'))
+                    _write_bcp_output(self._redact(
+                        f"\n[BCP failed: {context} {payload['options']['direction']}]\n{error or detail}\n",
+                        payload['connection'], limit=22000))
                     if "started_at" in job:
                         job["elapsed_seconds"] = max(0.0, time.monotonic() - job["started_at"])
         finally:

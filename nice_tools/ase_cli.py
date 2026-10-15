@@ -202,11 +202,48 @@ class _CopyOutput:
             self.pending = ""
 
 
+class _DiagnosticLog:
+    """Retain a bounded beginning and end of the already sanitized stream."""
+
+    def __init__(self):
+        self.head = self.tail = ""
+        self.length = 0
+
+    def feed(self, text):
+        self.length += len(text)
+        self.head = (self.head + text)[:8192]
+        self.tail = (self.tail + text)[-8192:]
+
+    def text(self):
+        if self.length <= 8192:
+            return self.head
+        if self.length <= 16384:
+            return self.head + self.tail[-(self.length - 8192):]
+        return self.head + "\n... SAP log truncated ...\n" + self.tail
+
+
+def _command_diagnostic(argv, connection):
+    from .ase_process import _RedactedOutput, windows_command_line
+
+    # Redact before quoting: embedded quotes/backslashes must not split a secret.
+    def safe(value):
+        output = _RedactedOutput(connection['password'], None)
+        output.feed(str(value), final=True)
+        return ''.join({'\t': r'\t', '\r': r'\r', '\n': r'\n'}.get(char,
+                       char if ord(char) >= 32 and ord(char) != 127 else f'\\x{ord(char):02x}')
+                       for char in output.tail)
+
+    return (f"[BCP command; control characters escaped; password via prompt]\n"
+            f"{windows_command_line([safe(arg) for arg in argv])}\n"
+            f"[BCP server] {safe(connection['host'])}:{connection['port']}\n")
+
+
 def _copy(connection, obj, columns, path, options, clients, emit=None, register=None):
     target = _target(obj)
     if options["direction"] == "in" and not Path(path).is_file():
         raise AseClientError("The reviewed import file is no longer available.")
     output = _CopyOutput(emit)
+    diagnostic = _DiagnosticLog()
     with tempfile.TemporaryDirectory(prefix="nice-tools-bcp-") as directory:
         ini_path = _write_interfaces(Path(directory), connection)
         argv = [clients["bcp_path"], target, options["direction"], path,
@@ -223,10 +260,12 @@ def _copy(connection, obj, columns, path, options, clients, emit=None, register=
             argv.extend(["-T", "2147483647"])
         if emit:
             emit({"type": "status", "phase": "copying"})
+            emit({"type": "bcp_command", "message": _command_diagnostic(argv, connection)})
 
         def client_output(text):
             # run_client removes terminal escapes and redacts credentials across
             # reads before invoking this callback; never forward its raw parser.
+            diagnostic.feed(text)
             if emit:
                 emit({"type": "bcp_output", "message": text})
         result = _run_client(argv, connection["password"], input_text="", timeout=None,
@@ -235,11 +274,22 @@ def _copy(connection, obj, columns, path, options, clients, emit=None, register=
         # A password such as "rows" or "Error" must not alter row counts or hide
         # failures. It emits only numeric progress and retains no public text.
         output.finish()
+
+        def failure(reason):
+            from .ase_process import _RedactedOutput
+
+            warning = " Completed import batches may remain in the table." if options['direction'] == 'in' else ""
+            message = (f"{reason} [{target} {options['direction']}; exit code: {result.get('returncode')}]."
+                       f"{warning}\nSAP BCP console log:\n{diagnostic.text().strip() or '(no output)'}")
+            safe = _RedactedOutput(connection['password'], None)
+            safe.feed(message, final=True)
+            return AseClientError(safe.tail)
+
         if result.get("returncode") != 0 or output.failed:
-            raise AseClientError("SAP BCP failed. Completed import batches may remain in the table.")
+            raise failure("SAP BCP failed")
         rows = output.rows
         if rows is None:
-            raise AseClientError("SAP BCP did not report a successful final row count.")
+            raise failure("SAP BCP did not report a successful final row count")
         elapsed = _elapsed(result)
         rate = rows / elapsed if elapsed > 0 else None
         return {"rows": rows, "direction": options["direction"], "bcp_seconds": elapsed,

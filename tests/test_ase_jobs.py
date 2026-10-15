@@ -154,6 +154,28 @@ def test_bcp_output_reaches_console_before_exit_without_truncation_or_ui_events(
         manager.close()
 
 
+def test_command_and_failed_job_details_reach_console_with_object_context(tmp_path, capsys):
+    manager = manager_for(tmp_path, transfer='fail')
+    script = tmp_path / 'worker.py'
+    text = script.read_text()
+    text = text.replace("elif op=='transfer':", "elif op=='transfer':\n print(json.dumps({'event':'progress','type':'bcp_command','message':'BCP COMMAND bcp.exe db.dbo.t out -c\\n'}),flush=True)")
+    text = text.replace("p['connection']['password']+' failed'", "'SAP BCP failed\\n'+'x'*4000+'\\nServer Message: SELECT permission denied '+p['connection']['password']")
+    script.write_text(text)
+    try:
+        token = batch_session(manager, tmp_path / 'exports')
+        job = manager.start_export(token, [batch_object()], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'failed'
+        assert 'SELECT permission denied' in result['items'][0]['message']
+        output = capsys.readouterr().out
+        assert 'BCP COMMAND bcp.exe db.dbo.t out -c' in output
+        assert 'db.dbo.t' in output and 'SELECT permission denied' in output
+        assert 'secret-pass' not in output and 'secret-pass' not in json.dumps(result)
+        assert not result['items'][0]['events']
+    finally:
+        manager.close()
+
+
 @pytest.mark.parametrize("failure", ["closed", "missing", "encoding"])
 def test_unavailable_or_restricted_console_does_not_fail_bcp(tmp_path, monkeypatch, failure):
     from nice_tools import ase_jobs
@@ -921,16 +943,16 @@ def test_batch_export_creates_owner_files_and_never_overwrites(tmp_path):
     manager = manager_for(tmp_path)
     directory = tmp_path / '한글 exports'
     (directory / 'dbo').mkdir(parents=True)
-    (directory / 'dbo' / 't.txt').write_bytes(b'original')
+    (directory / 'dbo' / 'db.dbo.t.txt').write_bytes(b'original')
     try:
         token = batch_session(manager, directory)
         job = manager.start_export(token, [batch_object(), batch_object('view', kind='V')], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
         assert [item['state'] for item in result['items']] == ['succeeded', 'succeeded']
-        assert (directory / 'dbo' / 't.txt').read_bytes() == b'original'
-        assert (directory / 'dbo' / 't_1.txt').read_bytes() == b'new\n'
-        assert (directory / 'dbo' / 'view.txt').read_bytes() == b'new\n'
+        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'original'
+        assert (directory / 'dbo' / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
+        assert (directory / 'dbo' / 'db.dbo.view.txt').read_bytes() == b'new\n'
         assert result['items'][0]['statistics']['bytes_written'] == 4
         assert 'secret-pass' not in json.dumps(result)
         assert 'process' not in json.dumps(result)
@@ -951,9 +973,24 @@ def test_batch_publish_retries_external_collision(tmp_path, monkeypatch):
         job = manager.start_export(token, [batch_object()], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert (directory / 'dbo' / 't.txt').read_bytes() == b'external'
-        assert (directory / 'dbo' / 't_1.txt').read_bytes() == b'new\n'
-        assert result['items'][0]['path'] == str(directory / 'dbo' / 't_1.txt')
+        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'external'
+        assert (directory / 'dbo' / 'db.dbo.t_1.txt').read_bytes() == b'new\n'
+        assert result['items'][0]['path'] == str(directory / 'dbo' / 'db.dbo.t_1.txt')
+    finally:
+        manager.close()
+
+
+def test_batch_filename_distinguishes_databases_with_same_owner_and_table(tmp_path):
+    manager = manager_for(tmp_path)
+    directory = tmp_path / 'exports'
+    try:
+        token = batch_session(manager, directory)
+        job = manager.start_export(token, [batch_object(), {**batch_object(), 'database': 'db2'}], {})['job']
+        result = finished(manager, token, job)
+        assert result['state'] == 'succeeded'
+        assert {__import__('pathlib').Path(item['path']).name for item in result['items']} == {'db.dbo.t.txt', 'db2.dbo.t.txt'}
+        assert (directory / 'dbo' / 'db.dbo.t.txt').read_bytes() == b'new\n'
+        assert (directory / 'dbo' / 'db2.dbo.t.txt').read_bytes() == b'new\n'
     finally:
         manager.close()
 
@@ -978,7 +1015,7 @@ def test_batch_windows_device_names_are_safe(tmp_path):
         job = manager.start_export(token, [batch_object('CON', owner='NUL')], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert __import__('pathlib').Path(result['items'][0]['path']).relative_to(tmp_path / 'exports').parts == ('_NUL', '_CON.txt')
+        assert __import__('pathlib').Path(result['items'][0]['path']).relative_to(tmp_path / 'exports').parts == ('_NUL', 'db._NUL._CON.txt')
     finally:
         manager.close()
 
@@ -1090,8 +1127,8 @@ def test_batch_failed_item_does_not_stop_other_exports(tmp_path):
         result = finished(manager, token, job)
         assert result['state'] == 'failed'
         assert [item['state'] for item in result['items']] == ['failed', 'succeeded']
-        assert (tmp_path / 'exports' / 'dbo' / 'good.txt').exists()
-        assert not (tmp_path / 'exports' / 'dbo' / 'bad.txt').exists()
+        assert (tmp_path / 'exports' / 'dbo' / 'db.dbo.good.txt').exists()
+        assert not (tmp_path / 'exports' / 'dbo' / 'db.dbo.bad.txt').exists()
         assert 'secret-pass' not in json.dumps(result)
     finally:
         manager.close()
@@ -1253,7 +1290,7 @@ def test_batch_windows_console_aliases_are_safe(tmp_path, name):
         job = manager.start_export(token, [batch_object(name, owner=name)], {})['job']
         result = finished(manager, token, job)
         assert result['state'] == 'succeeded'
-        assert __import__('pathlib').Path(result['items'][0]['path']).parts[-2:] == ('_' + name, '_' + name + '.txt')
+        assert __import__('pathlib').Path(result['items'][0]['path']).parts[-2:] == ('_' + name, 'db._' + name + '._' + name + '.txt')
     finally:
         manager.close()
 

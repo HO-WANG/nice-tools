@@ -177,6 +177,72 @@ def test_zero_row_out_is_a_valid_completed_export(clients, tmp_path):
                                           options={"direction": "out"}))["rows"] == 0
 
 
+def test_command_diagnostic_includes_all_arguments_and_endpoint_without_password(clients, tmp_path):
+    module, fake = clients
+    events = []
+    path = str(tmp_path / '한글 data.bcp')
+    module.run_operation(payload('transfer', path=path, columns=COLUMNS,
+                                options={'direction': 'out'}), events.append)
+    command = next(event['message'] for event in events if event.get('type') == 'bcp_command')
+    assert 'C:/SAP/bcp.exe' in command and '연구db.dbo.orders' in command
+    assert path in command and 'ase.internal:5000' in command
+    for flag in ('-I', '-S', '-U', '-J', '-z', '-c', '-t', '-r', '-m', '-T'):
+        assert f'"{flag}"' in command
+    assert '\\t' in command and '\\n' in command
+    assert CONNECTION['password'] not in command and '"-P"' not in command
+    assert events.index(next(e for e in events if e.get('type') == 'bcp_command')) < events.index(next(e for e in events if e.get('type') == 'bcp_output'))
+
+
+@pytest.mark.parametrize('direction', ['in', 'out'])
+def test_failure_reports_sanitized_server_message_and_direction(clients, tmp_path, direction):
+    module, fake = clients
+    path = tmp_path / 'input.bcp'
+    path.write_text('1\n')
+    fake.copy_output = "Server Message: Msg 10330, Level 14\nSELECT permission denied on object orders. private-password\n"
+    fake.copy_returncode = 1
+    with pytest.raises(ValueError) as error:
+        module.run_operation(payload('transfer', path=str(path), columns=COLUMNS,
+                                    options={'direction': direction}))
+    detail = str(error.value)
+    assert 'Server Message:' in detail and 'SELECT permission denied' in detail
+    assert '연구db.dbo.orders' in detail and 'exit code: 1' in detail
+    assert ('Completed import batches may remain' in detail) == (direction == 'in')
+    assert CONNECTION['password'] not in detail
+
+
+def test_failure_log_is_bounded_and_preserves_beginning_and_end(clients, tmp_path):
+    module, fake = clients
+    fake.progress = ['Server Message: SELECT permission denied\n', 'x' * 40000]
+    fake.copy_output = '\nBCP failed: final diagnostic\n'
+    fake.copy_returncode = 1
+    with pytest.raises(ValueError) as error:
+        module.run_operation(payload('transfer', path=str(tmp_path / 'data.bcp'), columns=COLUMNS,
+                                    options={'direction': 'out'}))
+    detail = str(error.value)
+    assert 'SELECT permission denied' in detail and 'final diagnostic' in detail
+    assert len(detail) < 17000 and 'truncated' in detail
+
+
+@pytest.mark.parametrize('secret', ['quote"secret', 'back\\slash', '비밀번호', '숨김'])
+def test_command_redacts_credentials_before_windows_quoting(secret):
+    module = cli_module()
+    message = module._command_diagnostic(['bcp.exe', 'db.dbo.t', 'out', f'C:\\{secret}\\file.txt'],
+                                         {**CONNECTION, 'password': secret})
+    assert secret not in message
+    assert 'bcp.exe' in message and 'db.dbo.t' in message and 'file.txt' in message
+
+
+@pytest.mark.parametrize('secret', ['orders', 'failed', '숨김'])
+def test_failure_redacts_credentials_in_context_and_fixed_labels(clients, tmp_path, secret):
+    module, fake = clients
+    fake.copy_output = 'Server Message: SELECT permission denied\n'
+    fake.copy_returncode = 1
+    with pytest.raises(ValueError) as error:
+        module.run_operation(payload('transfer', connection={**CONNECTION, 'password': secret},
+                                    path=str(tmp_path / 'data.bcp'), columns=COLUMNS, options={'direction': 'out'}))
+    assert secret not in str(error.value)
+
+
 @pytest.mark.parametrize("failed", [False, True])
 def test_bcp_messages_stream_through_the_worker_callback_even_on_failure(clients, tmp_path, failed):
     module, fake = clients

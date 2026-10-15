@@ -74,14 +74,16 @@ def test_output_callbacks_and_returned_text_redact_split_password(tmp_path):
     assert "[비밀번호 숨김]" in output["stdout"]
 
 
-def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('failed', [False, True])
+def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_path, monkeypatch, capsys, failed):
     """Exercise prompt -> CLI -> JSON records -> parent console without ASE."""
     import io
     from nice_tools import ase_cli, ase_jobs, ase_worker
     from nice_tools.ase_process import _RedactedOutput, run_client
 
     secret = "native-stream-secret"
-    argv = client(tmp_path, "pw = password()\nprint('Starting copy...', flush=True)\nprint(pw[:7], end='', flush=True)\ntime.sleep(.05)\nprint(pw[7:], flush=True)\nprint('3 rows copied.', flush=True)\n")
+    ending = "print('Server Message: SELECT permission denied on object t.', flush=True)\nsys.exit(1)\n" if failed else "print('3 rows copied.', flush=True)\n"
+    argv = client(tmp_path, "pw = password()\nprint('Starting copy...', flush=True)\nprint(pw[:7], end='', flush=True)\ntime.sleep(.05)\nprint(pw[7:], flush=True)\n" + ending)
     monkeypatch.setattr(ase_cli, "_run_client", lambda _argv, password, **kwargs: run_client(argv, password, **kwargs))
     obj = {"database": "db", "owner": "dbo", "name": "t"}
     options = {"direction": "out", "encoding": "utf-8", "field_hex": "09", "row_hex": "0a"}
@@ -90,19 +92,25 @@ def test_real_client_output_crosses_bcp_worker_protocol_and_parent_console(tmp_p
                              {"bcp_path": "unused-fixture-bcp.exe"}, emit)
     monkeypatch.setattr(ase_worker, "execute", execute)
     stream = io.StringIO()
-    assert ase_worker.main(io.StringIO(json.dumps({"connection": {"host": "localhost", "port": 5000, "user": "u", "password": secret}})), stream) == 0
+    assert ase_worker.main(io.StringIO(json.dumps({"connection": {"host": "localhost", "port": 5000, "user": "u", "password": secret}})), stream) == int(failed)
     records = [json.loads(line) for line in stream.getvalue().splitlines()]
-    assert records[-1]["event"] == "result" and records[-1]["result"]["rows"] == 3
+    if failed:
+        assert records[-1]['event'] == 'error'
+        assert 'Server Message: SELECT permission denied' in records[-1]['detail']
+    else:
+        assert records[-1]["event"] == "result" and records[-1]["result"]["rows"] == 3
     assert secret not in stream.getvalue()
     # This is the same streaming redactor/sink used by the owning job; the
     # process-manager tests separately verify dispatch before worker exit.
     console = _RedactedOutput(secret, ase_jobs._write_bcp_output)
     for record in records:
-        if record.get("type") == "bcp_output":
+        if record.get("type") in ("bcp_output", "bcp_command"):
             console.feed(record["message"])
     console.feed("", final=True)
     output = capsys.readouterr().out
-    assert "Starting copy..." in output and "3 rows copied." in output
+    assert "Starting copy..." in output
+    assert ('Server Message: SELECT permission denied' if failed else '3 rows copied.') in output
+    assert '[BCP command' in output and 'unused-fixture-bcp.exe' in output
     assert secret not in output and "native-" not in output
 
 
