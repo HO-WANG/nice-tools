@@ -1128,7 +1128,10 @@ def test_batch_cancellation_kills_children_and_never_starts_queued(tmp_path, act
         'import json,subprocess,sys,time', 'from pathlib import Path', 'p=json.load(sys.stdin)',
         "child=subprocess.Popen([sys.executable, '-c', " + repr(child) + '])',
         "folder=Path(p['stage_path']).parents[2]", "name=p['object']['name']",
-        "(folder / (name+'.pid')).write_text(str(child.pid))",
+        # Publish readiness only after closing the complete PID file.
+        "pid_file=folder / (name+'.pid.tmp')",
+        "pid_file.write_text(str(child.pid))",
+        "pid_file.replace(folder / (name+'.pid'))",
         "Path(p['stage_path']).write_bytes(b'partial')", 'time.sleep(60)',
     ]), encoding='utf-8')
     manager.worker_command = [sys.executable, str(script)]
