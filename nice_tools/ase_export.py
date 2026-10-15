@@ -31,9 +31,10 @@ class _Directory:
             library.CreateFileW.restype = ctypes.c_void_p
             library.CloseHandle.argtypes = [ctypes.c_void_p]
             library.CloseHandle.restype = ctypes.c_int32
-            # Share reads/writes for SAP, but prevent this directory from being
-            # renamed/deleted until its owned export has settled.
-            handle = library.CreateFileW(str(self.path), 0, 0x3, None, 3, 0x02000000, None)
+            # FILE_LIST_DIRECTORY establishes read access for sharing checks;
+            # zero requests metadata only and does not prevent rename. Share
+            # reads/writes for SAP, but omit DELETE until the export settles.
+            handle = library.CreateFileW(str(self.path), 0x1, 0x3, None, 3, 0x02000000, None)
             if handle is None or handle == ctypes.c_void_p(-1).value:
                 raise OSError(ctypes.get_last_error(), 'The OUT directory could not be reserved safely.')
             self.library, self.handle = library, handle
