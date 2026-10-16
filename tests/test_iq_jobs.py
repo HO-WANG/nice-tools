@@ -201,3 +201,96 @@ def test_failure_is_terminal_only_after_owned_stage_cleanup(tmp_path, monkeypatc
     finally:
         release.set()
         manager.close()
+
+
+def test_failed_export_prints_sanitized_detail_to_launcher_console(tmp_path, capsys):
+    manager=manager_for(tmp_path,'fail')
+    try:
+        token=session_for(manager,tmp_path)
+        handle=manager.start_export(token,'select sensitive_literal','iq-result.txt',{})['job']
+        result=finished(manager,token,handle)
+        output=capsys.readouterr().out
+        assert result['state']=='failed'
+        assert '[IQ export failed]' in output and 'query failed' in output
+        assert 'iq-private-pass' not in output and 'select sensitive_literal' not in output
+    finally:
+        manager.close()
+
+
+def test_failed_connect_prints_error_without_credentials(tmp_path, capsys):
+    manager=manager_for(tmp_path)
+    script=tmp_path/'iq-fixture.py'
+    text=script.read_text()
+    text=text.replace("print(json.dumps({'event':'result','result':{'driver':'SQL Anywhere 17','version':'SAP IQ/16.1'}}),flush=True)",
+                      "print(json.dumps({'event':'error','detail':'connect failed '+p['connection']['password']}),flush=True); sys.exit(1)")
+    script.write_text(text)
+    try:
+        with pytest.raises(ValueError):
+            manager.connect({'host':'localhost','user':'reader','password':'iq-private-pass'})
+        output=capsys.readouterr().out
+        assert '[IQ connect failed]' in output and 'connect failed' in output
+        assert 'iq-private-pass' not in output and not manager.sessions
+    finally:
+        manager.close()
+
+
+def test_console_failure_tolerates_unavailable_stdout(tmp_path, monkeypatch):
+    from nice_tools import iq_jobs
+    manager=manager_for(tmp_path,'fail')
+    def unavailable(text): raise OSError('closed output')
+    monkeypatch.setattr(iq_jobs,'_write_bcp_output',unavailable)
+    try:
+        token=session_for(manager,tmp_path)
+        handle=manager.start_export(token,'select 1','iq-result.txt',{})['job']
+        assert finished(manager,token,handle)['state']=='failed'
+        assert not list((tmp_path/'exports').iterdir())
+    finally:
+        manager.close()
+
+
+def test_console_redacts_complete_message_before_control_escaping(tmp_path, capsys):
+    manager=manager_for(tmp_path)
+    try:
+        manager._console_error('export','private-password\x1b[31m reason=encoding row 1 column 2',{'password':'private-password'})
+        output=capsys.readouterr().out
+        assert 'private-password' not in output and '\x1b' not in output
+        assert 'reason=encoding' in output and 'row 1' in output
+    finally:
+        manager.close()
+
+
+def test_real_iq_worker_delivers_cell_failure_to_parent_console(tmp_path, capsys):
+    from nice_tools.iq_jobs import IQManager
+    script=tmp_path/'real-iq-worker-fixture.py'
+    script.write_text('import sys\nsys.path.insert(0,'+repr(str(Path(__file__).resolve().parents[1]))+')\n'+'''
+from nice_tools import iq_odbc,iq_worker
+class Cursor:
+ description=[('value',)]
+ def execute(self,sql): return self
+ def fetchone(self): return ('SAP IQ/16.1',)
+ def fetchmany(self,size): return [('ROW-SENSITIVE|VALUE',)]
+ def close(self): pass
+class Connection:
+ def cursor(self): return Cursor()
+ def rollback(self): pass
+ def close(self): pass
+class Odbc:
+ class Error(Exception): pass
+ def drivers(self): return ['SAP IQ']
+ def connect(self,*args,**kwargs): return Connection()
+iq_odbc._pyodbc=lambda: Odbc()
+raise SystemExit(iq_worker.main())
+''',encoding='utf-8')
+    manager=IQManager(worker_command=[sys.executable,str(script)])
+    try:
+        token=session_for(manager,tmp_path)
+        handle=manager.start_export(token,'select SENSITIVE_SQL','iq-result.txt',{})['job']
+        result=finished(manager,token,handle)
+        output=capsys.readouterr().out
+        assert result['state']=='failed' and 'reason=field-terminator' in result['message']
+        assert '[IQ export failed]' in output and 'row 1' in output and 'column 1' in output
+        assert 'field-terminator' in output and 'encoding=euc-kr' in output
+        assert not any(secret in output for secret in ['iq-private-pass','SENSITIVE_SQL','ROW-SENSITIVE'])
+        assert not list((tmp_path/'exports').iterdir())
+    finally:
+        manager.close()

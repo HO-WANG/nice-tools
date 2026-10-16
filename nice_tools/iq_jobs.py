@@ -16,7 +16,7 @@ import time
 
 from .ase_batch import default_export_directory, publish_available, submit
 from .ase_export import ExportReservation, cleanup_owned_path, file_identity
-from .ase_jobs import AseManager
+from .ase_jobs import AseManager, _write_bcp_output
 from .iq_files import parse_options
 from .iq_sql import validate_select
 
@@ -43,7 +43,40 @@ class IQManager(AseManager):
         from .iq_odbc import status
         return {**status(), 'export_directory': default_export_directory()}
 
+    @staticmethod
+    def _failure_detail(error):
+        if isinstance(error, ValueError):
+            return str(error)
+        if isinstance(error, OSError):
+            codes = []
+            for name in ('errno', 'winerror'):
+                value = getattr(error, name, None)
+                if type(value) is int:
+                    codes.append(f'{name}={value}')
+            return 'IQ 로컬 파일 또는 프로세스 오류. ' + '; '.join(codes)
+        return 'IQ 작업을 완료하지 못했습니다. 연결과 출력 폴더를 확인하세요.'
+
+    def _console_error(self, operation, detail, connection, job=None):
+        # One complete redaction unit; worker stdout remains JSON-only. Reuse
+        # the launcher console writer's lock, flushing and closed-stdio guard.
+        try:
+            operation = operation if operation in {'connect', 'export', 'pick-directory'} else 'operation'
+            suffix = f' job={job}' if job else ''
+            text = self._redact(f'\n[IQ {operation} failed]{suffix}\n{detail}\n', connection, limit=4000)
+            text = ''.join(char if char.isprintable() or char in '\n\t' else f'\\u{ord(char):04x}' for char in text)
+            _write_bcp_output(text)
+        except Exception:
+            # Diagnostics must never change the operation outcome.
+            pass
+
     def _request(self, payload, token=None, timeout=25):
+        try:
+            return self._worker_request(payload, token, timeout)
+        except Exception as error:
+            self._console_error(payload.get('operation'), self._failure_detail(error), payload.get('connection', {}))
+            raise
+
+    def _worker_request(self, payload, token=None, timeout=25):
         process = self._spawn(payload, token)
         try:
             output, _ = process.communicate(json.dumps(payload, ensure_ascii=True), timeout=timeout)
@@ -195,8 +228,9 @@ class IQManager(AseManager):
                 public['path'] = publish_available(stage, job['path'])
                 job.update(public, result=public, state='succeeded', phase='done', message='내보내기 완료')
         except Exception as error:
-            detail = str(error) if isinstance(error, ValueError) else 'IQ 결과를 저장하지 못했습니다. 연결과 출력 폴더를 확인하세요.'
-            failure_detail = self._redact(detail, connection)
+            failure_detail = self._redact(self._failure_detail(error), connection)
+            if not job['cancelled']:
+                self._console_error('export', failure_detail, connection, job=job['job'])
         finally:
             if process is not None:
                 with contextlib.suppress(Exception):

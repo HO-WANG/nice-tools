@@ -14,7 +14,7 @@ import stat
 from . import iq_files, iq_sql
 
 
-_SAFE_STATES = frozenset('08001 08003 08004 08006 08S01 28000 HYT00 HYT01 IM002 IM003 IM004 IM005 IM006 IM014 HY000 HY010 HY090 HY092 HYC00 42000 42S02 42S22 40001 07002 07009 22001 22003 22018'.split())
+_SAFE_STATES = frozenset('08001 08003 08004 08006 08S01 28000 HYT00 HYT01 IM002 IM003 IM004 IM005 IM006 IM014 HY000 HY010 HY090 HY092 HYC00 42000 42S02 42S22 40001 07002 07006 07009 HY003 HY004 HY105 HY106 22001 22002 22003 22005 22007 22008 22018'.split())
 _MESSAGES = {
     'driver-resolution': 'A registered 64-bit SAP IQ or SQL Anywhere ODBC driver is required.',
     'connect': 'IQ connection failed. Check the endpoint and account settings.',
@@ -22,6 +22,7 @@ _MESSAGES = {
     'IQ-identity': 'The connected server could not be verified as SAP IQ.',
     'query': 'IQ SELECT execution failed. Check the query and read permissions.',
     'writing': 'IQ result export failed. Check the data format and available disk space.',
+    'fetch': 'IQ 결과를 읽는 중 ODBC 변환 또는 조회 오류가 발생했습니다. (Result fetch failed.)',
     'stage': 'The reserved export staging file is invalid or changed.',
 }
 
@@ -42,7 +43,16 @@ def _diagnostic(stage, error=None, library=None):
         candidate = error.args[0] if error.args else None
         if isinstance(candidate, str) and candidate in _SAFE_STATES:
             state = candidate
-    return IqOdbcError(_MESSAGES[stage], stage=stage, sqlstate=state)
+    message = _MESSAGES[stage]
+    if state == 'HY106':
+        # Exact pyodbc 5.3.0 library template, never arbitrary native text.
+        value = error.args[1] if len(error.args) > 1 else None
+        match = re.fullmatch(r'ODBC SQL type (-?[0-9]{1,5}) is not yet supported\.\s+column-index=([0-9]{1,5})\s+type=(-?[0-9]{1,5})', value) if isinstance(value, str) else None
+        if match:
+            sql_type, column, repeated = map(int, match.groups())
+            if sql_type == repeated and -32768 <= sql_type <= 32767 and column < 32767:
+                message += f' 지원하지 않는 ODBC 컬럼 형식입니다. (Unsupported column type.) column {column + 1}; ODBC SQL type={sql_type}.'
+    return IqOdbcError(message, stage=stage, sqlstate=state)
 
 
 def _text(value):
@@ -225,6 +235,10 @@ def _connected_operation(payload, connection, output, emit):
         return iq_files.write_result(cursor, output, payload['options'], emit=emit)
     except IqOdbcError:
         raise
+    except iq_files.ExportError as error:
+        raise IqOdbcError(str(error), stage='writing') from None
+    except iq_files.FetchError as error:
+        raise _diagnostic('fetch', error.__cause__, library) from None
     except Exception as error:
         raise _diagnostic(stage, error, library) from None
     finally:
@@ -256,5 +270,11 @@ def run_operation(payload, emit=None) -> dict:
         return _connected_operation(payload, connection, None, emit)
     payload = {**payload, 'sql': iq_sql.validate_select(payload.get('sql')),
                'options': iq_files.parse_options(payload.get('options', {}))}
-    with _stage(payload) as output:
-        return _connected_operation(payload, connection, output, emit)
+    try:
+        with _stage(payload) as output:
+            return _connected_operation(payload, connection, output, emit)
+    except OSError as error:
+        codes = {name: value for name in ('errno', 'winerror')
+                 if type(value := getattr(error, name, None)) is int and 0 <= value <= 2 ** 32 - 1}
+        detail = iq_files.ExportError('output-io', os_errno=codes.get('errno'), winerror=codes.get('winerror'))
+        raise IqOdbcError(str(detail), stage='writing') from None

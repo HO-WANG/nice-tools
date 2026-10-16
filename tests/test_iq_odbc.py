@@ -333,3 +333,45 @@ def test_cursor_creation_failure_has_its_own_safe_stage(db, tmp_path, monkeypatc
     connection = library.connections[0]
     assert connection.closed and connection.rolled_back
     assert all(cursor.closed for cursor in connection.cursors)
+
+
+@pytest.mark.parametrize('value,reason', [('private|value','field-terminator'),('private\nvalue','row-terminator'),('😀private','encoding'),('private\0value','nul')])
+def test_safe_cell_diagnostic_survives_odbc_boundary(db, tmp_path, monkeypatch, value, reason):
+    module, library = db
+    batches=iter([[(value,1)],[]])
+    monkeypatch.setattr(Cursor,'fetchmany',lambda cursor,size: next(batches))
+    with pytest.raises(module.IqOdbcError) as captured:
+        module.run_operation(export_payload(tmp_path))
+    detail=str(captured.value)
+    assert captured.value.stage=='writing'
+    assert reason in detail and 'row 1' in detail and 'column 1' in detail and 'euc-kr' in detail
+    assert 'private' not in detail and '😀' not in detail
+    assert library.connections[0].closed and library.connections[0].rolled_back
+
+
+def test_fetch_unsupported_odbc_type_has_safe_column_diagnostic(db, tmp_path):
+    module, library = db
+    library.fetch_error=NativeError('HY106','ODBC SQL type -155 is not yet supported.  column-index=2  type=-155')
+    with pytest.raises(module.IqOdbcError) as captured:
+        module.run_operation(export_payload(tmp_path))
+    assert captured.value.stage=='fetch' and captured.value.sqlstate=='HY106'
+    assert 'column 3' in str(captured.value) and '-155' in str(captured.value)
+    assert library.connections[0].closed
+
+
+def test_unrecognized_fetch_diagnostic_never_echoes_data(db, tmp_path):
+    module, library=db
+    library.fetch_error=NativeError('22018','private-password SELECT secret rowvalue /private/path')
+    with pytest.raises(module.IqOdbcError) as captured:
+        module.run_operation(export_payload(tmp_path))
+    assert captured.value.stage=='fetch' and captured.value.sqlstate=='22018'
+    assert not any(value in str(captured.value) for value in ['private-password','SELECT secret','rowvalue','/private/path'])
+
+
+def test_native_hy106_is_not_assumed_to_be_unsupported_column(db, tmp_path):
+    module, library=db
+    library.fetch_error=NativeError('HY106','Fetch type out of range private data')
+    with pytest.raises(module.IqOdbcError) as captured:
+        module.run_operation(export_payload(tmp_path))
+    assert captured.value.sqlstate=='HY106' and captured.value.stage=='fetch'
+    assert 'Unsupported column' not in str(captured.value) and 'private data' not in str(captured.value)

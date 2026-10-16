@@ -10,6 +10,7 @@ import struct
 import subprocess
 import tempfile
 import threading
+import time
 import json
 from pathlib import Path
 
@@ -161,6 +162,32 @@ def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path |
                         smoke_args += ["--sap-test-clients", str(sap_test_clients), "--executable", str(executable)]
                     smoke_main(smoke_args)
                     break
+            # HTTP failures must also reach the existing frozen launcher's
+            # console, not just a child worker or a web response.
+            deadline = time.monotonic() + 10
+            while '[IQ connect failed]' not in ''.join(lines) or 'driver-resolution' not in ''.join(lines):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise AssertionError('Frozen launcher did not print the IQ failure phase')
+                try:
+                    line = output.get(timeout=remaining)
+                except queue.Empty:
+                    raise AssertionError('Frozen launcher did not print the IQ failure phase') from None
+                if line is None:
+                    raise AssertionError('Frozen launcher exited before printing the IQ failure')
+                lines.append(line)
+            while True:
+                try:
+                    line = output.get_nowait()
+                except queue.Empty:
+                    break
+                if line is not None:
+                    lines.append(line)
+            console = ''.join(lines)
+            assert all(secret not in console for secret in (
+                'iq-exe-verification-secret-9!', 'iq-profile-verification-secret-9!',
+            )), 'Frozen launcher emitted IQ credentials'
+            print('IQ frozen launcher console: sanitized connection failure and phase passed; no live IQ export tested.')
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")
         finally:
