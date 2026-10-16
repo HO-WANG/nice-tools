@@ -18,7 +18,7 @@ _SAFE_STATES = frozenset('08001 08003 08004 08006 08S01 28000 HYT00 HYT01 IM002 
 _MESSAGES = {
     'driver-resolution': 'A registered 64-bit SAP IQ or SQL Anywhere ODBC driver is required.',
     'connect': 'IQ connection failed. Check the endpoint and account settings.',
-    'startup': 'IQ connection initialization failed.',
+    'cursor-open': 'IQ connected, but opening an ODBC query cursor failed.',
     'IQ-identity': 'The connected server could not be verified as SAP IQ.',
     'query': 'IQ SELECT execution failed. Check the query and read permissions.',
     'writing': 'IQ result export failed. Check the data format and available disk space.',
@@ -197,8 +197,10 @@ def _connected_operation(payload, connection, output, emit):
         native = library.connect(build_connection_string(connection, driver), autocommit=False, timeout=15,
                                  attrs_before={getattr(library, 'SQL_ATTR_ACCESS_MODE', 101):
                                                getattr(library, 'SQL_MODE_READ_ONLY', 1)})
-        stage = 'startup'
-        native.timeout = 0
+        # pyodbc already defaults to unlimited query time. Reassigning zero
+        # calls SQLSetConnectAttr(SQL_ATTR_CONNECTION_TIMEOUT), which some IQ
+        # drivers reject even though login succeeded. Keep the native default.
+        stage = 'cursor-open'
         cursor = native.cursor()
         stage = 'IQ-identity'
         cursor.execute('SELECT @@version')
@@ -211,7 +213,7 @@ def _connected_operation(payload, connection, output, emit):
             return {'driver': driver, 'version': version}
         cursor.close()
         cursor = None
-        stage = 'startup'
+        stage = 'cursor-open'
         cursor = native.cursor()
         emit({'phase': 'querying'})
         stage = 'query'

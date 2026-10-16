@@ -52,7 +52,7 @@ class Connection:
         self.db = db
         self.closed = self.rolled_back = False
         self.cursors = []
-        self.timeout = None
+        self.timeout = 0
 
     def cursor(self):
         cursor = Cursor(self.db)
@@ -284,3 +284,52 @@ def test_non_ascii_control_and_invalid_unicode_connection_values_are_rejected(db
     module, _ = db
     with pytest.raises(ValueError):
         module.connection_data(CONNECTION | {'password': value})
+
+
+@pytest.mark.parametrize('operation', ['connect', 'export'])
+def test_default_timeout_is_not_reapplied_to_iq_driver(db, tmp_path, monkeypatch, operation):
+    """Some IQ drivers reject SQLSetConnectAttr even for the default zero."""
+    module, library = db
+    writes = []
+    class UnsupportedTimeout(Connection):
+        def __init__(self, db):
+            self.db = db
+            self.closed = self.rolled_back = False
+            self.cursors = []
+
+        @property
+        def timeout(self):
+            return 0
+
+        @timeout.setter
+        def timeout(self, value):
+            writes.append(value)
+            raise NativeError('HY000', 'SQLSetConnectAttr unsupported private-password')
+    monkeypatch.setattr(sys.modules[__name__], 'Connection', UnsupportedTimeout)
+    payload = {'operation': 'connect', 'connection': CONNECTION} if operation == 'connect' else export_payload(tmp_path)
+    result = module.run_operation(payload)
+    assert result['driver'] == 'SAP IQ 16.1' if operation == 'connect' else result['rows'] == 2
+    assert not writes
+    assert library.calls[0][1]['timeout'] == 15
+    assert library.connections[0].closed and library.connections[0].rolled_back
+
+
+@pytest.mark.parametrize('cursor_number', [1, 2])
+def test_cursor_creation_failure_has_its_own_safe_stage(db, tmp_path, monkeypatch, cursor_number):
+    module, library = db
+    original_cursor = Connection.cursor
+    calls = []
+    def cursor(connection):
+        calls.append(None)
+        if len(calls) == cursor_number:
+            raise NativeError('HY000', 'SQLAllocHandle private-password SELECT secret')
+        return original_cursor(connection)
+    monkeypatch.setattr(Connection, 'cursor', cursor)
+    with pytest.raises(module.IqOdbcError) as captured:
+        module.run_operation(export_payload(tmp_path))
+    assert captured.value.stage == 'cursor-open'
+    assert captured.value.sqlstate == 'HY000'
+    assert 'private-password' not in str(captured.value) and 'SELECT secret' not in str(captured.value)
+    connection = library.connections[0]
+    assert connection.closed and connection.rolled_back
+    assert all(cursor.closed for cursor in connection.cursors)
