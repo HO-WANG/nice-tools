@@ -123,6 +123,7 @@ class IQManager(AseManager):
     def _run_export(self, token, session, job, sql, options, root):
         process = reservation = stage = identity = None
         payload = {}
+        failure_detail = None
         connection = session['connection']
         started = time.monotonic()
         try:
@@ -194,10 +195,8 @@ class IQManager(AseManager):
                 public['path'] = publish_available(stage, job['path'])
                 job.update(public, result=public, state='succeeded', phase='done', message='내보내기 완료')
         except Exception as error:
-            with self.lock:
-                if not job['cancelled']:
-                    detail = str(error) if isinstance(error, ValueError) else 'IQ 결과를 저장하지 못했습니다. 연결과 출력 폴더를 확인하세요.'
-                    job.update(state='failed', phase='done', message=self._redact(detail, connection))
+            detail = str(error) if isinstance(error, ValueError) else 'IQ 결과를 저장하지 못했습니다. 연결과 출력 폴더를 확인하세요.'
+            failure_detail = self._redact(detail, connection)
         finally:
             if process is not None:
                 with contextlib.suppress(Exception):
@@ -213,6 +212,10 @@ class IQManager(AseManager):
                     job['elapsed_seconds'] = max(0.0, time.monotonic() - started)
                 if job['cancelled']:
                     job.update(state='cancelled', phase='done', message='내보내기 취소됨')
+                elif failure_detail is not None:
+                    # A terminal failure promises that its owned worker and
+                    # staging file have been released before another job starts.
+                    job.update(state='failed', phase='done', message=failure_detail)
             payload.clear()
 
 

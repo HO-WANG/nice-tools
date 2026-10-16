@@ -175,3 +175,29 @@ def test_queued_cancel_is_terminal_without_waiting_for_dispatcher(tmp_path, monk
         assert not (tmp_path/'exports').exists()
     finally:
         manager.close()
+
+
+def test_failure_is_terminal_only_after_owned_stage_cleanup(tmp_path, monkeypatch):
+    import threading
+    from nice_tools import iq_jobs
+    entered, release = threading.Event(), threading.Event()
+    original_cleanup = iq_jobs.ExportReservation.cleanup
+    def cleanup(reservation):
+        entered.set()
+        assert release.wait(5)
+        original_cleanup(reservation)
+    monkeypatch.setattr(iq_jobs.ExportReservation, 'cleanup', cleanup)
+    manager = manager_for(tmp_path, 'fail')
+    try:
+        token = session_for(manager, tmp_path)
+        handle = manager.start_export(token, 'select 1', 'iq-result.txt', {})['job']
+        assert entered.wait(5)
+        assert manager.job(token, handle)['state'] == 'running'
+        release.set()
+        result = finished(manager, token, handle)
+        assert result['state'] == 'failed'
+        assert not list((tmp_path / 'exports').iterdir())
+        assert not manager.processes
+    finally:
+        release.set()
+        manager.close()
