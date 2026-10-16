@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 def json_request(base, route, payload=None, error_code=None):
-    headers = {"Content-Type": "application/json", "X-Nice-Tools": "ase"}
+    headers = {"Content-Type": "application/json", "X-Nice-Tools": "iq" if route.startswith("/api/iq/") else "ase"}
     request = urllib.request.Request(f"{base}{route}", headers=headers,
                                      data=json.dumps(payload).encode() if payload is not None else None)
     try:
@@ -48,6 +48,29 @@ def ase_checks(base):
     assert "FreeTDS" not in str(status), "Obsolete native driver remains in client status"
     assert "sql_ini" not in status and "data_sources" not in status["odbc"], "Removed connection discovery remains enabled"
     print("ASE HTTP smoke: ODBC/SAP BCP discovery and optional-owner session validation passed.")
+
+
+def iq_checks(base, executable=None, directory=None, require_odbc=False):
+    status = json_request(base, '/api/iq/status')
+    assert isinstance(status['available'], bool) and isinstance(status['drivers'], list)
+    if require_odbc:
+        assert status['module_available'] is True, 'IQ cannot import bundled pyodbc'
+    password = 'iq-exe-verification-secret-9!'
+    connection = {'host': '127.0.0.1', 'port': 2638, 'user': 'fixture', 'password': password,
+                  'driver': 'Nice Tools deliberately unregistered IQ driver'}
+    error = json_request(base, '/api/iq/connect', connection, 400)
+    assert 'driver-resolution' in sanitized_error(error, password)
+    if directory:
+        assert Path(status['export_directory']).resolve() == Path(directory).resolve()
+    if executable:
+        from verify_bundle import worker_request
+        result = worker_request(executable, {'operation': 'status', 'connection': connection}, directory, worker='--iq-worker')
+        assert isinstance(result['drivers'], list)
+        if require_odbc:
+            assert result['module_available'] is True
+        worker_request(executable, {'operation': 'connect', 'connection': connection}, directory,
+                       expect_error=True, worker='--iq-worker')
+    print('IQ HTTP/worker smoke: bundled pyodbc, driver discovery, sanitized invalid-driver failure and EXE-relative folder passed; no live IQ connection tested.')
 
 
 def jasypt_checks(base):
@@ -223,12 +246,12 @@ def main(argv=None):
         assert json.load(response) == {"status": "ok"}
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
         page = response.read()
-        assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page
+        assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page and b'id="iq-tool"' in page
         assert b'id="ase-search-button"' in page and b'id="ase-catalog-timings"' in page and b'id="ase-out-statistics"' in page
         assert b'id="ase-master-password"' not in page, 'ASE still asks for a profile encryption key'
         assert all(f'id="{name}"'.encode() in page for name in ('ase-select-all', 'ase-concurrency', 'ase-start', 'ase-job-items'))
         assert b'id="ase-preview"' not in page and b'id="ase-review"' not in page, 'Retired confirmation step remains in the executable'
-    for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js"):
+    for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js", "iq.css", "iq.js"):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
     result = compare_request(base, {
@@ -276,6 +299,7 @@ def main(argv=None):
     encoding_checks(base)
     jasypt_checks(base)
     ase_checks(base)
+    iq_checks(base, args.executable, args.config_folder, args.require_odbc)
     if args.config_folder is not None:
         profile_checks(base, args.config_folder, args.sap_test_clients, args.executable, args.require_odbc)
     if args.large_files:

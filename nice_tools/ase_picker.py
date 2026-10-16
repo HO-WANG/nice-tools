@@ -103,7 +103,7 @@ def pick_directory(initial_directory: str | None = None) -> dict:
             return 0
         request = BROWSEINFOW()
         request.pszDisplayName = display
-        request.lpszTitle = "Select the BCP output folder"
+        request.lpszTitle = "Select the output folder"
         request.ulFlags = 0x01 | 0x10 | 0x40  # filesystem folders, editable path, new dialog
         request.lpfn = callback
         request.lParam = ctypes.cast(initial, ctypes.c_void_p).value

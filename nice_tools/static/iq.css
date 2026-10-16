@@ -1,0 +1,32 @@
+#iq-tool .section-heading { flex-wrap: wrap; }
+.iq-connection-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 14px; padding: 0 20px 16px; }
+.iq-driver-field { grid-column: span 2; }
+.iq-connection-grid > button { justify-self: start; min-height: 36px; }
+.iq-note { margin: 0; padding: 0 20px 14px; font-size: 13px; color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; }
+#iq-runtime[data-tone="error"] { color: #a52a2a; }
+.iq-query-field { padding: 0 20px 12px; }
+.iq-file-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 20px 16px; }
+.iq-file-row > div { min-width: 0; font-size: 13px; }
+.iq-file-row > button { flex-shrink: 0; }
+#iq-path { margin-top: 4px; color: var(--muted); overflow-wrap: anywhere; }
+.iq-options-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; padding: 0 20px 14px; }
+.iq-header-option { display: flex; gap: 8px; align-items: center; padding: 0 20px 14px; font-size: 13px; }
+.iq-header-option input { width: 16px; height: 16px; accent-color: var(--accent); }
+.iq-statistics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; padding: 0 20px 16px; margin: 0; }
+.iq-statistics > div { border-top: 1px solid var(--line); padding-top: 12px; min-width: 0; }
+.iq-statistics dt { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.iq-statistics dd { font-size: 16px; font-weight: 600; font-variant-numeric: tabular-nums; margin: 0; overflow-wrap: anywhere; }
+.iq-result { padding: 0 20px 16px; font-size: 13px; overflow-wrap: anywhere; }
+#iq-result-path { margin: 5px 0 12px; white-space: pre-wrap; }
+#iq-result-columns { margin-top: 8px; color: var(--muted); white-space: pre-wrap; }
+#iq-tool input:disabled { background: #f5f6f8; color: var(--muted); }
+@media (max-width: 1100px) {
+  .iq-connection-grid, .iq-options-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .iq-connection-grid, .iq-options-grid { grid-template-columns: minmax(0, 1fr); padding-inline: 14px; }
+  .iq-driver-field { grid-column: auto; }
+  .iq-note, .iq-query-field, .iq-file-row, .iq-header-option, .iq-result { padding-inline: 14px; }
+  .iq-statistics { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-inline: 14px; }
+  .iq-file-row { flex-wrap: wrap; }
+}

@@ -43,10 +43,10 @@ def stop_process(process):
         process.wait(timeout=10)
 
 
-def spawn_worker(executable, directory):
+def spawn_worker(executable, directory, worker="--ase-worker"):
     guard = None
     process = subprocess.Popen(
-        [str(executable), "--ase-worker"], stdin=subprocess.PIPE,
+        [str(executable), worker], stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=directory,
         creationflags=(subprocess.CREATE_NO_WINDOW | 0x00000004) if os.name == "nt" else 0,
         start_new_session=os.name != "nt",
@@ -70,8 +70,8 @@ def spawn_worker(executable, directory):
         raise
 
 
-def worker_request(executable, payload, directory, expect_error=False):
-    process, guard = spawn_worker(executable, directory)
+def worker_request(executable, payload, directory, expect_error=False, worker="--ase-worker"):
+    process, guard = spawn_worker(executable, directory, worker)
     try:
         stdout, stderr = process.communicate(json.dumps(payload).encode(), timeout=60)
         returncode = process.returncode
@@ -89,7 +89,7 @@ def worker_request(executable, payload, directory, expect_error=False):
     if expect_error:
         assert returncode != 0 and any(event["event"] == "error" for event in events), "Expected a failed transfer"
         return events
-    assert returncode == 0, "Frozen ASE worker failed"
+    assert returncode == 0, "Frozen ODBC worker failed"
     results = [event["result"] for event in events if event["event"] == "result"]
     assert len(results) == 1, "Frozen worker did not return one result"
     return results[0]

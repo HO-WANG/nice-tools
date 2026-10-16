@@ -19,6 +19,13 @@ analysis = Analysis(
         "nice_tools.ase_cli",
         "nice_tools.ase_odbc",
         "pyodbc",
+        "nice_tools.iq_api",
+        "nice_tools.iq_jobs",
+        "nice_tools.iq_worker",
+        "nice_tools.iq_odbc",
+        "nice_tools.iq_files",
+        "nice_tools.iq_sql",
+
         "nice_tools.ase_clients",
         "nice_tools.ase_process",
         "nice_tools.ase_picker",
