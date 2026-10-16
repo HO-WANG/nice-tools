@@ -441,7 +441,11 @@ EUC-KR, `|` 컬럼 구분자, LF 줄 구분자, 헤더 없음이 기본이며 �
 CSV 따옴표 처리가 없는 문자형 BCP 형식입니다. NULL은 빈 필드, 빈 문자열은 NUL 한 바이트로 구분합니다.
 값에 구분자/NUL이 포함되거나 지정 인코딩으로 표현할 수 없으면 오류로 종료하며 값을 임의 변경하지 않습니다.
 연결 검증과 각 내보내기는 별도 연결을 사용하므로 임시 테이블이나 세션 설정을 공유하지 않습니다.
-이 버전은 IQ 접속 정보를 파일에 저장하지 않으며 SQL과 결과 값을 로그·브라우저 저장소에 기록하지 않습니다.
+연결 검증에 성공하면 EXE 옆 `iq-connections.txt`에 자동 저장합니다. ASE 파일과 독립적으로 관리하며,
+프로필 이름은 `서버주소-계정`이고 같은 서버의 다른 DB·엔진도 구분합니다. 비밀번호는 ASE와 동일한 고정 키
+`nice1234!!`로 Jasypt 암호화해 `ENC(...)`로 저장합니다. 다음 실행 때 마지막 서버가 선택되며 비밀번호를
+다시 입력하지 않고 연결할 수 있습니다. 저장 실패 시 검증된 연결은 유지하고 경고를 표시합니다.
+이 고정 키는 사용자별 비밀이 아니므로 파일 자체의 접근 권한도 관리하세요. SQL과 결과 값은 로그·브라우저 저장소에 기록하지 않습니다.
 읽기 전용 연결 및 SELECT 검사를 적용하지만 함수 부작용까지 차단하지는 않으므로 조회 권한의 계정을 사용하세요.
 
 소스·브라우저 검사는 대역과 로컬 프로세스로 수행합니다. Windows EXE는 실제 pyodbc 로드·드라이버 조회·
@@ -463,7 +467,8 @@ IQ 접속 오류에서 `connect`는 연결 단계, `cursor-open`은 로그인 �
 - `nice_tools/ase_files.py`: 스트리밍 파일 검사와 미리보기
 - `nice_tools/ase_worker.py`, `ase_picker.py`: 격리 프로세스와 Windows 파일 선택
 - `nice_tools/ase_api.py`, `ase_jobs.py`: 로컬 API, 메모리 접속·확인·취소 작업
-- `nice_tools/ase_profiles.py`: EXE 옆의 암호화된 연결 설정 읽기·자동 저장
+- `nice_tools/ase_profiles.py`: EXE 옆의 ASE 암호화 연결 설정 읽기·자동 저장
+- `nice_tools/iq_profiles.py`: 별도 IQ 암호화 연결 설정과 마지막 서버 기억
 - `scripts/build_sap_test_clients.ps1`: 배포하지 않는 Windows 콘솔 검사용 클라이언트 빌드
 - `nice_tools/uploads.py`: 업로드·경로·옵션 검증
 - `nice_tools/limits.py`: 비교할 파일 개수 정책

@@ -1,4 +1,8 @@
 #iq-tool .section-heading { flex-wrap: wrap; }
+.iq-profile-row { display: flex; align-items: end; gap: 14px; padding: 0 20px 14px; }
+.iq-profile-row .field { flex: 1; min-width: 0; }
+.iq-profile-row button { flex-shrink: 0; }
+#iq-tool .iq-note[data-tone="error"] { color: #a52a2a; }
 .iq-connection-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; gap: 14px; padding: 0 20px 16px; }
 .iq-driver-field { grid-column: span 2; }
 .iq-connection-grid > button { justify-self: start; min-height: 36px; }
@@ -26,7 +30,8 @@
 @media (max-width: 760px) {
   .iq-connection-grid, .iq-options-grid { grid-template-columns: minmax(0, 1fr); padding-inline: 14px; }
   .iq-driver-field { grid-column: auto; }
-  .iq-note, .iq-query-field, .iq-file-row, .iq-header-option, .iq-result { padding-inline: 14px; }
+  .iq-note, .iq-query-field, .iq-file-row, .iq-header-option, .iq-result, .iq-profile-row { padding-inline: 14px; }
+  .iq-profile-row { align-items: stretch; flex-direction: column; }
   .iq-statistics { grid-template-columns: repeat(2, minmax(0, 1fr)); padding-inline: 14px; }
   .iq-file-row { flex-wrap: wrap; }
 }

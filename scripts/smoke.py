@@ -73,6 +73,53 @@ def iq_checks(base, executable=None, directory=None, require_odbc=False):
     print('IQ HTTP/worker smoke: bundled pyodbc, driver discovery, sanitized invalid-driver failure and EXE-relative folder passed; no live IQ connection tested.')
 
 
+def iq_profile_checks(base, directory):
+    """Exercise actual profile decoding without a live IQ login or ODBC fake."""
+    directory = directory.resolve(strict=True)
+    location = directory / 'iq-connections.txt'
+    missing = json_request(base, '/api/iq/profiles')
+    assert Path(missing['path']).resolve() == location, 'IQ configuration must be beside the actual executable'
+    assert missing['exists'] is False and missing['profiles'] == []
+    assert not location.exists(), 'Refusing to replace an existing IQ configuration'
+    password = 'iq-profile-verification-secret-9!'
+    fixed_key = 'nice1234!!'
+    request = urllib.request.Request(f'{base}/api/jasypt',
+        data=json.dumps({'operation':'encrypt','text':password,'password':fixed_key,'wrap_enc':True}).encode(),
+        headers={'Content-Type':'application/json'})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        encrypted = json.load(response)['result']
+    invalid_driver = 'Nice Tools deliberately unregistered IQ driver'
+    config = ('# IQ verification fixture\n[preferences]\nlast_profile = IQ verification\n'
+              '[IQ verification]\nhost = 127.0.0.1\nport = 2638\nuser = fixture\n'
+              f'password = {encrypted}\ndatabase = fixture_db\nserver_name = fixture_engine\ndriver = {invalid_driver}\n')
+    created = False
+    try:
+        with location.open('xb') as output:
+            output.write(b'\xef\xbb\xbf' + config.encode('utf-8'))
+        created = True
+        original = location.read_bytes()
+        profiles = json_request(base, '/api/iq/profiles')
+        assert len(profiles['profiles']) == 1
+        profile = profiles['profiles'][0]
+        assert profile['database'] == 'fixture_db' and profile['server_name'] == 'fixture_engine'
+        assert profile['driver'] == invalid_driver and profiles['last_profile_id'] == profile['id']
+        assert password not in json.dumps(profiles) and encrypted not in json.dumps(profiles)
+        refused = json_request(base, '/api/iq/connect', {'profile_id':profile['id']}, 400)
+        assert 'driver-resolution' in sanitized_error(refused, password, fixed_key, encrypted, encrypted[4:-1])
+        manual = json_request(base, '/api/iq/connect', {'host':'127.0.0.1','port':2638,'user':'other',
+            'password':password,'driver':invalid_driver}, 400)
+        assert 'driver-resolution' in sanitized_error(manual, password)
+        assert location.read_bytes() == original, 'Failed IQ login modified encrypted configuration'
+        location.write_text(config.replace(encrypted, 'ENC(not-a-valid-base64)'), encoding='utf-8')
+        stale = json_request(base, '/api/iq/profiles')['profiles'][0]
+        failure = json_request(base, '/api/iq/connect', {'profile_id':stale['id']}, 400)
+        assert '복호화' in sanitized_error(failure, password, fixed_key)
+    finally:
+        if created:
+            location.unlink()
+    print('IQ profile smoke: EXE-relative UTF-8/BOM profiles, fixed-key decryption, last selection, sanitized failures and failed-login nonpersistence passed; no live IQ login tested.')
+
+
 def jasypt_checks(base):
     reference = Path(__file__).resolve().parents[1] / 'tests/fixtures/jasypt.json'
     cases = json.loads(reference.read_text(encoding='utf-8'))['cases']
@@ -302,6 +349,7 @@ def main(argv=None):
     iq_checks(base, args.executable, args.config_folder, args.require_odbc)
     if args.config_folder is not None:
         profile_checks(base, args.config_folder, args.sap_test_clients, args.executable, args.require_odbc)
+        iq_profile_checks(base, args.config_folder)
     if args.large_files:
         prefix = b"a" * (10 * 1024 * 1024 + 1)
         compare_request(base, {"left_paths": '["large.txt"]', "right_paths": '["large.txt"]'}, [

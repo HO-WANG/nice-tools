@@ -12,6 +12,7 @@ dist/
 .env.*
 !.env.example
 /ase-connections.txt
+/iq-connections.txt
 *.log
 node_modules/
 test-results/

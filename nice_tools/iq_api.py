@@ -6,7 +6,6 @@ from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 from .ase_api import local_request
 from .iq_jobs import manager
-from .iq_odbc import connection_data
 
 router = APIRouter(prefix='/api/iq')
 HEADERS = {'Cache-Control': 'no-store'}
@@ -77,6 +76,48 @@ async def _connect_for_request(request, connection):
 
 
 
+async def _connect_and_save(request, data):
+    from . import iq_profiles
+    if 'profile_id' in data:
+        if set(data) != {'profile_id'}:
+            raise ValueError('저장된 서버의 접속 프로필을 선택하세요.')
+        selected = await run_in_threadpool(iq_profiles.decrypt_connection, _handle(data['profile_id']))
+        result = await _connect_for_request(request, selected['connection'])
+        result['profile_name'] = selected['profile_name']
+        save_function, save_argument = iq_profiles.remember_connection, data['profile_id']
+    else:
+        prepared = await run_in_threadpool(iq_profiles.prepare_connection, data)
+        result = await _connect_for_request(request, prepared['connection'])
+        save_function, save_argument = iq_profiles.save_connection, prepared
+    try:
+        try:
+            result.update(await run_in_threadpool(save_function, save_argument))
+        except (ValueError, OSError):
+            # A valid native connection remains usable when its optional local
+            # configuration is malformed, read-only or externally changed.
+            result.update(saved=False, save_warning=iq_profiles.SAVE_ERROR)
+        if await request.is_disconnected():
+            raise ValueError('접속 요청이 종료되었습니다. 다시 접속하세요.')
+        return result
+    except (Exception, asyncio.CancelledError):
+        await asyncio.shield(_schedule_disconnect(result['session']))
+        raise
+
+
+@router.get('/profiles')
+async def profiles(request: Request):
+    try:
+        local_request(request, mutation=False)
+        from .iq_profiles import public_profiles
+        return JSONResponse(await run_in_threadpool(public_profiles), headers=HEADERS)
+    except PermissionError as error:
+        return JSONResponse({'detail': str(error)}, status_code=403, headers=HEADERS)
+    except ValueError as error:
+        return JSONResponse({'detail': str(error)}, status_code=400, headers=HEADERS)
+    except Exception:
+        return JSONResponse({'detail': 'IQ 연결 설정 파일을 읽지 못했습니다.'}, status_code=400, headers=HEADERS)
+
+
 @router.get('/status')
 async def status(request: Request):
     try:
@@ -107,13 +148,13 @@ async def operation(request: Request, operation: str):
             data = await request.json()
         except (ValueError, RecursionError):
             raise ValueError('JSON 입력을 읽을 수 없습니다.') from None
-        fields = {'connect': {'host','port','database','server_name','user','password','driver'},
+        fields = {'connect': {'host','port','database','server_name','user','password','driver','profile_id'},
                   'pick-directory': {'session'}, 'jobs': {'session','sql','filename','options'},
                   'job': {'session','job'}, 'cancel': {'session','job'}, 'disconnect': {'session'}}
         if operation not in fields or not isinstance(data, dict) or set(data) - fields[operation]:
             raise ValueError('지원하지 않는 입력 형식입니다.')
         if operation == 'connect':
-            result = await _connect_for_request(request, connection_data(data))
+            result = await _connect_and_save(request, data)
         else:
             session = _handle(data.get('session'))
             if operation == 'jobs':
