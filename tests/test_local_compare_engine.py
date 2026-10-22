@@ -51,7 +51,7 @@ def test_detects_encoding_and_normalizes_complete_text(engine, tmp_path, text, e
     assert source.read_bytes().decode(detected) == text
     destination = tmp_path / "normalized"
     metadata = engine.normalize_file(source, destination, CompareOptions())
-    assert destination.read_text() == "".join(line + "\n" for line in normalize_lines(source.read_bytes(), CompareOptions()))
+    assert destination.read_text(encoding='utf-8') == "".join(line + "\n" for line in normalize_lines(source.read_bytes(), CompareOptions()))
     assert metadata == {"encoding": detected, "rows": len(normalize_lines(source.read_bytes(), CompareOptions()))}
 
 

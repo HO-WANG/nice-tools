@@ -89,6 +89,29 @@ def test_directory_replacement_during_scan_cannot_expose_outside_names(tmp_path,
     assert attacked
 
 
+def test_nested_directory_identity_does_not_use_incomplete_direntry_stat(tmp_path,monkeypatch):
+    import os
+    from types import SimpleNamespace
+    module=worker()
+    root=tmp_path/'root';(root/'nested').mkdir(parents=True)
+    (root/'nested'/'data.txt').write_bytes(b'complete\n')
+    original=os.scandir
+    class Entries:
+        def __init__(self,path):self.source=original(path)
+        def __enter__(self):return self
+        def __exit__(self,*args):self.source.close()
+        def __iter__(self):
+            for entry in self.source:
+                info=entry.stat(follow_symlinks=False)
+                # Windows DirEntry.stat may omit st_ino/st_dev; lstat is the
+                # authoritative source of the identity used by the worker.
+                yield SimpleNamespace(name=entry.name,stat=lambda follow_symlinks=False,info=info:
+                                      SimpleNamespace(st_mode=info.st_mode,st_file_attributes=getattr(info,'st_file_attributes',0),st_dev=0,st_ino=0))
+    monkeypatch.setattr(os,'scandir',Entries)
+    entries=module.scan_folder(module.folder_descriptor(root))
+    assert entries['nested/data.txt']['fingerprint']==module.fingerprint(root/'nested'/'data.txt')
+
+
 def test_byte_identical_invalid_text_is_not_reported_same(tmp_path):
     left, right = tmp_path / 'before', tmp_path / 'after'
     left.mkdir(); right.mkdir()

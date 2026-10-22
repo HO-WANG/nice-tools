@@ -125,7 +125,9 @@ def scan_folder(descriptor):
                         if stat.S_ISLNK(info.st_mode) or getattr(info, 'st_file_attributes', 0) & 0x400:
                             entries[relative] = {'error': '링크는 따라가지 않습니다. 일반 파일을 선택하세요.'}
                         elif stat.S_ISDIR(info.st_mode):
-                            identities[path]=[info.st_dev,info.st_ino]
+                            # Windows DirEntry.stat caches can omit identity
+                            # fields; lstat supplies the actual directory ID.
+                            identities[path]=fingerprint(path,directory=True)[:2]
                             pending.append(path)
                         elif stat.S_ISREG(info.st_mode):
                             entries[relative] = {'fingerprint': fingerprint(path)}

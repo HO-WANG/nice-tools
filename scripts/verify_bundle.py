@@ -103,8 +103,9 @@ def local_comparison_worker_checks(executable, directory):
     from nice_tools.local_compare_worker import folder_descriptor
     left,right=Path(directory)/'로컬 before',Path(directory)/'로컬 after'
     left.mkdir();right.mkdir()
-    (left/'encoding.txt').write_bytes('한국어 설정\n'.encode('cp949'))
-    (right/'encoding.txt').write_text('한국어 설정\n',encoding='utf-8')
+    (left/'nested').mkdir();(right/'nested').mkdir()
+    (left/'nested'/'encoding.txt').write_bytes('한국어 설정\n'.encode('cp949'))
+    (right/'nested'/'encoding.txt').write_text('한국어 설정\n',encoding='utf-8')
     for root,prefix in ((left,'old'),(right,'new')):
         (root/'changed.txt').write_text('\n'.join(f'{prefix} {i}' for i in range(225)),encoding='utf-8')
     # Complete comparison beyond the former size cap, including the final byte.
