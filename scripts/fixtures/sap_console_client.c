@@ -83,7 +83,8 @@ static int bcp(int argc, wchar_t **argv) {
         fclose(data);
         fprintf(stdout, "%d rows sent to the server. %d rows total sent.\n", rows, rows);
     } else return 4;
-    fprintf(stdout, "%d rows copied.\nClock Time (ms.): total = 25 Avg = 8 (120 rows per sec.)\n", rows);
+    /* Match SAP's no-newline startup banner and final row-count output. */
+    fprintf(stdout, "Starting copy..%d rows copied.\nClock Time (ms.): total = 25 Avg = 8 (120 rows per sec.)\n", rows);
     fflush(stdout);
     return 0;
 }

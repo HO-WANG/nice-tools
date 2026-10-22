@@ -1,6 +1,7 @@
 """SAP client boundary tests; no installed SAP client or ASE server is assumed."""
 
 import importlib
+import os
 from pathlib import Path
 import sys
 
@@ -177,6 +178,43 @@ def test_zero_row_out_is_a_valid_completed_export(clients, tmp_path):
                                           options={"direction": "out"}))["rows"] == 0
 
 
+@pytest.mark.parametrize('direction', ['in', 'out'])
+@pytest.mark.parametrize('prefix,count,rows', [
+    ('Starting copy..', '6', 6),
+    ('Starting copy...', '0', 0),
+    ('Starting copy... ', '1,234', 1234),
+])
+@pytest.mark.parametrize('ending', ['\nClock Time (ms): total = 1 Avg = 0\n', ''])
+def test_joined_starting_copy_summary_is_a_completed_transfer(clients, tmp_path, direction, prefix, count, rows, ending):
+    module, fake = clients
+    path = tmp_path / 'data.bcp'
+    path.write_bytes(b'1\n')
+    # One-character reads also split the prefix and row count across callbacks.
+    fake.progress = list(prefix + count + ' rows copied.')
+    fake.copy_output = ending
+    result = module.run_operation(payload('transfer', path=str(path), columns=COLUMNS,
+                                          options={'direction': direction}))
+    assert result['rows'] == rows and result['direction'] == direction
+    assert result['bcp_rows_per_second'] == rows / result['bcp_seconds']
+
+
+@pytest.mark.parametrize('output,returncode', [
+    ('Starting copy..6 rows copied.\n', 1),
+    ('Starting copy..6 rows copied.\nError: rejected row\n', 0),
+    ('CT-LIBRARY error: rejected row\nStarting copy..6 rows copied.\n', 0),
+    ('Starting copy..6 rows copied.\nMsg 208, Level 16, State 1:\n', 0),
+    ('Starting copy..1000 rows total sent.\n', 0),
+    ('Server Message: 6 rows copied.\n', 0),
+    ('Starting copy..6 rows copied. but failed\n', 0),
+])
+def test_joined_summary_does_not_bypass_bcp_failure_checks(clients, tmp_path, output, returncode):
+    module, fake = clients
+    fake.copy_output, fake.copy_returncode = output, returncode
+    with pytest.raises(ValueError):
+        module.run_operation(payload('transfer', path=str(tmp_path / 'data.bcp'), columns=COLUMNS,
+                                    options={'direction': 'out'}))
+
+
 def test_default_character_export_uses_euc_kr_and_pipe(clients, tmp_path):
     module, fake = clients
     module.run_operation(payload('transfer', path=str(tmp_path / 'default.bcp'), columns=COLUMNS,
@@ -298,14 +336,15 @@ def test_unsupported_sap_cli_target_name_fails_explicitly_before_bcp(clients, tm
     assert not any(Path(call["argv"][0]).name.lower() == "bcp.exe" for call in fake.calls)
 
 
-@pytest.mark.parametrize("password,error", [("rows", False), ("Error", True)])
-def test_real_runner_parses_copy_protocol_before_password_redaction(clients, tmp_path, monkeypatch, password, error):
+@pytest.mark.parametrize("password,error,prefix", [("rows", False, ''), ("rows", False, 'Starting copy..'),
+                                                    ("Error", True, 'Starting copy..')])
+def test_real_runner_parses_copy_protocol_before_password_redaction(clients, tmp_path, monkeypatch, password, error, prefix):
     from nice_tools import ase_process
 
     module, fake = clients
     # Exercise the real prompt/redaction boundary, including an early error that
     # disappears from the bounded public output tail after later client output.
-    transcript = (("Error: rejected row\n" + "copied progress\n" * 1000) if error else "") + "3 rows copied.\n"
+    transcript = (("Error: rejected row\n" + "copied progress\n" * 1000) if error else "") + prefix + "3 rows copied.\n"
     script = tmp_path / "protocol client.py"
     script.write_text(
         "import os, sys\n"
@@ -345,6 +384,27 @@ def test_real_runner_parses_copy_protocol_before_password_redaction(clients, tmp
     else:
         assert module.run_operation(request)["rows"] == 3
     assert password not in public[0]["stdout"]
+
+
+@pytest.mark.skipif(os.name != 'nt' or not os.environ.get('NICE_TOOLS_SAP_TEST_CLIENTS'),
+                    reason='Requires compiled Windows console fixtures')
+def test_windows_native_bcp_joined_summary_is_parsed(clients, tmp_path, monkeypatch):
+    from nice_tools import ase_process
+
+    module, fake = clients
+    executable = Path(os.environ['NICE_TOOLS_SAP_TEST_CLIENTS']) / 'bcp.exe'
+    monkeypatch.setattr(module, '_client_config', lambda: {'bcp_path': str(executable)})
+    monkeypatch.setattr(module, '_run_client', ase_process.run_client)
+    path = tmp_path / '한글 joined output.txt'
+    events = []
+    result = module.run_operation(payload('transfer', connection={**CONNECTION, 'password': 'fixture-db-password-never-log!42'},
+                                          path=str(path), columns=COLUMNS,
+                                          options={'direction': 'out', 'encoding': 'utf-8', 'field_terminator': r'\t'}), events.append)
+    assert result['rows'] == 3 and result['bcp_rows_per_second'] > 0
+    assert path.read_bytes() == b'1\n2\n3\n'
+    console = ''.join(event['message'] for event in events if event.get('type') == 'bcp_output')
+    assert 'Starting copy..3 rows copied.' in console
+    assert 'fixture-db-password-never-log!42' not in console
 
 
 def test_transfer_schema_uses_fresh_odbc_metadata_without_an_isql_path(clients, tmp_path):

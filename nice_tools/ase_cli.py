@@ -20,7 +20,9 @@ class AseClientError(ValueError):
 ASEError = AseClientError
 _ENCODINGS = {"utf-8": "utf8", "cp949": "cp949", "euc-kr": "eucksc"}
 _COLUMN_KEYS = ("position", "name", "type_id", "type_name", "length", "precision", "scale", "nullable", "identity")
-_COPIED = re.compile(r"^\s*([0-9][0-9,]*)\s+rows?\s+copied\.?\s*$", re.I)
+# SAP may print its startup banner without a newline before the final count.
+# Accept only that known prefix; arbitrary log text must not imply success.
+_COPIED = re.compile(r"^\s*(?:Starting\s+copy\.{2,3}\s*)?([0-9][0-9,]*)\s+rows?\s+copied\.?\s*$", re.I)
 _ERROR_LINE = re.compile(
     r"(?:\b(?:CT|CS|DB)[- ]LIBRARY\s+error\b|\b(?:error|failed|failure)\s*:|"
     r"\b[1-9][0-9,]*\s+rows?\s+(?:failed|rejected)\b|\b(?:bulk\s+copy|bcp)\s+(?:failed|failure)\b|"
