@@ -1,0 +1,255 @@
+"""Exercise the native-folder comparison UI with an isolated mocked API.
+
+Run against a running source server; no native dialogs or user files are accessed.
+"""
+import argparse
+from playwright.sync_api import expect, sync_playwright
+
+
+SUMMARY = {"total": 2, "same": 1, "different": 1, "left_only": 0, "right_only": 0, "error": 0}
+RECORDS = [{"path": "<img onerror=alert(1)>.txt", "status": "different"}, {"path": "same.txt", "status": "same"}]
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--url", default="http://127.0.0.1:8000")
+    parser.add_argument("--chromium", default="/usr/bin/chromium")
+    args = parser.parse_args()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=args.chromium, headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        calls, errors, held = [], [], {}
+        state = {"status_fail": True, "pick_cancel": False, "hold": None, "job_state": "succeeded", "diff_fail": False, "job_fail": False, "sequence": 0, "expired": False, "start_fail": False, "pick_network_fail": False}
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.add_init_script("""window.comparisonFetches = [];
+          const originalFetch = window.fetch;
+          window.fetch = (url, options) => {
+            if (String(url).startsWith('/api/comparison/')) window.comparisonFetches.push({url, ...options});
+            return originalFetch(url, options);
+          };""")
+
+        def api(route):
+            request = route.request
+            endpoint = request.url.split("/api/comparison/")[1]
+            data = request.post_data_json if request.method == "POST" else {}
+            calls.append((endpoint, data, request.headers))
+            assert request.headers.get("x-nice-tools") == "comparison"
+            if request.method == "POST":
+                assert "application/json" in request.headers.get("content-type", "")
+            if state["pick_network_fail"] and endpoint == "pick-directory":
+                state["pick_network_fail"] = False
+                route.abort("failed")
+                return
+            if state["expired"] and endpoint == "pick-directory":
+                state["expired"] = False
+                route.fulfill(status=404, json={"detail": "세션이 만료되었습니다. 폴더를 다시 선택하세요.", "code": "session_expired"})
+                return
+            if state["start_fail"] and endpoint == "start":
+                state["start_fail"] = False
+                route.fulfill(status=503, json={"detail": "시작 응답 오류"})
+                return
+            if state["hold"] == endpoint:
+                state["hold"] = None
+                held[endpoint] = route
+                return
+            if endpoint == "status":
+                if state["status_fail"]:
+                    state["status_fail"] = False
+                    route.fulfill(status=503, json={"detail": "실행창을 확인하세요"})
+                    return
+                result = {"native_available": True, "file_limit": 1000, "diff_page_size": 200}
+            elif endpoint == "session":
+                state["sequence"] += 1
+                result = {"session": f"session-{state['sequence']}"}
+            elif endpoint == "pick-directory":
+                if state["pick_cancel"]:
+                    state["pick_cancel"] = False
+                    result = {"cancelled": True}
+                else:
+                    side = data["side"]
+                    result = {"cancelled": False, "selection": {"token": side + "-token", "path": "C:\\private\\" + side, "name": side, "file_count": 2, "total_bytes": 1024}}
+            elif endpoint == "start":
+                assert set(data) == {"session", "left", "right", "options"}
+                assert data["left"] == "left-token" and data["right"] == "right-token"
+                result = {"job": "job-1"}
+            elif endpoint in ("job", "cancel"):
+                if endpoint == "job" and state["job_fail"]:
+                    state["job_fail"] = False
+                    route.fulfill(status=503, json={"detail": "잠시 후 다시 시도"})
+                    return
+                job_state = "cancelled" if endpoint == "cancel" else state["job_state"]
+                result = {"job": data["job"], "state": job_state, "phase": "comparing", "completed": 1, "total": 2, "path": "<img onerror=alert(1)>.txt", "elapsed_seconds": 1.25, "message": "실패 후 다시 시도" if job_state == "failed" else "", "summary": SUMMARY, "results": RECORDS}
+            elif endpoint == "diff":
+                assert set(data) == {"session", "job", "path", "mode", "page"}
+                if state["diff_fail"]:
+                    state["diff_fail"] = False
+                    route.fulfill(status=500, json={"detail": "diff 재시도"})
+                    return
+                number = data["page"]
+                lines = [{"kind": "add", "new_line": number * 200 + i + 1, "text": f"<img onerror=alert(1)> {number * 200 + i}"} for i in range(200 if number < 2 else 1)]
+                result = {"path": data["path"], "old_exists": True, "new_exists": True, "identical": data["path"] == "same.txt" and data["mode"] == "compared", "additions": 401, "deletions": 2, "total_lines": 401, "page": number, "page_size": 200, "pages": 3, "lines": lines}
+                if result["identical"]:
+                    result.update(lines=[], total_lines=0, pages=0)
+            elif endpoint == "close":
+                result = {"ok": True}
+            else:
+                raise AssertionError(endpoint)
+            route.fulfill(json=result)
+
+        page.route("**/api/comparison/**", api)
+        page.route("**/api/compare", lambda route: (_ for _ in ()).throw(AssertionError("native mode uploaded files")))
+        page.route("**/api/diff", lambda route: (_ for _ in ()).throw(AssertionError("native mode uploaded diff")))
+        page.goto(args.url, wait_until="networkidle")
+        expect(page.locator("#comparison-runtime-retry")).to_be_visible()
+        expect(page.locator("#left-pick-directory")).to_be_disabled()
+        assert not any(name == "pick-directory" for name, _, _ in calls)
+        page.locator("#comparison-runtime-retry").click()
+        expect(page.locator("#left-pick-directory")).to_be_enabled()
+        for side in ("left", "right"):
+            page.locator(f"#{side}-pick-directory").click()
+            expect(page.locator(f"#{side}-name")).to_have_text(side)
+            expect(page.locator(f"#{side}-detail")).to_contain_text("C:")
+        state["pick_cancel"] = True
+        page.locator("#left-pick-directory").click()
+        expect(page.locator("#left-pick-directory")).to_be_enabled()
+        expect(page.locator("#left-name")).to_have_text("left")
+        page.locator("#sort-lines").check()
+        page.locator("#ignore-whitespace").check()
+        page.locator("#ignore-start").fill("1")
+        page.locator("#ignore-end").fill("2")
+        page.locator("#compare-button").click()
+        expect(page.locator("#result-content")).to_be_visible()
+        assert [data for name, data, _ in calls if name == "start"][-1]["options"] == {"sort_lines": True, "ignore_whitespace": True, "ignore_start": 1, "ignore_end": 2}
+        expect(page.locator("#result-body tr")).to_have_count(2)
+        assert page.locator("#directory-tool img").count() == 0
+        page.get_by_role("button", name=RECORDS[0]["path"], exact=True).click()
+        expect(page.locator("#diff-code tr")).to_have_count(200)
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 3")
+        page.locator("#diff-next").click()
+        expect(page.locator("#diff-page-label")).to_contain_text("2 / 3")
+        page.locator("#diff-next").click()
+        expect(page.locator("#diff-code tr")).to_have_count(1)
+        expect(page.locator("#diff-page-label")).to_contain_text("3 / 3")
+        page.locator("#diff-prev").click()
+        expect(page.locator("#diff-page-label")).to_contain_text("2 / 3")
+        page.locator("#diff-mode").select_option("original")
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 3")
+        assert [data for name, data, _ in calls if name == "diff"][-1]["mode"] == "original"
+        expect(page.locator("#diff-note")).to_contain_text("원본")
+        assert page.locator("#directory-tool img").count() == 0
+        state["diff_fail"] = True
+        page.get_by_role("button", name="same.txt", exact=True).click()
+        expect(page.locator("#diff-retry")).to_be_visible()
+        page.locator("#diff-retry").click()
+        expect(page.locator("#diff-code tr")).to_have_count(200)
+        page.locator("#diff-mode").select_option("compared")
+        expect(page.locator("#diff-message")).to_contain_text("차이가 없습니다")
+        state["hold"] = "diff"
+        page.get_by_role("button", name=RECORDS[0]["path"], exact=True).click()
+        expect(page.locator("#diff-panel")).to_have_attribute("aria-busy", "true")
+        page.locator("#ignore-start").fill("3")
+        held.pop("diff").fulfill(json={"lines": [], "identical": True})
+        expect(page.locator("#result-content")).to_be_hidden()
+        expect(page.locator("#diff-path")).to_be_hidden()
+        state["job_state"] = "running"
+        state["job_fail"] = True
+        page.locator("#compare-button").click()
+        expect(page.locator("#comparison-job-retry")).to_be_visible()
+        expect(page.locator("#ignore-start")).to_be_disabled()
+        page.locator("#comparison-job-retry").click()
+        expect(page.locator("#comparison-job-status")).to_contain_text("1 / 2")
+        expect(page.locator("#left-pick-directory")).to_be_disabled()
+        page.locator("#comparison-cancel").click()
+        expect(page.locator("#feedback")).to_contain_text("취소")
+        expect(page.locator("#compare-button")).to_be_enabled()
+        state["job_state"] = "failed"
+        page.locator("#compare-button").click()
+        expect(page.locator("#feedback")).to_contain_text("실패 후 다시 시도")
+        expect(page.locator("#ignore-start")).to_be_enabled()
+        # A delayed job status must not resurrect results after cancellation.
+        state["job_state"] = "running"
+        state["hold"] = "job"
+        page.locator("#compare-button").click()
+        expect(page.locator("#comparison-cancel")).to_be_visible()
+        page.locator("#comparison-cancel").click()
+        expect(page.locator("#compare-button")).to_be_enabled()
+        held.pop("job").fulfill(json={"job": "job-1", "state": "succeeded", "summary": SUMMARY, "results": RECORDS})
+        expect(page.locator("#result-content")).to_be_hidden()
+        for width in (390, 768, 1440):
+            page.set_viewport_size({"width": width, "height": 1000})
+            assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        page.locator("#sidebar-toggle").click()
+        expect(page.locator("#sidebar-toggle")).to_have_attribute("aria-expanded", "false")
+        # Expired sessions discard both stale directory tokens and allow a fresh picker.
+        state["expired"] = True
+        page.locator("#left-pick-directory").click()
+        expect(page.locator("#feedback")).to_contain_text("만료")
+        expect(page.locator("#compare-button")).to_be_disabled()
+        expect(page.locator("#left-name")).to_have_text("폴더를 선택하세요")
+        for side in ("left", "right"):
+            page.locator(f"#{side}-pick-directory").click()
+            expect(page.locator(f"#{side}-name")).to_have_text(side)
+        # A disconnected picker is closed before allowing another native dialog.
+        state["pick_network_fail"] = True
+        with page.expect_response("**/api/comparison/close"):
+            page.locator("#left-pick-directory").click()
+        expect(page.locator("#compare-button")).to_be_disabled()
+        expect(page.locator("#left-name")).to_have_text("폴더를 선택하세요")
+        for side in ("left", "right"):
+            page.locator(f"#{side}-pick-directory").click()
+            expect(page.locator(f"#{side}-name")).to_have_text(side)
+        # A lost start response may have created a job: close owns server cleanup.
+        state["start_fail"] = True
+        with page.expect_response("**/api/comparison/close"):
+            page.locator("#compare-button").click()
+        expect(page.locator("#feedback")).to_contain_text("폴더를 다시 선택")
+        expect(page.locator("#compare-button")).to_be_disabled()
+        for side in ("left", "right"):
+            page.locator(f"#{side}-pick-directory").click()
+            expect(page.locator(f"#{side}-name")).to_have_text(side)
+        # Closing while a picker is in flight retires its session and ignores its reply.
+        state["hold"] = "pick-directory"
+        page.locator("#left-pick-directory").click()
+        expect(page.locator("#sort-lines")).to_be_disabled()
+        with page.expect_response("**/api/comparison/close"):
+            page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+        expect(page.locator("#left-pick-directory")).to_be_enabled()
+        page.locator("#left-pick-directory").click()
+        expect(page.locator("#left-name")).to_have_text("left")
+        with page.expect_response("**/api/comparison/close"):
+            held.pop("pick-directory").fulfill(json={"cancelled": False, "selection": {"token": "stale", "name": "stale", "path": "C:/stale", "file_count": 0, "total_bytes": 0}})
+        expect(page.locator("#left-name")).to_have_text("left")
+        page.locator("#right-pick-directory").click()
+        expect(page.locator("#right-name")).to_have_text("right")
+        # A late start reply is explicitly cancelled and closed after navigation.
+        state["hold"] = "start"
+        page.locator("#compare-button").click()
+        expect(page.locator("#comparison-job-status")).to_contain_text("준비")
+        with page.expect_response("**/api/comparison/close"):
+            page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        with page.expect_response("**/api/comparison/cancel"):
+            held.pop("start").fulfill(json={"job": "stale-job"})
+        expect(page.locator("#result-content")).to_be_hidden()
+        # A late session creation reply must also be closed, even without a picker.
+        page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+        expect(page.locator("#left-pick-directory")).to_be_enabled()
+        state["hold"] = "session"
+        page.locator("#left-pick-directory").click()
+        expect(page.locator("#sort-lines")).to_be_disabled()
+        page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        with page.expect_response("**/api/comparison/close"):
+            held.pop("session").fulfill(json={"session": "stale-session"})
+        assert any(name == "close" and data["session"] == "stale-session" for name, data, _ in calls)
+        for request in page.evaluate("window.comparisonFetches"):
+            assert request["credentials"] == "same-origin"
+            assert request["cache"] == "no-store"
+        assert not errors, errors
+        assert all("multipart" not in headers.get("content-type", "") for _, _, headers in calls)
+        assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        browser.close()
+    print("Native comparison UI: runtime retry, native tokens, options, safe rendering, server pagination, diff retry, stale diff/job/picker/start/session, progress, cancellation, failures, layout and cleanup passed.")
+
+
+if __name__ == "__main__":
+    main()

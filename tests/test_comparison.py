@@ -94,3 +94,9 @@ def test_normalization_options_apply_after_legacy_decoding(core):
     options = core.CompareOptions(sort_lines=True, ignore_whitespace=True, ignore_start=1, ignore_end=1)
     result = core.compare_directories({"a.txt": left}, {"a.txt": right}, options)
     assert result["summary"]["same"] == 1
+
+
+def test_whitespace_option_matches_all_unicode_isspace_characters(core):
+    whitespace = "".join(chr(value) for value in range(0x110000) if chr(value).isspace() and chr(value) not in "\r\n")
+    text = "X" + whitespace + "😀가" + whitespace + "Y"
+    assert core.normalize_lines(text.encode(), core.CompareOptions(ignore_whitespace=True)) == ["X😀가Y"]

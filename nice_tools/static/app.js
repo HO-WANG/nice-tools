@@ -13,6 +13,237 @@ let diffController = null;
 let diffData = null;
 let diffPage = 0;
 const linesPerPage = 200;
+let comparisonMode = "pending";
+let comparisonSession = null;
+const nativeSelections = { left: null, right: null };
+let activeJob = null;
+let completedJob = null;
+let lifetime = 0;
+let jobRequest = 0;
+let pollTimer = null;
+let pageClosed = false;
+let diffRequestedPage = 0;
+
+async function comparisonAPI(endpoint, data, extra = {}) {
+  const response = await fetch(`/api/comparison/${endpoint}`, {
+    method: data === undefined ? "GET" : "POST",
+    credentials: "same-origin", cache: "no-store",
+    headers: { "X-Nice-Tools": "comparison", ...(data === undefined ? {} : { "Content-Type": "application/json" }) },
+    ...(data === undefined ? {} : { body: JSON.stringify(data) }), ...extra,
+  });
+  const result = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(typeof result?.detail === "string" ? result.detail : "요청을 처리하지 못했습니다. 다시 시도하세요.");
+    error.sessionExpired = response.status === 404 || response.status === 410 || result?.code === "session_expired";
+    throw error;
+  }
+  if (!result) throw new Error("앱의 응답을 읽지 못했습니다. 다시 시도하세요.");
+  return result;
+}
+
+function connectionMessage(error) {
+  return error instanceof TypeError ? "앱에 연결할 수 없습니다. 실행창을 확인한 뒤 다시 시도하세요." : error.message;
+}
+
+function closeComparisonSession(session) {
+  if (session) comparisonAPI("close", { session }, { keepalive: true }).catch(() => {});
+}
+
+function retireComparisonSession() {
+  lifetime += 1;
+  jobRequest += 1;
+  clearTimeout(pollTimer);
+  pollTimer = null;
+  const previous = comparisonSession;
+  comparisonSession = null;
+  nativeSelections.left = nativeSelections.right = null;
+  activeJob = completedJob = null;
+  clearResults();
+  $("comparison-progress").hidden = true;
+  $("comparison-cancel").hidden = true;
+  setBusy(false);
+  closeComparisonSession(previous);
+}
+
+function handleNativeError(error) {
+  if (error.sessionExpired) retireComparisonSession();
+  feedback(connectionMessage(error), "error");
+}
+
+async function initializeComparison() {
+  if (pageClosed || busy) return;
+  comparisonMode = "pending";
+  $("comparison-runtime-retry").hidden = true;
+  $("comparison-runtime").hidden = false;
+  $("comparison-runtime").textContent = "폴더 선택 기능을 확인하고 있습니다…";
+  updateSelection();
+  const generation = lifetime;
+  try {
+    const data = await comparisonAPI("status");
+    if (pageClosed || generation !== lifetime) return;
+    if (typeof data.native_available !== "boolean") throw new Error("폴더 선택 기능을 확인하지 못했습니다.");
+    comparisonMode = data.native_available ? "native" : "upload";
+    $("comparison-runtime").textContent = data.native_available ? "Windows 폴더 창에서 선택한 파일을 전송 없이 내 PC에서 비교합니다." : "이 개발 환경에서는 브라우저 폴더 선택으로 파일을 로컬 앱에 전달합니다.";
+    $("comparison-runtime").dataset.tone = "info";
+  } catch (error) {
+    if (pageClosed || generation !== lifetime) return;
+    comparisonMode = "error";
+    $("comparison-runtime").textContent = `${connectionMessage(error)} 폴더 선택 기능을 다시 확인하세요.`;
+    $("comparison-runtime").dataset.tone = "error";
+    $("comparison-runtime-retry").hidden = false;
+  }
+  updateSelection();
+}
+
+async function pickDirectory(side) {
+  if (busy || pageClosed) return;
+  if (comparisonMode === "upload") { fileInputs[side].click(); return; }
+  if (comparisonMode !== "native") return;
+  const generation = lifetime;
+  setBusy(true);
+  feedback("Windows 폴더 창에서 폴더를 선택하세요.");
+  try {
+    if (!comparisonSession) {
+      const data = await comparisonAPI("session", {});
+      if (pageClosed || generation !== lifetime) { closeComparisonSession(data.session); return; }
+      if (typeof data.session !== "string") throw new Error("폴더 선택 세션을 만들지 못했습니다.");
+      comparisonSession = data.session;
+    }
+    const session = comparisonSession;
+    const data = await comparisonAPI("pick-directory", { session, side });
+    if (pageClosed || generation !== lifetime || comparisonSession !== session) { closeComparisonSession(session); return; }
+    if (!data.cancelled) {
+      if (!data.selection || typeof data.selection.token !== "string") throw new Error("선택한 폴더 정보를 읽지 못했습니다. 다시 선택하세요.");
+      clearResults();
+      completedJob = null;
+      nativeSelections[side] = data.selection;
+    }
+    feedback(data.cancelled ? "폴더 선택을 취소했습니다. 기존 선택을 유지합니다." : "폴더를 선택했습니다.");
+  } catch (error) {
+    if (!pageClosed && generation === lifetime) {
+      // A disconnected picker can still be open; close its session before retrying.
+      if (error instanceof TypeError) retireComparisonSession();
+      handleNativeError(error);
+    }
+  } finally {
+    if (!pageClosed && generation === lifetime) setBusy(false);
+  }
+}
+
+function nativeOptions() {
+  const options = { sort_lines: $("sort-lines").checked, ignore_whitespace: $("ignore-whitespace").checked };
+  for (const [key, id] of [["ignore_start", "ignore-start"], ["ignore_end", "ignore-end"]]) {
+    if (!/^\d+$/.test($(id).value) || !Number.isSafeInteger(Number($(id).value))) throw new Error("무시할 글자 수는 0 이상의 정수여야 합니다.");
+    options[key] = Number($(id).value);
+  }
+  return options;
+}
+
+function showResults(data) {
+  if (!Array.isArray(data.results) || !data.summary) throw new Error("비교 결과를 읽을 수 없습니다. 다시 시도해 주세요.");
+  results = data.results;
+  for (const element of document.querySelectorAll("[data-stat]")) element.textContent = String(data.summary[element.dataset.stat] ?? 0);
+  $("empty-state").hidden = true;
+  $("result-content").hidden = false;
+  $("status-filter").disabled = false;
+  renderRows();
+  feedback(`${data.summary.total.toLocaleString("ko-KR")}개 파일의 비교가 완료되었습니다.`, data.summary.error ? "error" : "info");
+}
+
+function applyJobStatus(data, job) {
+  if (data.job !== job) throw new Error("작업 상태가 일치하지 않습니다. 상태를 다시 확인하세요.");
+  const phase = data.phase === "scanning" ? "폴더 확인" : data.phase === "done" ? "완료" : "파일 비교";
+  const elapsed = Number(data.elapsed_seconds || 0).toFixed(1);
+  $("comparison-job-status").textContent = `${phase} · ${data.completed ?? 0} / ${data.total ?? 0}개 · ${elapsed}초${data.path ? ` · ${data.path}` : ""}`;
+  const progress = $("comparison-progress-bar");
+  if (data.total > 0) { progress.max = data.total; progress.value = Math.min(data.completed || 0, data.total); }
+  else progress.removeAttribute("value");
+  if (["queued", "running"].includes(data.state)) { feedback(); return false; }
+  if (!["succeeded", "failed", "cancelled"].includes(data.state)) throw new Error("작업 상태를 읽지 못했습니다. 상태를 다시 확인하세요.");
+  if (data.state === "succeeded") {
+    showResults(data);
+    completedJob = job;
+  } else {
+    feedback(data.state === "cancelled" ? "비교를 취소했습니다." : (data.message || "비교에 실패했습니다. 폴더와 옵션을 확인하고 다시 시도하세요."), data.state === "failed" ? "error" : "info");
+    $("comparison-job-status").textContent += data.state === "cancelled" ? " · 취소됨" : " · 실패";
+  }
+  activeJob = null;
+  jobRequest += 1;
+  clearTimeout(pollTimer);
+  $("comparison-cancel").hidden = true;
+  $("comparison-job-retry").hidden = true;
+  setBusy(false);
+  return true;
+}
+
+async function pollComparisonJob() {
+  if (!activeJob || pageClosed) return;
+  clearTimeout(pollTimer);
+  const job = activeJob, session = comparisonSession, generation = lifetime, request = ++jobRequest;
+  $("comparison-job-retry").hidden = true;
+  try {
+    const data = await comparisonAPI("job", { session, job });
+    if (pageClosed || generation !== lifetime || activeJob !== job || request !== jobRequest) return;
+    if (!applyJobStatus(data, job)) pollTimer = setTimeout(pollComparisonJob, 400);
+  } catch (error) {
+    if (pageClosed || generation !== lifetime || activeJob !== job || request !== jobRequest) return;
+    handleNativeError(error);
+    if (!error.sessionExpired) $("comparison-job-retry").hidden = false;
+  }
+}
+
+async function startNativeComparison() {
+  if (!comparisonSession || !nativeSelections.left || !nativeSelections.right) return;
+  let options;
+  try { options = nativeOptions(); } catch (error) { feedback(error.message, "error"); return; }
+  const session = comparisonSession, generation = lifetime;
+  clearResults();
+  completedJob = null;
+  setBusy(true);
+  $("comparison-progress").hidden = false;
+  $("comparison-job-status").textContent = "비교를 준비하고 있습니다…";
+  $("comparison-progress-bar").removeAttribute("value");
+  $("comparison-cancel").hidden = true;
+  $("comparison-job-retry").hidden = true;
+  try {
+    const data = await comparisonAPI("start", { session, left: nativeSelections.left.token, right: nativeSelections.right.token, options });
+    if (pageClosed || generation !== lifetime || session !== comparisonSession) {
+      if (data.job) comparisonAPI("cancel", { session, job: data.job }, { keepalive: true }).catch(() => {});
+      closeComparisonSession(session);
+      return;
+    }
+    if (typeof data.job !== "string") throw new Error("비교 작업을 시작하지 못했습니다.");
+    activeJob = data.job;
+    $("comparison-cancel").hidden = false;
+    $("comparison-cancel").disabled = false;
+    pollComparisonJob();
+  } catch (error) {
+    if (pageClosed || generation !== lifetime) return;
+    // A lost start response may still have created a server job. Closing owns its cleanup.
+    retireComparisonSession();
+    feedback(`${connectionMessage(error)} 폴더를 다시 선택하세요.`, "error");
+  }
+}
+
+async function cancelNativeComparison() {
+  if (!activeJob || pageClosed) return;
+  const job = activeJob, session = comparisonSession, generation = lifetime, request = ++jobRequest;
+  clearTimeout(pollTimer);
+  $("comparison-cancel").disabled = true;
+  $("comparison-job-retry").hidden = true;
+  $("comparison-job-status").textContent = "비교를 취소하고 있습니다…";
+  try {
+    const data = await comparisonAPI("cancel", { session, job });
+    if (pageClosed || generation !== lifetime || activeJob !== job || request !== jobRequest) return;
+    if (!applyJobStatus(data, job)) pollTimer = setTimeout(pollComparisonJob, 400);
+  } catch (error) {
+    if (pageClosed || generation !== lifetime || activeJob !== job || request !== jobRequest) return;
+    handleNativeError(error);
+    if (!error.sessionExpired) $("comparison-job-retry").hidden = false;
+  } finally {
+    if (!pageClosed && generation === lifetime) $("comparison-cancel").disabled = false;
+  }
+}
 
 function clearDiff() {
   diffController?.abort();
@@ -51,22 +282,28 @@ function clearResults() {
 function updateSelection() {
   for (const [side, input] of Object.entries(fileInputs)) {
     const files = Array.from(input.files);
-    const root = files[0]?.webkitRelativePath.split("/")[0];
-    $(`${side}-name`).textContent = root || "폴더를 선택하세요";
-    $(`${side}-detail`).textContent = files.length ? `${files.length.toLocaleString("ko-KR")}개 파일 · ${(files.reduce((sum, file) => sum + file.size, 0) / (1024 * 1024)).toFixed(2)} MiB` : "내 PC에서 비교할 폴더 선택";
-    input.nextElementSibling.classList.toggle("selected", files.length > 0);
+    const selection = comparisonMode === "native" ? nativeSelections[side] : null;
+    const root = comparisonMode === "upload" ? files[0]?.webkitRelativePath.split("/")[0] : null;
+    $(`${side}-name`).textContent = selection?.name || root || "폴더를 선택하세요";
+    const count = selection ? selection.file_count : files.length;
+    const bytes = selection ? selection.total_bytes : files.reduce((sum, file) => sum + file.size, 0);
+    $(`${side}-detail`).textContent = selection || root ? `${selection ? `${selection.path} · ` : ""}${count.toLocaleString("ko-KR")}개 파일 · ${(bytes / (1024 * 1024)).toFixed(2)} MiB` : "내 PC에서 비교할 폴더 선택";
+    const button = $(`${side}-pick-directory`);
+    button.classList.toggle("selected", Boolean(selection || root));
+    button.disabled = busy || !["native", "upload"].includes(comparisonMode) || pageClosed;
+    input.disabled = comparisonMode !== "upload" || busy || pageClosed;
   }
-  const ready = fileInputs.left.files.length > 0 && fileInputs.right.files.length > 0;
-  $("compare-button").disabled = busy || !ready;
+  const ready = comparisonMode === "native" ? Boolean(nativeSelections.left && nativeSelections.right) : comparisonMode === "upload" && fileInputs.left.files.length > 0 && fileInputs.right.files.length > 0;
+  $("compare-button").disabled = busy || !ready || pageClosed;
   $("selection-status").textContent = ready ? "준비되었습니다. 내 PC에서 비교합니다." : "폴더 두 개를 선택하면 비교할 수 있습니다.";
 }
 
 function setBusy(value) {
   busy = value;
-  for (const input of [...Object.values(fileInputs), ...optionInputs]) input.disabled = value;
-  $("reset-options").disabled = value;
+  for (const input of optionInputs) input.disabled = value || pageClosed;
+  $("reset-options").disabled = value || pageClosed;
   $("results-panel").setAttribute("aria-busy", String(value));
-  $("compare-label").textContent = value ? "비교 중…" : "비교 시작";
+  $("compare-label").textContent = value ? "처리 중…" : "비교 시작";
   updateSelection();
 }
 
@@ -147,7 +384,7 @@ function renderRows() {
 function renderDiffPage() {
   const fragment = document.createDocumentFragment();
   const start = diffPage * linesPerPage;
-  for (const line of diffData.lines.slice(start, start + linesPerPage)) {
+  for (const line of (comparisonMode === "native" ? diffData.lines : diffData.lines.slice(start, start + linesPerPage))) {
     const row = document.createElement("tr");
     row.className = line.kind;
     if (line.kind === "hunk") {
@@ -165,21 +402,23 @@ function renderDiffPage() {
     fragment.append(row);
   }
   $("diff-code").replaceChildren(fragment);
-  const pages = Math.ceil(diffData.lines.length / linesPerPage);
+  const totalLines = comparisonMode === "native" ? diffData.total_lines : diffData.lines.length;
+  const pages = comparisonMode === "native" ? diffData.pages : Math.ceil(totalLines / linesPerPage);
   $("diff-pagination").hidden = pages <= 1;
-  $("diff-page-label").textContent = `${diffPage + 1} / ${pages} · ${diffData.lines.length.toLocaleString("ko-KR")}줄`;
+  $("diff-page-label").textContent = `${diffPage + 1} / ${pages} · ${totalLines.toLocaleString("ko-KR")}줄`;
   $("diff-prev").disabled = diffPage === 0;
   $("diff-next").disabled = diffPage >= pages - 1;
   document.querySelector(".diff-scroll").scrollTop = 0;
 }
 
-async function showDiff(path) {
+async function showDiff(path, page = 0) {
   diffController?.abort();
   const controller = new AbortController();
   diffController = controller;
   selectedPath = path;
   diffData = null;
-  diffPage = 0;
+  diffPage = page;
+  diffRequestedPage = page;
   for (const button of $("result-body").querySelectorAll("button[data-path]")) {
     const selected = button.dataset.path === path;
     button.setAttribute("aria-pressed", String(selected));
@@ -198,17 +437,24 @@ async function showDiff(path) {
   $("diff-message").textContent = "변경 내용을 읽고 있습니다…";
   $("diff-panel").setAttribute("aria-busy", "true");
   try {
-    const form = new FormData();
-    for (const [side, input] of Object.entries(fileInputs)) {
-      const file = Array.from(input.files).find((item) => item.webkitRelativePath.split("/").slice(1).join("/") === path);
-      form.append(`${side}_paths`, JSON.stringify(file ? [path] : []));
-      if (file) form.append(`${side}_files`, file, file.name);
+    let data;
+    if (comparisonMode === "native") {
+      const session = comparisonSession, job = completedJob;
+      if (!session || !job) return;
+      data = await comparisonAPI("diff", { session, job, path, mode: original ? "original" : "compared", page }, { signal: controller.signal });
+    } else {
+      const form = new FormData();
+      for (const [side, input] of Object.entries(fileInputs)) {
+        const file = Array.from(input.files).find((item) => item.webkitRelativePath.split("/").slice(1).join("/") === path);
+        form.append(`${side}_paths`, JSON.stringify(file ? [path] : []));
+        if (file) form.append(`${side}_files`, file, file.name);
+      }
+      appendOptions(form, original);
+      const response = await fetch("/api/diff", { method: "POST", body: form, signal: controller.signal });
+      data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "변경 내용을 읽지 못했습니다.");
     }
-    appendOptions(form, original);
-    const response = await fetch("/api/diff", { method: "POST", body: form, signal: controller.signal });
-    const data = await response.json().catch(() => null);
     if (diffController !== controller) return;
-    if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "변경 내용을 읽지 못했습니다.");
     if (!data || !Array.isArray(data.lines)) throw new Error("변경 내용을 읽지 못했습니다.");
     diffData = data;
     $("diff-content").hidden = false;
@@ -220,6 +466,7 @@ async function showDiff(path) {
     renderDiffPage();
   } catch (error) {
     if (diffController !== controller || error.name === "AbortError") return;
+    if (error.sessionExpired) { handleNativeError(error); return; }
     $("diff-message").textContent = error instanceof TypeError ? "앱에 연결할 수 없습니다. 실행창을 확인한 뒤 다시 시도하세요." : error.message;
     $("diff-retry").hidden = false;
   } finally {
@@ -230,6 +477,8 @@ async function showDiff(path) {
 $("compare-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy) return;
+  if (comparisonMode === "native") { await startNativeComparison(); return; }
+  if (comparisonMode !== "upload") return;
   clearResults();
   try {
     const form = buildForm();
@@ -239,13 +488,7 @@ $("compare-form").addEventListener("submit", async (event) => {
     const data = await response.json().catch(() => null);
     if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "비교 요청을 처리하지 못했습니다. 다시 시도해 주세요.");
     if (!data || !Array.isArray(data.results) || !data.summary) throw new Error("비교 결과를 읽을 수 없습니다. 다시 시도해 주세요.");
-    results = data.results;
-    for (const element of document.querySelectorAll("[data-stat]")) element.textContent = String(data.summary[element.dataset.stat] ?? 0);
-    $("empty-state").hidden = true;
-    $("result-content").hidden = false;
-    $("status-filter").disabled = false;
-    renderRows();
-    feedback(`${data.summary.total.toLocaleString("ko-KR")}개 파일의 비교가 완료되었습니다.`, data.summary.error ? "error" : "info");
+    showResults(data);
   } catch (error) {
     feedback(error instanceof TypeError ? "서버에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도해 주세요." : error.message, "error");
   } finally {
@@ -254,7 +497,7 @@ $("compare-form").addEventListener("submit", async (event) => {
 });
 
 for (const input of Object.values(fileInputs)) input.addEventListener("change", () => { clearResults(); updateSelection(); });
-for (const input of optionInputs) input.addEventListener("input", clearResults);
+for (const input of optionInputs) input.addEventListener("input", () => { if (!busy) { clearResults(); completedJob = null; } });
 $("status-filter").addEventListener("change", () => {
   const filter = $("status-filter").value;
   if (selectedPath && !results.some((entry) => entry.path === selectedPath && (filter === "all" || entry.status === filter))) clearDiff();
@@ -265,10 +508,12 @@ $("result-body").addEventListener("click", (event) => {
   if (button) showDiff(button.dataset.path);
 });
 $("diff-mode").addEventListener("change", () => { if (selectedPath) showDiff(selectedPath); });
-$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath); });
-$("diff-prev").addEventListener("click", () => { diffPage -= 1; renderDiffPage(); });
-$("diff-next").addEventListener("click", () => { diffPage += 1; renderDiffPage(); });
+$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath, diffRequestedPage); });
+$("diff-prev").addEventListener("click", () => { if (comparisonMode === "native") showDiff(selectedPath, diffPage - 1); else { diffPage -= 1; renderDiffPage(); } });
+$("diff-next").addEventListener("click", () => { if (comparisonMode === "native") showDiff(selectedPath, diffPage + 1); else { diffPage += 1; renderDiffPage(); } });
 $("reset-options").addEventListener("click", () => {
+  if (busy) return;
+  completedJob = null;
   $("sort-lines").checked = false;
   $("ignore-whitespace").checked = false;
   $("ignore-start").value = "0";
@@ -280,4 +525,16 @@ $("sidebar-toggle").addEventListener("click", () => {
   $("sidebar-toggle").setAttribute("aria-expanded", String(!collapsed));
   $("sidebar-toggle").setAttribute("aria-label", collapsed ? "메뉴 펼치기" : "메뉴 접기");
 });
+for (const side of ["left", "right"]) $(`${side}-pick-directory`).addEventListener("click", () => pickDirectory(side));
+$("comparison-runtime-retry").addEventListener("click", initializeComparison);
+$("comparison-job-retry").addEventListener("click", pollComparisonJob);
+$("comparison-cancel").addEventListener("click", cancelNativeComparison);
+window.addEventListener("pagehide", () => {
+  pageClosed = true;
+  retireComparisonSession();
+});
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) { pageClosed = false; setBusy(false); initializeComparison(); }
+});
 updateSelection();
+initializeComparison();

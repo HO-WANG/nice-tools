@@ -1,7 +1,12 @@
 """HTTP와 독립적인 텍스트 파일 비교 규칙."""
 
 from dataclasses import dataclass
+import re
+
 from .text_encoding import decode_text
+
+
+_WHITESPACE = re.compile(r"\s+")
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,7 @@ def normalize_lines(content: bytes, options: CompareOptions) -> list[str]:
         stop = max(0, len(line) - options.ignore_end)
         line = line[options.ignore_start:stop]
         if options.ignore_whitespace:
-            line = "".join(char for char in line if not char.isspace())
+            line = _WHITESPACE.sub("", line)
         normalized.append(line)
     return sorted(normalized) if options.sort_lines else normalized
 

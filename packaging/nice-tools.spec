@@ -26,6 +26,11 @@ analysis = Analysis(
         "nice_tools.iq_odbc",
         "nice_tools.iq_files",
         "nice_tools.iq_sql",
+        "nice_tools.local_compare_api",
+        "nice_tools.local_compare_jobs",
+        "nice_tools.local_compare_worker",
+        "nice_tools.local_compare_engine",
+        "nice_tools.local_compare_diff",
 
         "nice_tools.ase_clients",
         "nice_tools.ase_process",

@@ -41,6 +41,8 @@
       <main>
       <section id="directory-tool" aria-labelledby="directory-title">
         <div class="page-heading"><h1 id="directory-title">디렉토리 비교</h1><p>같은 상대 경로의 텍스트 파일을 비교하고 변경된 줄을 확인합니다.</p></div>
+        <p id="comparison-runtime" class="feedback" role="status" aria-live="polite">폴더 선택 기능을 확인하고 있습니다…</p>
+        <button id="comparison-runtime-retry" class="secondary-button comparison-retry" type="button" hidden>연결 다시 시도</button>
         <form id="compare-form">
           <section class="panel" aria-labelledby="folders-title">
             <div class="section-heading"><h2 id="folders-title">폴더 선택</h2><span class="section-note">하위 폴더 포함</span></div>
@@ -48,12 +50,12 @@
               <div class="folder-slot">
                 <div class="slot-label">왼쪽 폴더 <span>기준</span></div>
                 <input id="left-folder" class="visually-hidden" type="file" webkitdirectory multiple aria-label="왼쪽 폴더 선택">
-                <label class="folder-card" for="left-folder"><svg><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="left-name">폴더를 선택하세요</strong><span class="folder-detail" id="left-detail">내 PC에서 비교할 폴더 선택</span></span><span class="folder-select">선택</span></label>
+                <button class="folder-card" id="left-pick-directory" type="button" aria-label="왼쪽 폴더 선택" disabled><svg><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="left-name">폴더를 선택하세요</strong><span class="folder-detail" id="left-detail">내 PC에서 비교할 폴더 선택</span></span><span class="folder-select">선택</span></button>
               </div>
               <div class="folder-slot">
                 <div class="slot-label">오른쪽 폴더 <span>비교 대상</span></div>
                 <input id="right-folder" class="visually-hidden" type="file" webkitdirectory multiple aria-label="오른쪽 폴더 선택">
-                <label class="folder-card" for="right-folder"><svg><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="right-name">폴더를 선택하세요</strong><span class="folder-detail" id="right-detail">내 PC에서 비교할 폴더 선택</span></span><span class="folder-select">선택</span></label>
+                <button class="folder-card" id="right-pick-directory" type="button" aria-label="오른쪽 폴더 선택" disabled><svg><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="right-name">폴더를 선택하세요</strong><span class="folder-detail" id="right-detail">내 PC에서 비교할 폴더 선택</span></span><span class="folder-select">선택</span></button>
               </div>
             </div>
             <p class="panel-footnote">인코딩 자동 감지 · 합계 1,000개 · 파일 크기 제한 없음 · 파일은 내 PC에서 처리됩니다</p>
@@ -70,6 +72,11 @@
           </section>
           <div class="action-row"><p id="selection-status">폴더 두 개를 선택하면 비교할 수 있습니다.</p><button class="primary-button" id="compare-button" type="submit" disabled><svg><use href="#icon-compare"/></svg><span id="compare-label">비교 시작</span></button></div>
         </form>
+        <section id="comparison-progress" class="panel comparison-progress" aria-label="비교 진행 상태" hidden>
+          <p id="comparison-job-status" role="status" aria-live="polite"></p>
+          <progress id="comparison-progress-bar" aria-label="파일 비교 진행률"></progress>
+          <div class="comparison-job-actions"><button id="comparison-job-retry" class="secondary-button" type="button" hidden>상태 다시 확인</button><button id="comparison-cancel" class="secondary-button" type="button" hidden>비교 취소</button></div>
+        </section>
         <p id="feedback" class="feedback" role="status" aria-live="polite" hidden></p>
         <section class="panel results-panel" aria-labelledby="results-title" aria-busy="false" id="results-panel">
           <div class="section-heading"><h2 id="results-title">비교 결과</h2><label class="filter-label" for="status-filter">상태 <select id="status-filter" disabled><option value="all">전체 파일</option><option value="same">동일</option><option value="different">차이</option><option value="left_only">왼쪽만</option><option value="right_only">오른쪽만</option><option value="error">읽기 오류</option></select></label></div>

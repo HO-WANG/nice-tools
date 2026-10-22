@@ -84,16 +84,49 @@ def worker_request(executable, payload, directory, expect_error=False, worker="-
         process.wait(timeout=10)
         for pipe in (process.stdin, process.stdout, process.stderr):
             pipe.close()
-    password = payload["connection"]["password"].encode()
-    assert password not in stdout and password not in stderr, "Worker emitted private credentials"
+    password = payload.get("connection", {}).get("password", "").encode()
+    assert not password or (password not in stdout and password not in stderr), "Worker emitted private credentials"
     events = [json.loads(line) for line in stdout.splitlines()]
     if expect_error:
         assert returncode != 0 and any(event["event"] == "error" for event in events), "Expected a failed transfer"
         return events
-    assert returncode == 0, "Frozen ODBC worker failed"
+    assert returncode == 0, "Frozen worker failed"
     results = [event["result"] for event in events if event["event"] == "result"]
     assert len(results) == 1, "Frozen worker did not return one result"
     return results[0]
+
+
+def local_comparison_worker_checks(executable, directory):
+    """Read real local files through the actual frozen worker, without a dialog double."""
+    import sys
+    sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
+    from nice_tools.local_compare_worker import folder_descriptor
+    left,right=Path(directory)/'로컬 before',Path(directory)/'로컬 after'
+    left.mkdir();right.mkdir()
+    (left/'encoding.txt').write_bytes('한국어 설정\n'.encode('cp949'))
+    (right/'encoding.txt').write_text('한국어 설정\n',encoding='utf-8')
+    for root,prefix in ((left,'old'),(right,'new')):
+        (root/'changed.txt').write_text('\n'.join(f'{prefix} {i}' for i in range(225)),encoding='utf-8')
+    # Complete comparison beyond the former size cap, including the final byte.
+    content=b'a'*(11*1024*1024)
+    (left/'large.txt').write_bytes(content+b'x')
+    (right/'large.txt').write_bytes(content+b'y')
+    (left/'invalid.txt').write_bytes(b'binary\0invalid')
+    (right/'invalid.txt').write_bytes(b'binary\0invalid')
+    cache=Path(directory)/'native-comparison-cache'
+    payload={'operation':'compare','left':folder_descriptor(left),'right':folder_descriptor(right),
+             'options':{},'cache_dir':str(cache)}
+    result=worker_request(executable,payload,directory,worker='--comparison-worker')
+    assert result['summary']=={'total':4,'same':1,'different':2,'left_only':0,'right_only':0,'error':1}, 'Frozen local full-file/encoding comparison failed'
+    query={'operation':'diff','cache_dir':str(cache),'path':'changed.txt','mode':'compared','page':0}
+    page=worker_request(executable,query,directory,worker='--comparison-worker')
+    assert page['additions']==225 and page['deletions']==225 and len(page['lines'])==200 and page['pages']==3
+    last=worker_request(executable,{**query,'page':2},directory,worker='--comparison-worker')
+    assert last['lines'][-1]['text']=='new 224' and last['total_lines']==451, 'Frozen cached diff lost its final line'
+    (right/'changed.txt').write_bytes(b'edited after comparison\n')
+    failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
+    assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'
+    print('Local comparison actual worker: direct files, mixed encodings, >10MiB final-byte difference, invalid text, cached diff pages and change detection passed.')
 
 
 def odbc_worker_checks(executable, directory, password, require_odbc):
@@ -188,6 +221,7 @@ def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path |
                 'iq-exe-verification-secret-9!', 'iq-profile-verification-secret-9!',
             )), 'Frozen launcher emitted IQ credentials'
             print('IQ frozen launcher console: sanitized connection failure and phase passed; no live IQ export tested.')
+            local_comparison_worker_checks(executable,directory)
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")
         finally:

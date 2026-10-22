@@ -190,3 +190,13 @@ textarea[readonly] { background: #fafbfc; }
   .operation-switch { gap: 10px; }
   .result-actions { flex-wrap: wrap; }
 }
+
+/* Local directory comparison controls. */
+#directory-tool button.folder-card { width: 100%; text-align: left; background: white; }
+#directory-tool button.folder-card.selected { background: #f7faf8; }
+#directory-tool .folder-slot { min-width: 0; }
+.comparison-retry { margin-bottom: 16px; }
+.comparison-progress { padding: 14px 20px; }
+#comparison-job-status { overflow-wrap: anywhere; font-size: 13px; color: var(--muted); }
+#comparison-progress-bar { width: 100%; height: 10px; margin-top: 10px; accent-color: var(--accent); }
+.comparison-job-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
