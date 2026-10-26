@@ -13,8 +13,9 @@ import tempfile
 import threading
 import time
 
-from .ase_jobs import AseManager
-from .local_compare_worker import ComparisonError, SAFE_ERRORS, execute, folder_descriptor, options_data, relative_path
+from .ase_jobs import AseManager, _write_bcp_output
+from .local_compare_worker import (ComparisonError, SAFE_ERRORS, execute, failure_error,
+                                   folder_descriptor, numeric_diagnostics, options_data, relative_path)
 
 
 IDLE_SECONDS = 30 * 60
@@ -84,6 +85,8 @@ class ComparisonManager(AseManager):
             result = error = None
             for line in process.stdout:
                 event = json.loads(line)
+                if not isinstance(event, dict):
+                    raise ComparisonError('worker_protocol')
                 if event.get('event') == 'progress' and progress is not None:
                     progress(event)
                 elif event.get('event') == 'result':
@@ -94,14 +97,18 @@ class ComparisonManager(AseManager):
             if code or error is not None or not isinstance(result, dict):
                 safe_code = error.get('code') if isinstance(error, dict) else None
                 if isinstance(safe_code, str) and safe_code in SAFE_ERRORS:
-                    raise ComparisonError(safe_code)
+                    raise ComparisonError(safe_code, **numeric_diagnostics({**error, 'exit_code': code}))
                 # Native exceptions (including ValueError subclasses) may
                 # contain source text; only allowlisted static codes survive.
-                raise ValueError('파일 비교 작업이 중지되었거나 실패했습니다.')
+                raise ComparisonError('comparison_failed' if error is not None else
+                                      ('worker_exit' if code else 'worker_protocol'), exit_code=code)
             self._session(session)
             return result
-        except (OSError, json.JSONDecodeError):
-            raise ValueError('파일 비교 프로세스의 응답을 읽지 못했습니다.') from None
+        except (OSError, json.JSONDecodeError, UnicodeError) as error:
+            safe_error = failure_error(error)
+            if safe_error.code == 'comparison_failed':
+                safe_error = ComparisonError('worker_protocol', **safe_error.diagnostics)
+            raise safe_error from None
         finally:
             try:
                 self._release_worker(process)
@@ -236,7 +243,7 @@ class ComparisonManager(AseManager):
                 folder.cleanup()
 
     def _run_job(self, token, handle, job, payload):
-        failure = failure_code = None
+        failure = None
         with job['use_lock']:
             try:
                 with self.lock:
@@ -251,31 +258,36 @@ class ComparisonManager(AseManager):
                         if event.get('phase') in ('scanning','comparing','preparing-reports'):
                             job['phase'] = event['phase']
                         if isinstance(event.get('path'),str):
-                            job['path'] = event['path']
+                            with contextlib.suppress(ValueError):
+                                job['path'] = relative_path(event['path'])
                 result = self._request(payload, token, progress, owner_job=job)
                 with self.lock:
                     if not job['cancelled'] and token in self.sessions:
                         job.update(result, state='succeeded', phase='done')
-            except ComparisonError as error:
-                failure, failure_code = str(error), error.code
-            except Exception:
-                failure = '비교 작업을 완료하지 못했습니다. 폴더·파일 상태와 임시 저장 공간을 확인하세요.'
+            except Exception as error:
+                failure = failure_error(error)
             finally:
                 if job['cancelled'] or failure:
-                    job['folder'].cleanup()
+                    # The worker has been released before storage cleanup. A
+                    # cleanup access error must not hide the original failure.
+                    with contextlib.suppress(OSError):
+                        job['folder'].cleanup()
                 with self.lock:
                     job['elapsed_seconds'] = max(0.0,time.monotonic()-job['started'])
                     if job['cancelled']:
                         job.update(state='cancelled',phase='done',message='비교를 취소했습니다.')
                     elif failure:
-                        job.update(state='failed',phase='done',message=failure)
-                        if failure_code is not None:
-                            job['code'] = failure_code
+                        job.update(state='failed', failure_phase=job['phase'], phase='done',
+                                   message=str(failure), code=failure.code, **failure.diagnostics)
+                        # Console records deliberately omit filenames, paths,
+                        # exception text, source data and opaque session tokens.
+                        record = {'code': failure.code, 'phase': job['failure_phase'], **failure.diagnostics}
+                        _write_bcp_output('[comparison] ' + json.dumps(record, ensure_ascii=True) + '\n')
 
     def job(self, token, handle):
         with self.lock:
             job = self._job(token,handle)
-            result = {key:job[key] for key in ('job','state','phase','completed','total','elapsed_seconds','path','message','code','summary','results') if key in job}
+            result = {key:job[key] for key in ('job','state','phase','completed','total','elapsed_seconds','path','message','code','failure_phase','errno','winerror','exit_code','summary','results') if key in job}
             if job['state'] in ('queued','running'):
                 result['elapsed_seconds'] = max(0.0,time.monotonic()-job['started'])
             return result

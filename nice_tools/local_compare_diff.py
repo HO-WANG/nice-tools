@@ -43,7 +43,9 @@ def _write_json(path: Path, value) -> None:
     temporary = path.with_suffix('.tmp')
     with temporary.open('x', encoding='utf-8', newline='\n') as output:
         # Escape controls and Unicode separators for safe JSON transport.
-        json.dump(value, output, ensure_ascii=True, separators=(',', ':'))
+        # dumps uses the C encoder; dump iterates Python tokens and performs
+        # many tiny writes. Only one bounded 200-row page is serialized here.
+        output.write(json.dumps(value, ensure_ascii=True, separators=(',', ':')))
     temporary.replace(path)
 
 
@@ -62,10 +64,53 @@ def _load_lines(left_normalized, right_normalized, old_exists, new_exists, cance
     _check_cancelled(cancelled)
     if (left_normalized is not None) != old_exists or (right_normalized is not None) != new_exists:
         raise ValueError('Normalized paths must match file existence.')
+    if old_exists != new_exists:
+        source = _OneSidedLines(left_normalized or right_normalized, cancelled)
+        return (source, []) if old_exists else ([], source)
     old = _read_lines(left_normalized, cancelled)
     new = _read_lines(right_normalized, cancelled)
     _check_cancelled(cancelled)
     return old, new
+
+
+class _OneSidedLines:
+    """Count normalized LF records in chunks, then stream the full report.
+
+    One-sided reports have no alignment to compute. The count is needed for
+    the first hunk header, but retaining every line would waste input-sized
+    memory. Strict UTF-8 validation still covers every record while writing;
+    no metadata is published until that complete pass succeeds.
+    """
+
+    def __init__(self, path, cancelled):
+        self.path = path
+        self.count = 0
+        tail = b''
+        with path.open('rb') as source:
+            while chunk := source.read(128 * 1024):
+                _check_cancelled(cancelled)
+                self.count += chunk.count(b'\n')
+                tail = chunk[-1:]
+        if tail and tail != b'\n':
+            raise ValueError('Incomplete normalized line record.')
+
+    def __len__(self):
+        return self.count
+
+
+def _line_span(lines, start, stop, cancelled):
+    if isinstance(lines, _OneSidedLines):
+        # A one-sided report has one opcode covering the complete source.
+        with lines.path.open('r', encoding='utf-8', errors='strict', newline='\n') as source:
+            for index, record in enumerate(source):
+                _check_cancelled(cancelled)
+                if not record.endswith('\n'):
+                    raise ValueError('Incomplete normalized line record.')
+                if start <= index < stop:
+                    yield index, record[:-1]
+    else:
+        for index in range(start, stop):
+            yield index, lines[index]
 
 
 def prepare_diff(
@@ -158,7 +203,11 @@ def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelle
         _check_cancelled(cancelled)
         old, new = load_lines()
         _check_cancelled(cancelled)
-        groups = changed_groups(old, new)
+        if isinstance(old, _OneSidedLines) or isinstance(new, _OneSidedLines):
+            tag = 'delete' if old_exists else 'insert'
+            groups = [[(tag, 0, len(old), 0, len(new))]] if old or new else []
+        else:
+            groups = changed_groups(old, new)
         _check_cancelled(cancelled)
         # Count compact opcodes before writing to distinguish exactly-at-limit
         # reports (which keep trailing context) from genuinely truncated ones.
@@ -224,11 +273,11 @@ def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelle
                         j = j1 + i - i1
                         append('context', old[i], i + 1, j + 1)
                 if tag in ('delete', 'replace'):
-                    for i in range(i1, display_stop(i1, i2, change=True)):
-                        append('delete', old[i], i + 1)
+                    for i, text in _line_span(old, i1, display_stop(i1, i2, change=True), cancelled):
+                        append('delete', text, i + 1)
                 if tag in ('insert', 'replace'):
-                    for j in range(j1, display_stop(j1, j2, change=True)):
-                        append('add', new[j], new_line=j + 1)
+                    for j, text in _line_span(new, j1, display_stop(j1, j2, change=True), cancelled):
+                        append('add', text, new_line=j + 1)
         common = {
             'path': path, 'old_exists': old_exists, 'new_exists': new_exists,
             'identical': old_exists and new_exists and old == new,

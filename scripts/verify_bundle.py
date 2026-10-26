@@ -121,11 +121,21 @@ def local_comparison_worker_checks(executable, directory):
         records=([f'{prefix} {i}' for i in range(300)] + ['before'] + middle
                  + ['after'] + [f'{prefix} tail {i}' for i in range(300)])
         (root/'alignment.txt').write_text('\n'.join(records)+'\n',encoding='utf-8')
+    # Large edit distance with many retained records: the old unrestricted
+    # native traceback required a large matrix. Exercise the bundled bounded
+    # matcher and the complete archive, beyond its first1000-change preview.
+    for root in (left, right):
+        with (root/'bounded.txt').open('w',encoding='utf-8',newline='\n') as output:
+            for index in range(20_000):
+                records = ([f'anchor {index}',f'deleted {index}',f'shared {index}',f'after {index}']
+                           if root == left else
+                           [f'anchor {index}',f'shared {index}',f'inserted {index}',f'after {index}'])
+                output.write('\n'.join(records)+'\n')
     cache=Path(directory)/'native-comparison-cache'
     payload={'operation':'compare','left':folder_descriptor(left),'right':folder_descriptor(right),
              'options':{},'cache_dir':str(cache)}
     result=worker_request(executable,payload,directory,worker='--comparison-worker')
-    assert result['summary']=={'total':6,'same':1,'different':3,'left_only':0,'right_only':1,'error':1}, 'Frozen local full-file/encoding comparison failed'
+    assert result['summary']=={'total':7,'same':1,'different':4,'left_only':0,'right_only':1,'error':1}, 'Frozen local full-file/encoding comparison failed'
     reports={item['path']:item.get('reports',{}) for item in result['results']}
     assert reports['changed.txt']['compared']['state']=='ready', 'Frozen small report was not prepared'
     assert reports['limit.txt']['compared']['state']=='ready', 'Frozen large report was not prepared initially'
@@ -148,6 +158,13 @@ def local_comparison_worker_checks(executable, directory):
     complete=read_page(archive,0)
     assert complete['total_lines']==1002 and complete['additions']==1001
     assert read_page(archive,complete['pages']-1)['lines'][-1]['text']=='new 1000', 'Frozen full report lost later changes'
+    bounded=worker_request(executable,{**query,'path':'bounded.txt'},directory,worker='--comparison-worker')
+    assert (bounded['additions'],bounded['deletions'])==(20_000,20_000), 'Frozen bounded matcher inflated changes'
+    assert bounded['displayed_changes']==1000 and bounded['truncated']
+    assert [row for row in bounded['lines'] if row['text']=='shared 0']==[
+        {'kind':'context','text':'shared 0','old_line':3,'new_line':2}], 'Frozen bounded matcher lost an equal shifted record'
+    bounded_archive=_report_directory(cache,'bounded.txt','compared')/'full'
+    assert read_page(bounded_archive,bounded['full_pages']-1)['lines'][-1]['text']=='after 19999'
     for selected,number,expected in (('invalid.txt',0,'file_error'),('limit.txt',999,'report_page')):
         errors=worker_request(executable,{**query,'path':selected,'page':number},directory,
                               expect_error=True,worker='--comparison-worker')
@@ -159,7 +176,7 @@ def local_comparison_worker_checks(executable, directory):
     (right/'changed.txt').write_bytes(b'edited after comparison\n')
     failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
     assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'
-    print('Local comparison actual worker: direct files, mixed encodings, >10MiB final-byte difference, invalid text, cached pages, shifted equal records and change detection passed.')
+    print('Local comparison actual worker: direct files, mixed encodings, >10MiB final-byte difference, invalid text, bounded80k-line exact alignment/full archive, cached pages, shifted equal records and change detection passed.')
 
 
 def text_inspection_worker_checks(executable,directory):

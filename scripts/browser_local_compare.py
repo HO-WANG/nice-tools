@@ -182,6 +182,8 @@ def main():
                     return
                 job_state = "cancelled" if endpoint == "cancel" else state["job_state"]
                 result = {"job": data["job"], "state": job_state, "phase": "preparing-reports", "completed": 1, "total": 2, "path": "<img onerror=alert(1)>.txt", "elapsed_seconds": 1.25, "message": "실패 후 다시 시도" if job_state == "failed" else "", "summary": SUMMARY, "results": RECORDS}
+                if job_state == "failed":
+                    result.update(phase="done", failure_phase="preparing-reports", code="worker_exit", exit_code=3221225477)
             elif endpoint == "diff":
                 assert set(data) == {"session", "job", "path", "mode", "page"}
                 if state["diff_fail"]:
@@ -325,6 +327,9 @@ def main():
         state["job_state"] = "failed"
         page.locator("#compare-button").click()
         expect(page.locator("#feedback")).to_contain_text("실패 후 다시 시도")
+        expect(page.locator("#feedback")).to_contain_text("[worker_exit]")
+        expect(page.locator("#feedback")).to_contain_text("exit_code=3221225477")
+        expect(page.locator("#comparison-job-status")).to_contain_text("상세 내용 준비")
         expect(page.locator("#ignore-start")).to_be_enabled()
         # A delayed job status must not resurrect results after cancellation.
         state["job_state"] = "running"

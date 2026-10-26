@@ -30,20 +30,20 @@ def test_small_reports_exist_before_first_selection_for_both_views(tmp_path, mon
     assert worker.execute({**query, 'mode': 'original'})['additions'] == 1
 
 
-def test_archive_write_failure_marks_file_error_instead_of_success(tmp_path, monkeypatch):
+def test_archive_disk_exhaustion_stops_job_with_storage_diagnostic(tmp_path, monkeypatch):
     original = worker.diff_cache._write_json
     def disk_full(path, value):
         if path.parent.name == 'full':
             raise OSError(28, 'private-native-source-value')
         return original(path, value)
     monkeypatch.setattr(worker.diff_cache, '_write_json', disk_full)
-    result, query = compare(tmp_path, ['old'], ['new'])
-    assert result['summary']['error'] == 1 and result['summary']['different'] == 0
-    assert result['results'][0]['status'] == 'error'
-    assert 'private-native-source-value' not in str(result)
+    with pytest.raises(worker.ComparisonError) as failure:
+        compare(tmp_path, ['old'], ['new'])
+    assert failure.value.code == 'temp_storage'
+    assert failure.value.diagnostics == {'errno': 28}
+    assert 'private-native-source-value' not in str(failure.value)
+    assert not (tmp_path / 'cache' / 'manifest.json').exists()
     assert not list((tmp_path / 'cache' / 'diffs').rglob('metadata.json'))
-    with pytest.raises(ValueError):
-        worker.execute(query)
 
 
 @pytest.mark.parametrize('changes', [999, 1000, 1001])

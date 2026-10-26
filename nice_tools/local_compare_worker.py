@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -19,6 +20,13 @@ from . import local_compare_diff as diff_cache
 
 CHANGED = '파일 또는 폴더가 변경되었습니다. 폴더를 다시 선택하고 비교하세요.'
 SAFE_ERRORS = {'changed': CHANGED,
+               'memory': '비교 중 메모리가 부족했습니다. 다른 프로그램을 닫아 메모리를 확보한 뒤 다시 비교하세요.',
+               'resource': '비교 중 운영체제 자원이 부족했습니다. 다른 작업을 종료하고 다시 비교하세요.',
+               'temp_storage': '비교 결과를 저장할 공간이 부족합니다. 임시 폴더가 있는 드라이브의 여유 공간을 확보하고 다시 비교하세요.',
+               'temp_access': '파일 또는 임시 저장소에 접근할 수 없습니다. 파일을 잠근 프로그램을 닫고 원본·임시 폴더의 접근 권한을 확인하세요.',
+               'worker_exit': '비교 프로세스가 비정상 종료되었습니다. 표시된 종료 코드와 작업 단계를 확인하고 메모리·보안 프로그램 상태를 점검한 뒤 다시 비교하세요.',
+               'worker_protocol': '비교 프로세스의 응답을 정상적으로 받지 못했습니다. 앱을 다시 실행하고 같은 문제가 반복되면 표시된 오류 코드와 작업 단계를 알려주세요.',
+               'comparison_failed': '비교 작업을 완료하지 못했습니다. 폴더·파일 상태와 임시 저장 공간을 확인하고 표시된 오류 코드와 작업 단계를 알려주세요.',
                'busy': '변경 내용을 계산하고 있습니다. 잠시 후 다시 시도하세요.',
                'file_limit': '파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.',
                'encoding': '전체 파일을 올바르게 해석할 수 없습니다. 인코딩을 지정하고 다시 검사하세요.',
@@ -32,12 +40,41 @@ SAFE_ERRORS = {'changed': CHANGED,
                'source_unavailable': '원본 파일·폴더 상태를 확인할 수 없습니다. 파일을 잠근 프로그램을 닫고 경로·접근 권한을 확인하세요.'}
 
 
+DIAGNOSTIC_FIELDS = ('errno', 'winerror', 'exit_code')
+
+
+def numeric_diagnostics(values):
+    """Only bounded native integer codes may cross the worker/HTTP boundary."""
+    return {key: values[key] for key in DIAGNOSTIC_FIELDS
+            if type(values.get(key)) is int and -(2**32) <= values[key] <= 2**32}
+
+
 class ComparisonError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, **diagnostics):
         if not isinstance(code,str) or code not in SAFE_ERRORS:
             raise ValueError('올바르지 않은 비교 오류 코드입니다.')
         self.code=code
+        self.diagnostics = numeric_diagnostics(diagnostics)
         super().__init__(SAFE_ERRORS[code])
+
+
+def failure_error(error):
+    """Classify trusted exception types/numbers; never inspect exception text."""
+    if isinstance(error, ComparisonError):
+        return error
+    numbers = numeric_diagnostics({key: getattr(error, key, None) for key in ('errno', 'winerror')})
+    native_errno, winerror = numbers.get('errno'), numbers.get('winerror')
+    if isinstance(error, MemoryError) or native_errno == errno.ENOMEM or winerror in (8, 14):
+        code = 'memory'
+    elif native_errno in (errno.ENOSPC, getattr(errno, 'EDQUOT', -1)) or winerror in (39, 112):
+        code = 'temp_storage'
+    elif native_errno in (errno.EMFILE, errno.ENFILE, errno.EAGAIN) or winerror in (4, 1450, 1453, 1454, 1455):
+        code = 'resource'
+    elif isinstance(error, PermissionError) or native_errno in (errno.EACCES, errno.EPERM, errno.EROFS) or winerror in (5, 19, 32, 33):
+        code = 'temp_access'
+    else:
+        code = 'comparison_failed'
+    return ComparisonError(code, **numbers)
 
 
 def relative_path(value):
@@ -288,6 +325,7 @@ def _compare(payload, emit):
             if any(errors):
                 item.update(status='error', message=' / '.join(error for error in errors if error))
             else:
+                preparing_reports = False
                 try:
                     with _sources(descriptors, relative, entry) as (left, right):
                         if right is None:
@@ -298,10 +336,16 @@ def _compare(payload, emit):
                             entry['pair'] = engine.compare_files(left, right, options, cache / 'pairs' / str(index))
                             item['status'] = 'same' if entry['pair']['identical'] else 'different'
                         emit({'phase': 'preparing-reports', 'completed': index, 'total': len(paths), 'path': relative})
+                        preparing_reports = True
                         entry['reports'] = _prepare_reports(cache, relative, entry, (left, right), options)
                         item['reports'] = {mode: {key: value for key, value in report.items() if key != 'cache_mode'}
                                            for mode, report in entry['reports'].items()}
-                except (ValueError, OSError):
+                except (MemoryError, ValueError, OSError) as error:
+                    safe_error = failure_error(error)
+                    # Global capacity failures cannot produce a useful complete
+                    # report. Keep ordinary invalid/unreadable sources as rows.
+                    if safe_error.code in ('memory', 'resource', 'temp_storage') or (preparing_reports and safe_error.code == 'temp_access'):
+                        raise safe_error from None
                     # No native exception, data value or absolute source path.
                     item.update(status='error', message='텍스트·상세 보고서를 준비하지 못했습니다. 파일 상태·인코딩·권한·임시 저장 공간을 확인하고 다시 비교하세요.')
             entries[relative] = {**entry, 'status': item['status']}
@@ -396,9 +440,9 @@ def main(stdin=None, stdout=None):
         record({'event': 'result', 'result': result})
         return 0
     except Exception as error:
-        detail = str(error) if isinstance(error, ValueError) else '파일 비교 작업을 완료하지 못했습니다. 파일 상태와 임시 저장 공간을 확인하세요.'
-        record({'event': 'error', 'detail': detail,
-                **({'code':error.code} if isinstance(error,ComparisonError) else {})})
+        safe_error = failure_error(error)
+        record({'event': 'error', 'detail': str(safe_error), 'code': safe_error.code,
+                **safe_error.diagnostics})
         return 1
 
 

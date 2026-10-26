@@ -152,7 +152,8 @@ function showResults(data) {
 
 function applyJobStatus(data, job) {
   if (data.job !== job) throw new Error("작업 상태가 일치하지 않습니다. 상태를 다시 확인하세요.");
-  const phase = data.phase === "scanning" ? "폴더 확인" : data.phase === "preparing-reports" ? "상세 내용 준비" : data.phase === "done" ? "완료" : "파일 비교";
+  const phaseKey = data.state === "failed" ? (data.failure_phase || data.phase) : data.phase;
+  const phase = phaseKey === "scanning" ? "폴더 확인" : phaseKey === "preparing-reports" ? "상세 내용 준비" : phaseKey === "done" ? "완료" : "파일 비교";
   const elapsed = Number(data.elapsed_seconds || 0).toFixed(1);
   $("comparison-job-status").textContent = `${phase} · ${data.completed ?? 0} / ${data.total ?? 0}개 · ${elapsed}초${data.path ? ` · ${data.path}` : ""}`;
   const progress = $("comparison-progress-bar");
@@ -164,7 +165,12 @@ function applyJobStatus(data, job) {
     showResults(data);
     completedJob = job;
   } else {
-    feedback(data.state === "cancelled" ? "비교를 취소했습니다." : (data.message || "비교에 실패했습니다. 폴더와 옵션을 확인하고 다시 시도하세요."), data.state === "failed" ? "error" : "info");
+    const code = typeof data.code === "string" && /^[a-z_]+$/.test(data.code) ? `[${data.code}] ` : "";
+    const diagnostics = ["errno", "winerror", "exit_code"]
+      .filter(key => Number.isSafeInteger(data[key]))
+      .map(key => `${key}=${data[key]}`).join(" · ");
+    const message = `${code}${data.message || "비교에 실패했습니다. 폴더와 옵션을 확인하고 다시 시도하세요."}${diagnostics ? ` (${diagnostics})` : ""}`;
+    feedback(data.state === "cancelled" ? "비교를 취소했습니다." : message, data.state === "failed" ? "error" : "info");
     $("comparison-job-status").textContent += data.state === "cancelled" ? " · 취소됨" : " · 실패";
   }
   activeJob = null;
