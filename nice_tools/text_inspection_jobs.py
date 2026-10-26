@@ -78,7 +78,9 @@ class InspectionManager(ComparisonManager):
             with session['selection_lock']:
                 self._session(token)
                 folder=tempfile.TemporaryDirectory(prefix='nice-tools-inspection-input-')
-                path=Path(folder.name)/'input.txt'
+                # Windows short paths and directory aliases must use the same
+                # canonical identity as file_descriptor and retained job inputs.
+                path=Path(folder.name).resolve()/'input.txt'
                 with self.lock:
                     self._session(token)
                     session['uploads'].append({'folder':folder,'path':str(path)})

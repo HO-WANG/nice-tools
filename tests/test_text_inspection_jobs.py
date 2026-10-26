@@ -65,6 +65,27 @@ def test_upload_source_and_results_are_cleaned_on_close(tmp_path):
     finally:manager.close()
 
 
+def test_uploaded_source_survives_canonical_temp_path_alias(tmp_path,monkeypatch):
+    service=module();manager=service.InspectionManager()
+    real,alias=tmp_path/'real-temp',tmp_path/'temp-alias'
+    real.mkdir()
+    try:alias.symlink_to(real,target_is_directory=True)
+    except OSError:pytest.skip('Directory alias creation unavailable')
+    factory=service.tempfile.TemporaryDirectory
+    def aliased(*args,**kwargs):
+        kwargs['dir']=alias
+        return factory(*args,**kwargs)
+    monkeypatch.setattr(service.tempfile,'TemporaryDirectory',aliased)
+    try:
+        session=manager.create_session()['session']
+        selected=manager.select_upload(session,io.BytesIO(b'A\n'),'data.txt')['selection']
+        path=Path(manager.sessions[session]['selections']['file']['source']['path'])
+        assert path.exists(),'Canonical selection was deleted as an obsolete upload'
+        job=manager.start(session,selected['token'],{})['job']
+        assert finished(manager,session,job)['state']=='succeeded'
+    finally:manager.close()
+
+
 def test_file_grants_are_session_owned(tmp_path,monkeypatch):
     manager=module().InspectionManager()
     try:
