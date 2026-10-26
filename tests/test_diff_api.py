@@ -191,3 +191,21 @@ def test_many_spaced_edits_preserve_repeated_common_lines():
     diff = response.json()
     assert (diff["additions"], diff["deletions"]) == (129, 129)
     assert len(diff["lines"]) < 1300
+
+
+@pytest.mark.parametrize('copies', [1, 2])
+def test_large_edit_distance_keeps_shifted_identical_records_as_context(copies):
+    shared = '202609|1011156045|CT9701|101'
+    old = ([f'old {i}' for i in range(300)] + ['before']
+           + ['202609|1011150624|CT963|101'] + [shared] * copies
+           + ['after'] + [f'old tail {i}' for i in range(300)])
+    new = ([f'new {i}' for i in range(300)] + ['before']
+           + [shared] * copies + ['202609|1011157616|HW2561|101']
+           + ['after'] + [f'new tail {i}' for i in range(300)])
+    with TestClient(app) as client:
+        response = diff_request(client, ('\n'.join(old) + '\n').encode(),
+                                ('\n'.join(new) + '\n').encode())
+    assert response.status_code == 200
+    diff = response.json()
+    assert [line['kind'] for line in diff['lines'] if line['text'] == shared] == ['context'] * copies
+    assert (diff['additions'], diff['deletions']) == (601, 601)

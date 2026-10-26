@@ -178,3 +178,16 @@ def test_nonempty_directory_is_preserved_on_rejection(tmp_path):
     with pytest.raises(FileExistsError):
         build(tmp_path, [], [])
     assert sentinel.read_text('utf-8') == 'retain'
+
+
+def test_large_edit_distance_keeps_identical_record_across_cached_pages(tmp_path):
+    shared = '202609|1011156045|CT9701|101'
+    old = ([f'old {i}' for i in range(300)] + ['before', 'removed', shared, 'after']
+           + [f'old tail {i}' for i in range(300)])
+    new = ([f'new {i}' for i in range(300)] + ['before', shared, 'inserted', 'after']
+           + [f'new tail {i}' for i in range(300)])
+    metadata = build(tmp_path, old, new)
+    rows = all_rows(tmp_path / 'cache', metadata)
+    assert [row for row in rows if row['text'] == shared] == [
+        {'kind': 'context', 'text': shared, 'old_line': 303, 'new_line': 302}]
+    assert (metadata['additions'], metadata['deletions']) == (601, 601)

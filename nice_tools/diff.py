@@ -2,7 +2,7 @@
 
 from difflib import SequenceMatcher
 
-from rapidfuzz.distance import Levenshtein
+from rapidfuzz.distance import Indel, Levenshtein
 
 from .comparison import CompareOptions, normalize_lines
 
@@ -11,7 +11,7 @@ def myers_opcodes(old: list[str], new: list[str]) -> list | None:
     """Find a short edit script without quadratic repeated-line matching.
 
     Bound the search frontier, not the input: large edit distances use the
-    native edit matcher, which preserves repeated lines at large edit distances.
+    native insertion/deletion matcher, preserving the longest common subsequence.
     """
     n, m = len(old), len(new)
     if not old or not new or set(old).isdisjoint(new):
@@ -97,8 +97,18 @@ class LineMatcher(SequenceMatcher):
         codes = myers_opcodes(self.a, self.b)
         if codes is not None:
             return codes
+        # Unit-cost substitutions can hide shifted identical lines inside a
+        # replace block. Retain the cheaper native alignment only when its
+        # insertion/deletion cost is already optimal. The bounded distance
+        # check needs no alignment matrix; avoid a much larger Indel matrix
+        # for sparse edits in long repeated files.
+        codes = Levenshtein.opcodes(self.a, self.b)
+        cost = sum(op.src_end - op.src_start + op.dest_end - op.dest_start
+                   for op in codes if op.tag != 'equal')
+        if cost and Indel.distance(self.a, self.b, score_cutoff=cost - 1) < cost:
+            codes = Indel.opcodes(self.a, self.b)
         return [(op.tag, op.src_start, op.src_end, op.dest_start, op.dest_end)
-                for op in Levenshtein.opcodes(self.a, self.b)]
+                for op in codes]
 
 
 def changed_groups(old: list[str], new: list[str]) -> list:

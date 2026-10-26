@@ -114,20 +114,29 @@ def local_comparison_worker_checks(executable, directory):
     (right/'large.txt').write_bytes(content+b'y')
     (left/'invalid.txt').write_bytes(b'binary\0invalid')
     (right/'invalid.txt').write_bytes(b'binary\0invalid')
+    shared='202609|1011156045|CT9701|101'
+    for root,prefix,middle in ((left,'old',['removed',shared]),(right,'new',[shared,'inserted'])):
+        records=([f'{prefix} {i}' for i in range(300)] + ['before'] + middle
+                 + ['after'] + [f'{prefix} tail {i}' for i in range(300)])
+        (root/'alignment.txt').write_text('\n'.join(records)+'\n',encoding='utf-8')
     cache=Path(directory)/'native-comparison-cache'
     payload={'operation':'compare','left':folder_descriptor(left),'right':folder_descriptor(right),
              'options':{},'cache_dir':str(cache)}
     result=worker_request(executable,payload,directory,worker='--comparison-worker')
-    assert result['summary']=={'total':4,'same':1,'different':2,'left_only':0,'right_only':0,'error':1}, 'Frozen local full-file/encoding comparison failed'
+    assert result['summary']=={'total':5,'same':1,'different':3,'left_only':0,'right_only':0,'error':1}, 'Frozen local full-file/encoding comparison failed'
     query={'operation':'diff','cache_dir':str(cache),'path':'changed.txt','mode':'compared','page':0}
     page=worker_request(executable,query,directory,worker='--comparison-worker')
     assert page['additions']==225 and page['deletions']==225 and len(page['lines'])==200 and page['pages']==3
     last=worker_request(executable,{**query,'page':2},directory,worker='--comparison-worker')
     assert last['lines'][-1]['text']=='new 224' and last['total_lines']==451, 'Frozen cached diff lost its final line'
+    alignment=worker_request(executable,{**query,'path':'alignment.txt','page':3},directory,worker='--comparison-worker')
+    assert (alignment['additions'],alignment['deletions'])==(601,601), 'Frozen diff inflated change counts'
+    assert [row for row in alignment['lines'] if row['text']==shared]==[
+        {'kind':'context','text':shared,'old_line':303,'new_line':302}], 'Frozen diff changed an identical shifted record'
     (right/'changed.txt').write_bytes(b'edited after comparison\n')
     failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
     assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'
-    print('Local comparison actual worker: direct files, mixed encodings, >10MiB final-byte difference, invalid text, cached diff pages and change detection passed.')
+    print('Local comparison actual worker: direct files, mixed encodings, >10MiB final-byte difference, invalid text, cached pages, shifted equal records and change detection passed.')
 
 
 def text_inspection_worker_checks(executable,directory):
