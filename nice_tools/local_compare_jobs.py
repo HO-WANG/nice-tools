@@ -4,11 +4,9 @@ from __future__ import annotations
 import atexit
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
-import hashlib
 import json
 from pathlib import Path
 import secrets
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -311,30 +309,16 @@ class ComparisonManager(AseManager):
             with self.lock:
                 if self._job(token,handle) is not job or job['state']!='succeeded':
                     raise ValueError('완료된 비교 결과에서 파일을 선택하세요.')
-            key = hashlib.sha256((mode+'\0'+path).encode('utf-8')).hexdigest()
-            directory = Path(job['cache_dir'])/'diffs'/key
             payload = {'operation':'diff','cache_dir':job['cache_dir'],
                        'path':path,'mode':mode,'page':page}
-            try:
-                try:
-                    prepared = execute(payload)
-                except ComparisonError:
-                    raise
-                except ValueError:
-                    if not analyze:
-                        raise
-                else:
-                    if not analyze or prepared.get('state') != 'deferred':
-                        return prepared
-                return self._request({**payload, 'analyze': True}, token, owner_job=job)
-            except Exception:
-                # A killed partial build is never reused as a finished cache.
-                for candidate in ('compared', 'original'):
-                    key = hashlib.sha256((candidate+'\0'+path).encode('utf-8')).hexdigest()
-                    directory = Path(job['cache_dir'])/'diffs'/key
-                    if not (directory/'metadata.json').exists():
-                        shutil.rmtree(directory,ignore_errors=True)
-                raise
+            # Every complete report and preview was published by initial
+            # comparison. A lookup is strictly metadata/cache I/O, even when
+            # an older caller still supplies analyze=True.
+            result = execute(payload)
+            with self.lock:
+                if self._job(token, handle) is not job or job['state'] != 'succeeded':
+                    raise ValueError('비교 결과가 만료되었습니다. 다시 비교하세요.')
+            return result
         finally:
             job['use_lock'].release()
 

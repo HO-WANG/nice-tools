@@ -1,4 +1,4 @@
-"""Eager reports respect edit-distance and stored-row boundaries."""
+"""Initial comparison retains full reports and a change-counted preview."""
 
 from concurrent.futures import CancelledError
 
@@ -21,37 +21,43 @@ def prepare(tmp_path, old, new, **kwargs):
                              new_exists=new is not None, **kwargs)
 
 
-def rows(tmp_path, metadata):
+def rows(tmp_path, metadata, *, full=False):
+    directory = tmp_path / 'report'
+    if full:
+        directory /= 'full'
+        metadata = diff.read_page(directory, 0)
     return [row for page in range(metadata['pages'])
-            for row in diff.read_page(tmp_path / 'report', page)['lines']]
+            for row in diff.read_page(directory, page)['lines']]
 
 
-@pytest.mark.parametrize('count,state', [(999, 'ready'), (1000, 'deferred'), (1001, 'deferred')])
+@pytest.mark.parametrize('count', [999, 1000, 1001])
 @pytest.mark.parametrize('side', ['old', 'new', 'both'])
-def test_exact_changed_line_threshold(tmp_path, count, state, side):
+def test_exact_changed_line_boundary_is_ready_and_complete(tmp_path, count, side):
     old = None if side == 'new' else [f'old {i}' for i in range(count if side == 'old' else count // 2)]
     new = None if side == 'old' else [f'new {i}' for i in range(count if side == 'new' else count - count // 2)]
     result = prepare(tmp_path, old, new)
-    assert result['state'] == state
-    if state == 'deferred':
-        assert result == {'state': 'deferred', 'threshold': 1000}
-        assert not (tmp_path / 'report').exists()
-    else:
-        assert result['additions'] + result['deletions'] == 999
-        assert result['display_limit'] == 1000
-        assert result['total_lines'] == result['full_total_lines'] == 1000
-        assert result['truncated'] is False
+    assert result['state'] == 'ready'
+    assert result['additions'] + result['deletions'] == count
+    assert result['change_limit'] == 1000
+    assert result['displayed_changes'] == min(count, 1000)
+    assert result['total_lines'] == min(count, 1000) + 1
+    assert result['full_total_lines'] == count + 1
+    assert result['truncated'] is (count > 1000)
+    full = diff.read_page(tmp_path / 'report' / 'full', 0)
+    assert result['full_pages'] == full['pages']
+    assert (full['additions'], full['deletions']) == (result['additions'], result['deletions'])
+    assert len(rows(tmp_path, result, full=True)) == count + 1
 
 
-def test_deferred_never_aligns_or_publishes_pages(tmp_path, monkeypatch):
-    def forbidden(*args, **kwargs):
-        raise AssertionError('deferred reports must not align or publish')
-    monkeypatch.setattr(diff, 'changed_groups', forbidden)
-    monkeypatch.setattr(diff, '_write_json', forbidden)
-    # Equal lengths prevent a line-count-only shortcut; each substitution costs two.
-    assert prepare(tmp_path, ['repeat'] * 500, ['different'] * 500) == {
-        'state': 'deferred', 'threshold': 1000}
-    assert not (tmp_path / 'report').exists()
+def test_replacement_preview_keeps_first_thousand_changes_and_full_report(tmp_path):
+    result = prepare(tmp_path, ['old'] * 600, ['new'] * 600)
+    displayed = rows(tmp_path, result)
+    assert (result['additions'], result['deletions']) == (600, 600)
+    assert result['displayed_changes'] == 1000
+    assert [row['kind'] for row in displayed] == ['hunk'] + ['delete'] * 600 + ['add'] * 400
+    full = rows(tmp_path, result, full=True)
+    assert [row['kind'] for row in full] == ['hunk'] + ['delete'] * 600 + ['add'] * 600
+    assert full[:len(displayed)] == displayed
 
 
 def test_ready_reuses_each_normalized_read_and_preserves_duplicate_lcs(tmp_path, monkeypatch):
@@ -62,34 +68,51 @@ def test_ready_reuses_each_normalized_read_and_preserves_duplicate_lcs(tmp_path,
         reads.append(path)
         return original(path, cancelled)
     monkeypatch.setattr(diff, '_read_lines', once)
-    result = prepare(tmp_path, ['same'] * 600 + ['before', 'shared', 'after'],
-                     ['new'] * 100 + ['same'] * 600 + ['before', 'shared', 'inserted', 'after'])
+    shared = '202609|1011156045|CT9701|101'
+    result = prepare(tmp_path, ['old'] * 600 + ['before', 'removed', shared, 'after'],
+                     ['new'] * 600 + ['before', shared, 'inserted', 'after'])
     assert result['state'] == 'ready'
-    assert (result['additions'], result['deletions']) == (101, 0)
-    assert any(row['kind'] == 'context' and row['text'] == 'shared' for row in rows(tmp_path, result))
+    assert (result['additions'], result['deletions']) == (601, 601)
+    assert [row for row in rows(tmp_path, result, full=True) if row['text'] == shared] == [
+        {'kind': 'context', 'text': shared, 'old_line': 603, 'new_line': 602}]
 
 
-def test_display_cap_includes_context_and_counts_complete_report(tmp_path):
-    old = [f'line {i}' for i in range(10000)]
+@pytest.mark.parametrize('changes', [400, 500, 501])
+def test_context_and_headings_do_not_consume_change_budget(tmp_path, changes):
+    old = [f'line {i}' for i in range(changes * 20)]
     new = old.copy()
-    for index in range(400):
+    for index in range(changes):
         new[index * 20] = f'changed {index}'
     result = prepare(tmp_path, old, new)
-    assert result['state'] == 'ready'
-    assert (result['additions'], result['deletions']) == (400, 400)
-    assert result['total_lines'] == 1000
-    assert result['pages'] == 5
-    assert result['full_total_lines'] == 3597
-    assert result['truncated'] is True
     displayed = rows(tmp_path, result)
-    assert len(displayed) == 1000
-    assert {'context', 'hunk', 'add', 'delete'} == {row['kind'] for row in displayed}
-    assert len(list((tmp_path / 'report').glob('page-*.json'))) == 5
-    with pytest.raises(ValueError, match='out of range'):
-        diff.read_page(tmp_path / 'report', 5)
+    full = rows(tmp_path, result, full=True)
+    assert (result['additions'], result['deletions']) == (changes, changes)
+    assert result['displayed_changes'] == min(1000, changes * 2)
+    assert sum(row['kind'] in ('add', 'delete') for row in displayed) == result['displayed_changes']
+    assert result['total_lines'] == len(displayed) > 1000
+    assert result['full_total_lines'] == len(full)
+    assert result['truncated'] is (changes > 500)
+    if changes <= 500:
+        assert displayed == full
+        assert displayed[-1]['kind'] == 'context'
+    else:
+        assert displayed[-1]['kind'] == 'add'
+        assert displayed == full[:len(displayed)]
 
 
-def test_explicit_capped_build_keeps_full_counts_after_display_limit(tmp_path):
+def test_cached_first_view_and_full_pages_do_not_read_or_match_again(tmp_path, monkeypatch):
+    result = prepare(tmp_path, ['old'] * 600, ['new'] * 600)
+    (tmp_path / 'old').unlink()
+    (tmp_path / 'new').unlink()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('cached reports must not read or align')
+    monkeypatch.setattr(diff, '_read_lines', forbidden)
+    monkeypatch.setattr(diff, 'changed_groups', forbidden)
+    assert len(rows(tmp_path, result)) == 1001
+    assert len(rows(tmp_path, result, full=True)) == 1201
+
+
+def test_explicit_row_capped_build_retains_legacy_compatibility(tmp_path):
     result = diff.build_diff(source(tmp_path, 'old', ['old'] * 600),
                              source(tmp_path, 'new', ['new'] * 800), tmp_path / 'report',
                              path='a.txt', old_exists=True, new_exists=True, max_lines=1000)
@@ -99,11 +122,23 @@ def test_explicit_capped_build_keeps_full_counts_after_display_limit(tmp_path):
     assert result['display_limit'] == 1000 and result['truncated'] is True
 
 
-def test_prepare_validates_complete_source_even_when_already_over_threshold(tmp_path):
-    invalid = tmp_path / 'invalid'
-    invalid.write_bytes(b'line\n' * 1001 + b'\xff\n')
-    with pytest.raises(UnicodeDecodeError):
-        diff.prepare_diff(invalid, None, tmp_path / 'report', path='a', old_exists=True, new_exists=False)
+def test_change_capped_build_can_omit_full_store(tmp_path):
+    result = diff.build_diff(source(tmp_path, 'old', ['old'] * 3),
+                             source(tmp_path, 'new', ['new'] * 3), tmp_path / 'report',
+                             path='a.txt', old_exists=True, new_exists=True, max_changes=4)
+    assert result['displayed_changes'] == 4
+    assert result['total_lines'] == 5
+    assert result['full_total_lines'] == 7
+    assert result['truncated'] is True
+    assert not (tmp_path / 'report' / 'full').exists()
+
+
+@pytest.mark.parametrize('invalid', [b'line\n' * 1001 + b'\xff\n', b'line\n' * 1001 + b'incomplete'])
+def test_preparation_validates_complete_source(tmp_path, invalid):
+    path = tmp_path / 'invalid'
+    path.write_bytes(invalid)
+    with pytest.raises((UnicodeDecodeError, ValueError)):
+        diff.prepare_diff(path, None, tmp_path / 'report', path='a', old_exists=True, new_exists=False)
     assert not (tmp_path / 'report').exists()
 
 
@@ -113,17 +148,54 @@ def test_preparation_cancellation_does_not_publish_directory(tmp_path):
     assert not (tmp_path / 'report').exists()
 
 
-def test_capped_build_cancellation_removes_written_pages(tmp_path):
+@pytest.mark.parametrize('store', ['', 'full'])
+def test_cancellation_removes_both_partial_stores(tmp_path, store):
     with pytest.raises(CancelledError):
-        prepare(tmp_path, None, ['line'] * 999,
-                cancelled=lambda: any((tmp_path / 'report').glob('page-*.json')))
+        prepare(tmp_path, None, ['line'] * 1201,
+                cancelled=lambda: any((tmp_path / 'report' / store).glob('page-*.json')))
+    assert not (tmp_path / 'report').exists()
+
+
+
+def test_cancellation_after_full_publication_removes_entire_cache(tmp_path):
+    with pytest.raises(CancelledError):
+        prepare(tmp_path, None, ['line'] * 1201,
+                cancelled=lambda: (tmp_path / 'report' / 'full' / 'metadata.json').exists())
+    assert not (tmp_path / 'report').exists()
+
+def test_full_metadata_is_published_before_preview_metadata(tmp_path, monkeypatch):
+    original = diff._write_json
+    published = []
+    def observe(path, value):
+        if path.name == 'metadata.json':
+            published.append(path.parent.name)
+            if path.parent.name == 'report':
+                full = diff.read_page(path.parent / 'full', 6)
+                assert len(full['lines']) == 2
+        original(path, value)
+    monkeypatch.setattr(diff, '_write_json', observe)
+    prepare(tmp_path, None, ['line'] * 1201)
+    assert published == ['full', 'report']
+
+
+@pytest.mark.parametrize('store,filename', [('report', 'metadata.json'), ('full', 'page-00000001.json')])
+def test_write_failure_removes_both_stores(tmp_path, monkeypatch, store, filename):
+    original = diff._write_json
+    def fail(path, value):
+        if path.parent.name == store and path.name == filename:
+            raise OSError('disk full')
+        original(path, value)
+    monkeypatch.setattr(diff, '_write_json', fail)
+    with pytest.raises(OSError, match='disk full'):
+        prepare(tmp_path, None, ['line'] * 1201)
     assert not (tmp_path / 'report').exists()
 
 
 @pytest.mark.parametrize('old,new,identical', [(None, [], False), ([], [], True), (None, None, False)])
-def test_empty_reports_are_ready_with_one_empty_page(tmp_path, old, new, identical):
+def test_empty_reports_are_ready_with_empty_preview_and_full_page(tmp_path, old, new, identical):
     result = prepare(tmp_path, old, new)
-    assert (result['state'], result['identical'], result['pages']) == ('ready', identical, 1)
-    assert result['total_lines'] == result['full_total_lines'] == 0
+    assert (result['state'], result['identical'], result['pages'], result['full_pages']) == (
+        'ready', identical, 1, 1)
+    assert result['total_lines'] == result['full_total_lines'] == result['displayed_changes'] == 0
     assert result['truncated'] is False
-    assert rows(tmp_path, result) == []
+    assert rows(tmp_path, result) == rows(tmp_path, result, full=True) == []

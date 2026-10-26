@@ -246,15 +246,13 @@ def _prepare_reports(cache, relative, entry, sources, options):
         if mode == 'original' and (options == CompareOptions() or entry.get('pair', {}).get('raw_identical')):
             reports[mode] = {**reports['compared'], 'cache_mode': 'compared'}
             continue
-        try:
-            normalized = _normalized_pair(cache, relative, mode, entry, sources, options)
-            prepared = diff_cache.prepare_diff(*normalized, _report_directory(cache, relative, mode),
-                                              path=relative, old_exists=sources[0] is not None,
-                                              new_exists=sources[1] is not None)
-            reports[mode] = {'state': prepared['state'], 'threshold': diff_cache.AUTO_DIFF_THRESHOLD,
-                             'display_limit': diff_cache.MAX_DIFF_LINES}
-        except (ValueError, OSError):
-            reports[mode] = {'state': 'error'}
+        normalized = _normalized_pair(cache, relative, mode, entry, sources, options)
+        prepared = diff_cache.prepare_diff(*normalized, _report_directory(cache, relative, mode),
+                                          path=relative, old_exists=sources[0] is not None,
+                                          new_exists=sources[1] is not None)
+        reports[mode] = {'state': prepared['state'], 'change_limit': prepared['change_limit'],
+                         'displayed_changes': prepared['displayed_changes'],
+                         'truncated': prepared['truncated']}
     return reports
 
 
@@ -298,7 +296,7 @@ def _compare(payload, emit):
                                            for mode, report in entry['reports'].items()}
                 except (ValueError, OSError):
                     # No native exception, data value or absolute source path.
-                    item.update(status='error', message='텍스트를 읽을 수 없거나 파일이 변경되었습니다. 인코딩·권한을 확인하고 다시 비교하세요.')
+                    item.update(status='error', message='텍스트·상세 보고서를 준비하지 못했습니다. 파일 상태·인코딩·권한·임시 저장 공간을 확인하고 다시 비교하세요.')
             entries[relative] = {**entry, 'status': item['status']}
             summary[item['status']] += 1
             summary['total'] += 1
@@ -334,15 +332,7 @@ def _diff(payload):
             stack.enter_context(_directory_guard(_root(descriptor)))
         with _sources(descriptors, relative, entry) as sources:
             if not (directory / 'metadata.json').exists():
-                if not analyze:
-                    if report.get('state') == 'deferred':
-                        return {'state': 'deferred', 'threshold': diff_cache.AUTO_DIFF_THRESHOLD,
-                                'display_limit': diff_cache.MAX_DIFF_LINES, 'lines': []}
-                    raise ValueError('상세 보고서를 준비하지 못했습니다. 다시 비교하세요.')
-                normalized = _normalized_pair(cache, relative, cache_mode, entry, sources, options_data(manifest['options']))
-                diff_cache.build_diff(*normalized, directory, path=relative,
-                                      old_exists=sources[0] is not None, new_exists=sources[1] is not None,
-                                      max_lines=diff_cache.MAX_DIFF_LINES)
+                raise ValueError('상세 보고서를 준비하지 못했습니다. 다시 비교하세요.')
             result = diff_cache.read_page(directory, page)
         return result
 

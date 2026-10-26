@@ -1,173 +1,175 @@
-"""Windows file dialogs for files that remain on the user's own computer."""
+"""Windows Common Item Dialogs for files that remain on the user's computer.
+
+The worker calls these synchronously on its own STA thread. Only filesystem
+paths cross this boundary; shell namespace items and multiple selection do not.
+"""
 
 from __future__ import annotations
 
 import ctypes
 import ntpath
 import sys
+import uuid
 
 
-OFN_OVERWRITEPROMPT = 0x00000002
-OFN_HIDEREADONLY = 0x00000004
-OFN_NOCHANGEDIR = 0x00000008
-OFN_PATHMUSTEXIST = 0x00000800
-OFN_FILEMUSTEXIST = 0x00001000
-OFN_EXPLORER = 0x00080000
-OFN_DONTADDTORECENT = 0x02000000
+HRESULT = ctypes.c_int32  # Windows LONG is 32 bits, including on x64.
+UINT = ctypes.c_uint32
+PVOID = ctypes.c_void_p
+PPVOID = ctypes.POINTER(PVOID)
+WINFUNCTYPE = getattr(ctypes, 'WINFUNCTYPE', ctypes.CFUNCTYPE)
 MAX_PATH_CHARS = 32768
-
-BFFCALLBACK = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
-    ctypes.c_int32, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_ssize_t, ctypes.c_ssize_t,
-)
-
-
-class BROWSEINFOW(ctypes.Structure):
-    _fields_ = [
-        ("hwndOwner", ctypes.c_void_p), ("pidlRoot", ctypes.c_void_p),
-        ("pszDisplayName", ctypes.POINTER(ctypes.c_wchar)), ("lpszTitle", ctypes.c_wchar_p),
-        ("ulFlags", ctypes.c_uint32), ("lpfn", BFFCALLBACK),
-        ("lParam", ctypes.c_ssize_t), ("iImage", ctypes.c_int32),
-    ]
+FOS_OVERWRITEPROMPT = 0x00000002
+FOS_NOCHANGEDIR = 0x00000008
+FOS_PICKFOLDERS = 0x00000020
+FOS_FORCEFILESYSTEM = 0x00000040
+FOS_PATHMUSTEXIST = 0x00000800
+FOS_FILEMUSTEXIST = 0x00001000
+FOS_DONTADDTORECENT = 0x02000000
+ERROR_CANCELLED = 0x800704C7
+SIGDN_FILESYSPATH = 0x80058000
 
 
-class OPENFILENAMEW(ctypes.Structure):
-    # Explicit Windows integer widths also make this layout inspectable on Linux.
-    _fields_ = [
-        ("lStructSize", ctypes.c_uint32),
-        ("hwndOwner", ctypes.c_void_p),
-        ("hInstance", ctypes.c_void_p),
-        ("lpstrFilter", ctypes.c_wchar_p),
-        ("lpstrCustomFilter", ctypes.POINTER(ctypes.c_wchar)),
-        ("nMaxCustFilter", ctypes.c_uint32),
-        ("nFilterIndex", ctypes.c_uint32),
-        ("lpstrFile", ctypes.POINTER(ctypes.c_wchar)),
-        ("nMaxFile", ctypes.c_uint32),
-        ("lpstrFileTitle", ctypes.POINTER(ctypes.c_wchar)),
-        ("nMaxFileTitle", ctypes.c_uint32),
-        ("lpstrInitialDir", ctypes.c_wchar_p),
-        ("lpstrTitle", ctypes.c_wchar_p),
-        ("Flags", ctypes.c_uint32),
-        ("nFileOffset", ctypes.c_uint16),
-        ("nFileExtension", ctypes.c_uint16),
-        ("lpstrDefExt", ctypes.c_wchar_p),
-        ("lCustData", ctypes.c_ssize_t),
-        ("lpfnHook", ctypes.c_void_p),
-        ("lpTemplateName", ctypes.c_wchar_p),
-        ("pvReserved", ctypes.c_void_p),
-        ("dwReserved", ctypes.c_uint32),
-        ("FlagsEx", ctypes.c_uint32),
-    ]
+class GUID(ctypes.Structure):
+    _fields_ = [('Data1', UINT), ('Data2', ctypes.c_uint16),
+                ('Data3', ctypes.c_uint16), ('Data4', ctypes.c_ubyte * 8)]
+
+    @classmethod
+    def parse(cls, value):
+        return cls.from_buffer_copy(uuid.UUID(value).bytes_le)
 
 
-def _load_dialog_library():
-    return ctypes.WinDLL("comdlg32", use_last_error=True)
+CLSID_FILE_OPEN_DIALOG = GUID.parse('DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7')
+CLSID_FILE_SAVE_DIALOG = GUID.parse('C0B4E2F3-BA21-4773-8DBA-335EC946EB8B')
+IID_FILE_OPEN_DIALOG = GUID.parse('D57C7288-D4AD-4768-BE02-9D969532D960')
+IID_FILE_SAVE_DIALOG = GUID.parse('84BCCD23-5FDE-4CDB-AEA4-AF64B83D78AB')
+IID_SHELL_ITEM = GUID.parse('43826D1E-E718-42EE-BC55-A1E261C37BFE')
 
 
-def _load_directory_libraries():
-    return (ctypes.WinDLL("shell32", use_last_error=True),
-            ctypes.WinDLL("ole32", use_last_error=True),
-            ctypes.WinDLL("user32", use_last_error=True))
+class COMDLG_FILTERSPEC(ctypes.Structure):
+    _fields_ = [('pszName', ctypes.c_wchar_p), ('pszSpec', ctypes.c_wchar_p)]
+
+
+def _load_libraries():
+    shell = ctypes.WinDLL('shell32', use_last_error=True)
+    ole = ctypes.WinDLL('ole32', use_last_error=True)
+    ole.CoInitializeEx.argtypes = [PVOID, UINT]
+    ole.CoInitializeEx.restype = HRESULT
+    ole.CoUninitialize.argtypes = []
+    ole.CoUninitialize.restype = None
+    ole.CoCreateInstance.argtypes = [ctypes.POINTER(GUID), PVOID, UINT, ctypes.POINTER(GUID), PPVOID]
+    ole.CoCreateInstance.restype = HRESULT
+    ole.CoTaskMemFree.argtypes = [PVOID]
+    ole.CoTaskMemFree.restype = None
+    shell.SHCreateItemFromParsingName.argtypes = [ctypes.c_wchar_p, PVOID, ctypes.POINTER(GUID), PPVOID]
+    shell.SHCreateItemFromParsingName.restype = HRESULT
+    return shell, ole
+
+
+def _invoke(pointer, index, argtypes, *args):
+    """Invoke an HRESULT-returning COM vtable slot using Windows ABI widths."""
+    table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(PVOID))).contents
+    function = WINFUNCTYPE(HRESULT, PVOID, *argtypes)(table[index])
+    return function(pointer, *args)
+
+
+def _release(pointer):
+    if pointer:
+        table = ctypes.cast(pointer, ctypes.POINTER(ctypes.POINTER(PVOID))).contents
+        WINFUNCTYPE(UINT, PVOID)(table[2])(pointer)  # IUnknown.Release
+
+
+def _check(result, action):
+    if ctypes.c_int32(result).value < 0:
+        raise ValueError(f'Windows selection {action} failed (0x{result & 0xFFFFFFFF:08x}).')
+
+
+def _configure_dialog(dialog, *, folder=False, direction='in', suggested_name=None, text_only=False):
+    """Configure one real IFileDialog; kept separate for native configuration checks."""
+    options = UINT()
+    _check(_invoke(dialog, 10, (ctypes.POINTER(UINT),), ctypes.byref(options)), 'options')
+    flags = options.value | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR | FOS_PATHMUSTEXIST | FOS_DONTADDTORECENT
+    flags |= FOS_PICKFOLDERS if folder else (FOS_FILEMUSTEXIST if direction == 'in' else FOS_OVERWRITEPROMPT)
+    _check(_invoke(dialog, 9, (UINT,), flags), 'options')
+    title = 'Select a folder' if folder else ('Select a BCP input file' if direction == 'in' else 'Save a BCP output file')
+    if text_only:
+        title = 'Select a text file'
+    _check(_invoke(dialog, 17, (ctypes.c_wchar_p,), title), 'title')
+    if not folder:
+        name, pattern = ('Text files (*.txt;*.csv;*.log;*.sql;*.dat)', '*.txt;*.csv;*.log;*.sql;*.dat') if text_only else (
+            'BCP and text files (*.bcp;*.txt)', '*.bcp;*.txt')
+        filters = (COMDLG_FILTERSPEC * 2)((name, pattern), ('All files (*.*)', '*.*'))
+        _check(_invoke(dialog, 4, (UINT, ctypes.POINTER(COMDLG_FILTERSPEC)), 2, filters), 'file filters')
+        _check(_invoke(dialog, 5, (UINT,), 1), 'file filter index')
+        _check(_invoke(dialog, 22, (ctypes.c_wchar_p,), 'txt' if text_only else 'bcp'), 'default extension')
+        if suggested_name is not None:
+            _check(_invoke(dialog, 15, (ctypes.c_wchar_p,), suggested_name), 'suggested filename')
+
+
+def _show_dialog(*, folder=False, direction='in', initial_directory=None, suggested_name=None, text_only=False):
+    shell, ole = _load_libraries()
+    _check(ole.CoInitializeEx(None, 2), 'initialization')  # COINIT_APARTMENTTHREADED
+    dialog, item, initial, path = PVOID(), PVOID(), PVOID(), PVOID()
+    try:
+        clsid, iid = (CLSID_FILE_SAVE_DIALOG, IID_FILE_SAVE_DIALOG) if direction == 'out' else (CLSID_FILE_OPEN_DIALOG, IID_FILE_OPEN_DIALOG)
+        _check(ole.CoCreateInstance(ctypes.byref(clsid), None, 1, ctypes.byref(iid), ctypes.byref(dialog)), 'dialog creation')
+        if not dialog:
+            raise ValueError('Windows selection returned no dialog.')
+        _configure_dialog(dialog, folder=folder, direction=direction, suggested_name=suggested_name, text_only=text_only)
+        if initial_directory:
+            try:
+                # The remembered location is only a hint: moved/deleted folders
+                # and Shell navigation failures must still allow reselection.
+                resolved = shell.SHCreateItemFromParsingName(
+                    initial_directory, None, ctypes.byref(IID_SHELL_ITEM), ctypes.byref(initial))
+                if ctypes.c_int32(resolved).value >= 0 and initial:
+                    _invoke(dialog, 12, (PVOID,), initial)  # best-effort SetFolder
+            finally:
+                _release(initial)
+                initial = PVOID()
+        shown = _invoke(dialog, 3, (PVOID,), None)  # IModalWindow.Show
+        if shown & 0xFFFFFFFF == ERROR_CANCELLED:
+            return {'cancelled': True}
+        _check(shown, 'dialog')
+        _check(_invoke(dialog, 20, (PPVOID,), ctypes.byref(item)), 'result')
+        if not item:
+            raise ValueError('Windows selection returned no filesystem item.')
+        _check(_invoke(item, 5, (UINT, PPVOID), SIGDN_FILESYSPATH, ctypes.byref(path)), 'filesystem path')
+        chosen = ctypes.wstring_at(path) if path else ''
+        if not chosen:
+            raise ValueError('The selected item does not have a filesystem path.')
+        return {'cancelled': False, 'path': chosen}
+    finally:
+        if path:
+            ole.CoTaskMemFree(path)
+        _release(item)
+        _release(dialog)
+        ole.CoUninitialize()  # Both S_OK and S_FALSE require one balance.
 
 
 def pick_directory(initial_directory: str | None = None) -> dict:
-    """Choose a filesystem folder in an owned worker with a COM STA dialog."""
-    if sys.platform != "win32":
-        raise ValueError("Native folder selection requires the Windows desktop application.")
+    """Choose a filesystem folder with IFileOpenDialog + FOS_PICKFOLDERS."""
+    if sys.platform != 'win32':
+        raise ValueError('Native folder selection requires the Windows desktop application.')
     if initial_directory is not None and (
-        not isinstance(initial_directory, str) or "\0" in initial_directory or len(initial_directory) >= MAX_PATH_CHARS
+        not isinstance(initial_directory, str) or '\0' in initial_directory or len(initial_directory) >= MAX_PATH_CHARS
     ):
-        raise ValueError("The initial folder path is invalid.")
-    shell, ole, user = _load_directory_libraries()
-    ole.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
-    ole.CoInitializeEx.restype = ctypes.c_int32
-    ole.CoUninitialize.argtypes = []
-    ole.CoUninitialize.restype = None
-    ole.CoTaskMemFree.argtypes = [ctypes.c_void_p]
-    ole.CoTaskMemFree.restype = None
-    shell.SHBrowseForFolderW.argtypes = [ctypes.POINTER(BROWSEINFOW)]
-    shell.SHBrowseForFolderW.restype = ctypes.c_void_p
-    shell.SHGetPathFromIDListEx.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint32, ctypes.c_uint32]
-    shell.SHGetPathFromIDListEx.restype = ctypes.c_int32
-    user.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_size_t, ctypes.c_ssize_t]
-    user.SendMessageW.restype = ctypes.c_ssize_t
-    if ole.CoInitializeEx(None, 2) < 0:  # COINIT_APARTMENTTHREADED
-        raise ValueError("Windows folder selection initialization failed.")
-    pidl = None
-    try:
-        initial = ctypes.create_unicode_buffer(initial_directory or "")
-        display = ctypes.create_unicode_buffer(MAX_PATH_CHARS)
-        @BFFCALLBACK
-        def callback(hwnd, message, _parameter, data):
-            if message == 1 and initial_directory:  # BFFM_INITIALIZED
-                user.SendMessageW(hwnd, 0x467, 1, data)  # BFFM_SETSELECTIONW
-            return 0
-        request = BROWSEINFOW()
-        request.pszDisplayName = display
-        request.lpszTitle = "Select a folder"
-        request.ulFlags = 0x01 | 0x10 | 0x40  # filesystem folders, editable path, new dialog
-        request.lpfn = callback
-        request.lParam = ctypes.cast(initial, ctypes.c_void_p).value
-        pidl = shell.SHBrowseForFolderW(ctypes.byref(request))
-        if not pidl:
-            return {"cancelled": True}
-        chosen = ctypes.create_unicode_buffer(MAX_PATH_CHARS)
-        if not shell.SHGetPathFromIDListEx(pidl, chosen, MAX_PATH_CHARS, 0) or not chosen.value:
-            raise ValueError("The selected folder does not have a filesystem path.")
-        return {"cancelled": False, "path": chosen.value}
-    finally:
-        if pidl:
-            ole.CoTaskMemFree(pidl)
-        ole.CoUninitialize()
+        raise ValueError('The initial folder path is invalid.')
+    return _show_dialog(folder=True, initial_directory=initial_directory)
 
 
 def pick_file(direction: str, suggested_name: str | None = None, *, text_only: bool = False) -> dict:
-    """Return a real Windows path, or an explicit cancellation result."""
-    if not isinstance(direction, str) or direction.lower() not in {"in", "out"}:
+    """Open an existing file, or choose a save path with IFileSaveDialog."""
+    if not isinstance(direction, str) or direction.lower() not in {'in', 'out'}:
         raise ValueError("File direction must be 'in' or 'out'.")
     direction = direction.lower()
-    if sys.platform != "win32":
-        raise ValueError("Native file selection requires the Windows desktop application.")
-
-    library = _load_dialog_library()
-    for name in ("GetOpenFileNameW", "GetSaveFileNameW"):
-        function = getattr(library, name)
-        function.argtypes = [ctypes.POINTER(OPENFILENAMEW)]
-        function.restype = ctypes.c_int32
-    library.CommDlgExtendedError.argtypes = []
-    library.CommDlgExtendedError.restype = ctypes.c_uint32
-
-    buffer = ctypes.create_unicode_buffer(MAX_PATH_CHARS)
+    if sys.platform != 'win32':
+        raise ValueError('Native file selection requires the Windows desktop application.')
+    if text_only and direction != 'in':
+        raise ValueError('Text inspection only opens existing files.')
     if suggested_name is not None:
-        if not isinstance(suggested_name, str) or "\0" in suggested_name:
-            raise ValueError("Suggested filename is invalid.")
-        # A suggested table filename should not change the dialog's directory.
-        filename = ntpath.basename(suggested_name)
-        if len(filename) >= MAX_PATH_CHARS:
-            raise ValueError("Suggested filename is too long.")
-        buffer.value = filename
-
-    request = OPENFILENAMEW()
-    request.lStructSize = ctypes.sizeof(OPENFILENAMEW)
-    request.lpstrFilter = "BCP and text files (*.bcp;*.txt)\0*.bcp;*.txt\0All files (*.*)\0*.*\0\0"
-    request.nFilterIndex = 1
-    request.lpstrFile = buffer
-    request.nMaxFile = MAX_PATH_CHARS
-    request.lpstrTitle = "Select a BCP input file" if direction == "in" else "Save a BCP output file"
-    request.lpstrDefExt = "bcp"
-    if text_only:
-        if direction != 'in':
-            raise ValueError('Text inspection only opens existing files.')
-        request.lpstrFilter = 'Text files (*.txt;*.csv;*.log;*.sql;*.dat)\0*.txt;*.csv;*.log;*.sql;*.dat\0All files (*.*)\0*.*\0\0'
-        request.lpstrTitle = 'Select a text file'
-        request.lpstrDefExt = 'txt'
-    request.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | OFN_DONTADDTORECENT
-    request.Flags |= OFN_FILEMUSTEXIST if direction == "in" else OFN_OVERWRITEPROMPT
-    function = library.GetOpenFileNameW if direction == "in" else library.GetSaveFileNameW
-    if function(ctypes.byref(request)):
-        if not buffer.value:
-            raise ValueError("The file dialog returned an empty path.")
-        return {"cancelled": False, "path": buffer.value}
-    error = library.CommDlgExtendedError()
-    if error:
-        raise ValueError(f"Windows file selection failed (0x{error:04x}).")
-    return {"cancelled": True}
+        if not isinstance(suggested_name, str) or '\0' in suggested_name:
+            raise ValueError('Suggested filename is invalid.')
+        suggested_name = ntpath.basename(suggested_name)
+        if len(suggested_name) >= MAX_PATH_CHARS:
+            raise ValueError('Suggested filename is too long.')
+    return _show_dialog(direction=direction, suggested_name=suggested_name, text_only=text_only)

@@ -100,7 +100,8 @@ def local_comparison_worker_checks(executable, directory):
     """Read real local files through the actual frozen worker, without a dialog double."""
     import sys
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
-    from nice_tools.local_compare_worker import folder_descriptor
+    from nice_tools.local_compare_worker import folder_descriptor, _report_directory
+    from nice_tools.local_compare_diff import read_page
     left,right=Path(directory)/'로컬 before',Path(directory)/'로컬 after'
     left.mkdir();right.mkdir()
     (left/'nested').mkdir();(right/'nested').mkdir()
@@ -114,7 +115,7 @@ def local_comparison_worker_checks(executable, directory):
     (right/'large.txt').write_bytes(content+b'y')
     (left/'invalid.txt').write_bytes(b'binary\0invalid')
     (right/'invalid.txt').write_bytes(b'binary\0invalid')
-    (right/'limit.txt').write_text(''.join(f'new {i}\n' for i in range(1000)),encoding='utf-8')
+    (right/'limit.txt').write_text(''.join(f'new {i}\n' for i in range(1001)),encoding='utf-8')
     shared='202609|1011156045|CT9701|101'
     for root,prefix,middle in ((left,'old',['removed',shared]),(right,'new',[shared,'inserted'])):
         records=([f'{prefix} {i}' for i in range(300)] + ['before'] + middle
@@ -127,23 +128,26 @@ def local_comparison_worker_checks(executable, directory):
     assert result['summary']=={'total':6,'same':1,'different':3,'left_only':0,'right_only':1,'error':1}, 'Frozen local full-file/encoding comparison failed'
     reports={item['path']:item.get('reports',{}) for item in result['results']}
     assert reports['changed.txt']['compared']['state']=='ready', 'Frozen small report was not prepared'
-    assert reports['limit.txt']['compared']['state']=='deferred', 'Frozen exact1000 threshold was not deferred'
+    assert reports['limit.txt']['compared']['state']=='ready', 'Frozen large report was not prepared initially'
     query={'operation':'diff','cache_dir':str(cache),'path':'changed.txt','mode':'compared','page':0}
     page=worker_request(executable,query,directory,worker='--comparison-worker')
     assert page['additions']==225 and page['deletions']==225 and len(page['lines'])==200 and page['pages']==3
     last=worker_request(executable,{**query,'page':2},directory,worker='--comparison-worker')
     assert last['lines'][-1]['text']=='new 224' and last['total_lines']==451, 'Frozen cached diff lost its final line'
-    deferred=worker_request(executable,{**query,'path':'alignment.txt'},directory,worker='--comparison-worker')
-    assert deferred['state']=='deferred' and deferred['lines']==[], 'Frozen lookup started deferred analysis'
-    alignment=worker_request(executable,{**query,'path':'alignment.txt','page':3,'analyze':True},directory,worker='--comparison-worker')
+    assert reports['alignment.txt']['compared']['state']=='ready'
+    alignment=worker_request(executable,{**query,'path':'alignment.txt','page':3},directory,worker='--comparison-worker')
     assert (alignment['additions'],alignment['deletions'])==(601,601), 'Frozen diff inflated change counts'
     assert [row for row in alignment['lines'] if row['text']==shared]==[
         {'kind':'context','text':shared,'old_line':303,'new_line':302}], 'Frozen diff changed an identical shifted record'
-    assert alignment['truncated'] and alignment['total_lines']==1000 and alignment['pages']==5
-    limit=worker_request(executable,{**query,'path':'limit.txt','analyze':True},directory,worker='--comparison-worker')
-    assert limit['additions']==1000 and limit['deletions']==0 and limit['truncated'] and limit['full_total_lines']==1001
-    tail=worker_request(executable,{**query,'path':'limit.txt','page':4},directory,worker='--comparison-worker')
-    assert len(tail['lines'])==200 and tail['lines'][-1]['text']=='new 998', 'Frozen report exceeded/lost display cap'
+    assert alignment['truncated'] and alignment['displayed_changes']==1000 and alignment['total_lines']>1000
+    limit=worker_request(executable,{**query,'path':'limit.txt'},directory,worker='--comparison-worker')
+    assert limit['additions']==1001 and limit['deletions']==0 and limit['truncated'] and limit['full_total_lines']==1002
+    tail=worker_request(executable,{**query,'path':'limit.txt','page':5},directory,worker='--comparison-worker')
+    assert len(tail['lines'])==1 and tail['lines'][-1]['text']=='new 999', 'Frozen report did not retain1000 changes'
+    archive=_report_directory(cache,'limit.txt','compared')/'full'
+    complete=read_page(archive,0)
+    assert complete['total_lines']==1002 and complete['additions']==1001
+    assert read_page(archive,complete['pages']-1)['lines'][-1]['text']=='new 1000', 'Frozen full report lost later changes'
     (right/'changed.txt').write_bytes(b'edited after comparison\n')
     failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
     assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'
@@ -294,6 +298,9 @@ def verify(path: Path, allow_non_windows: bool = False, sap_test_clients: Path |
             )), 'Frozen launcher emitted IQ credentials'
             print('IQ frozen launcher console: sanitized connection failure and phase passed; no live IQ export tested.')
             local_comparison_worker_checks(executable,directory)
+            if os.name == 'nt':
+                from verify_modern_dialogs import check_dialogs
+                check_dialogs(executable,directory)
             text_inspection_worker_checks(executable,directory)
             if process.poll() is not None:
                 raise RuntimeError("Executable exited unexpectedly")

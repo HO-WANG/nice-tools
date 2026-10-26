@@ -172,7 +172,7 @@ def wait_until(predicate):
     pytest.fail('Worker did not reach its synchronization point')
 
 
-def blocking_manager(tmp_path):
+def blocking_manager(tmp_path, monkeypatch):
     """Real workers use files as cross-process events, never duration sleeps."""
     paths = {name: tmp_path / name for name in ('hold-compare', 'compare-started', 'diff-started', 'release-diff')}
     script = tmp_path / 'blocking-worker.py'
@@ -184,11 +184,15 @@ def blocking_manager(tmp_path):
         "if p['operation']=='compare' and hold.exists():\n"
         f"    Path({str(paths['compare-started'])!r}).write_text('started')\n"
         "    while hold.exists(): time.sleep(.005)\n"
-        "if p['operation']=='diff':\n"
-        f"    Path({str(paths['diff-started'])!r}).write_text('started')\n"
-        f"    while not Path({str(paths['release-diff'])!r}).exists(): time.sleep(.005)\n"
         "result=execute(p)\nprint(json.dumps({'event':'result','result':result}),flush=True)\n",
         encoding='utf-8')
+    original = jobs().execute
+    def cached_read(payload):
+        if not paths['release-diff'].exists():
+            paths['diff-started'].touch()
+            wait_until(paths['release-diff'].exists)
+        return original(payload)
+    monkeypatch.setattr(jobs(), 'execute', cached_read)
     return jobs().ComparisonManager(worker_command=[sys.executable, str(script)]), paths
 
 
@@ -197,7 +201,7 @@ def start_diff_thread(manager, session, handle):
     results, errors = [], []
     def run():
         try:
-            results.append(manager.diff(session, handle, 'data.txt', analyze=True))
+            results.append(manager.diff(session, handle, 'data.txt'))
         except Exception as error:
             errors.append(error)
     thread = threading.Thread(target=run)
@@ -206,7 +210,7 @@ def start_diff_thread(manager, session, handle):
 
 
 def test_cancelling_new_compare_preserves_older_job_diff(tmp_path, monkeypatch):
-    manager, events = blocking_manager(tmp_path)
+    manager, events = blocking_manager(tmp_path, monkeypatch)
     diff_thread = None
     try:
         session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
@@ -234,7 +238,7 @@ def test_cancelling_new_compare_preserves_older_job_diff(tmp_path, monkeypatch):
 
 def test_busy_diff_fails_promptly_with_retry_guidance(tmp_path, monkeypatch):
     import threading
-    manager, events = blocking_manager(tmp_path)
+    manager, events = blocking_manager(tmp_path, monkeypatch)
     first_thread = second_thread = None
     done, errors = threading.Event(), []
     try:
@@ -267,9 +271,9 @@ def test_busy_diff_fails_promptly_with_retry_guidance(tmp_path, monkeypatch):
                 thread.join(5)
 
 
-def test_evicting_old_job_kills_its_diff_and_cleans_cache(tmp_path, monkeypatch):
+def test_eviction_waits_for_cached_read_then_cleans_cache(tmp_path, monkeypatch):
     import threading
-    manager, events = blocking_manager(tmp_path)
+    manager, events = blocking_manager(tmp_path, monkeypatch)
     diff_thread = start_thread = None
     done, handles, start_errors = threading.Event(), [], []
     try:
@@ -290,7 +294,10 @@ def test_evicting_old_job_kills_its_diff_and_cleans_cache(tmp_path, monkeypatch)
                 done.set()
         start_thread = threading.Thread(target=third)
         start_thread.start()
-        assert done.wait(3), 'Eviction waited for the old diff instead of terminating its worker'
+        wait_until(lambda: old_handle not in manager.sessions[session]['jobs'])
+        assert old_cache.exists() and not done.is_set(), 'Eviction removed a cache still being read'
+        events['release-diff'].touch()
+        assert done.wait(3)
         diff_thread.join(3)
         assert diff_errors and not diff_thread.is_alive()
         assert handles and not start_errors
@@ -306,9 +313,10 @@ def test_evicting_old_job_kills_its_diff_and_cleans_cache(tmp_path, monkeypatch)
                 thread.join(5)
 
 
-def test_closing_session_kills_all_job_workers_and_cleans_ownership(tmp_path, monkeypatch):
-    manager, events = blocking_manager(tmp_path)
-    diff_thread = None
+def test_close_terminates_worker_and_waits_for_cached_reader_before_cleanup(tmp_path, monkeypatch):
+    import threading
+    manager, events = blocking_manager(tmp_path, monkeypatch)
+    diff_thread = close_thread = None
     try:
         session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
         old_handle = manager.start(session, left, right, {})['job']
@@ -319,8 +327,14 @@ def test_closing_session_kills_all_job_workers_and_cleans_ownership(tmp_path, mo
         manager.start(session, left, right, {})
         wait_until(events['compare-started'].exists)
         caches = [Path(job['cache_dir']) for job in manager.sessions[session]['jobs'].values()]
-        assert len(manager.processes) == 2
-        manager.close_session(session)
+        assert len(manager.processes) == 1, 'Cached read started a worker'
+        close_thread = threading.Thread(target=manager.close_session, args=(session,))
+        close_thread.start()
+        wait_until(lambda: not manager.sessions)
+        assert caches[0].exists(), 'Close removed a cache still being read'
+        events['release-diff'].touch()
+        close_thread.join(3)
+        assert not close_thread.is_alive()
         diff_thread.join(3)
         assert not diff_thread.is_alive() and errors
         assert not manager.sessions and not manager.processes and not manager.process_jobs
@@ -331,6 +345,8 @@ def test_closing_session_kills_all_job_workers_and_cleans_ownership(tmp_path, mo
         manager.close()
         if diff_thread:
             diff_thread.join(5)
+        if close_thread:
+            close_thread.join(5)
 
 
 def test_cached_pages_skip_worker_startup_and_revalidate_sources(tmp_path, monkeypatch):

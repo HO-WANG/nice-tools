@@ -13,13 +13,10 @@ from pathlib import Path
 import shutil
 from typing import Callable
 
-from rapidfuzz.distance import Indel
-
 from .diff import changed_groups
 
 PAGE_SIZE = 200
-AUTO_DIFF_THRESHOLD = 1000
-MAX_DIFF_LINES = 1000
+MAX_DIFF_CHANGES = 1000
 _METADATA = 'metadata.json'
 
 
@@ -81,23 +78,10 @@ def prepare_diff(
     new_exists: bool,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict:
-    """Build small reports once; defer large edits without aligning or writing.
-
-    The bounded insertion/deletion distance counts a replacement twice and
-    preserves duplicate-line LCS semantics. Both complete normalized inputs are
-    strictly read before deciding, and ready reports reuse those loaded lists.
-    """
-    old, new = _load_lines(left_normalized, right_normalized, old_exists, new_exists, cancelled)
-    if abs(len(old) - len(new)) >= AUTO_DIFF_THRESHOLD:
-        distance = AUTO_DIFF_THRESHOLD
-    else:
-        distance = Indel.distance(old, new, score_cutoff=AUTO_DIFF_THRESHOLD - 1)
-    _check_cancelled(cancelled)
-    if distance >= AUTO_DIFF_THRESHOLD:
-        return {'state': 'deferred', 'threshold': AUTO_DIFF_THRESHOLD}
-    metadata = _build_diff(lambda: (old, new), directory, path=path,
-                           old_exists=old_exists, new_exists=new_exists,
-                           cancelled=cancelled, max_lines=MAX_DIFF_LINES)
+    """Build the complete report and first 1000 changed entries during compare."""
+    metadata = build_diff(left_normalized, right_normalized, directory, path=path,
+                          old_exists=old_exists, new_exists=new_exists,
+                          cancelled=cancelled, max_changes=MAX_DIFF_CHANGES, keep_full=True)
     return metadata | {'state': 'ready'}
 
 
@@ -111,31 +95,63 @@ def build_diff(
     new_exists: bool,
     cancelled: Callable[[], bool] | None = None,
     max_lines: int | None = None,
+    max_changes: int | None = None,
+    keep_full: bool = False,
 ) -> dict:
-    """Create a complete cache in a new/empty owned directory.
+    """Create paginated reports in a new/empty owned directory.
 
-    Existing nonempty directories are rejected unchanged. Failed or cancelled
-    builds remove their owned directory. Metadata is published last, after every
-    page has closed. Even an empty diff has page zero. Cancellation is checked
-    between reads and emitted rows; callers can kill their owned worker while
-    the existing matcher is running. An optional display cap limits stored rows
-    including context/hunks; full-file additions and deletions stay exact.
+    By default retain the complete existing representation. ``max_changes``
+    limits additions/deletions in the preview, excluding headings/context. If
+    changes exceed that budget, stop immediately after the last allowed change;
+    otherwise retain every context row. ``keep_full`` streams an independent
+    complete report under ``full/`` before publishing preview metadata.
+    ``max_lines`` retains the legacy all-row cap and cannot combine with a
+    change cap. Failure/cancellation removes the entire owned directory.
     """
     return _build_diff(
         lambda: _load_lines(left_normalized, right_normalized, old_exists, new_exists, cancelled),
         directory, path=path, old_exists=old_exists, new_exists=new_exists,
-        cancelled=cancelled, max_lines=max_lines)
+        cancelled=cancelled, max_lines=max_lines, max_changes=max_changes, keep_full=keep_full)
 
 
-def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelled, max_lines):
-    if max_lines is not None and (type(max_lines) is not int or max_lines < 0):
-        raise ValueError('Diff display limit must be a nonnegative integer.')
+class _PageWriter:
+    """Retain at most one 200-row page while streaming a report to disk."""
+
+    def __init__(self, directory):
+        self.directory = directory
+        self.rows = []
+        self.pages = 0
+        self.total_lines = 0
+
+    def append(self, row):
+        self.rows.append(row)
+        self.total_lines += 1
+        if len(self.rows) == PAGE_SIZE:
+            self._flush()
+
+    def _flush(self):
+        _write_json(_page_path(self.directory, self.pages), self.rows)
+        self.pages += 1
+        self.rows.clear()
+
+    def finish(self):
+        if self.rows or not self.pages:
+            self._flush()
+        return {'total_lines': self.total_lines, 'page_size': PAGE_SIZE, 'pages': self.pages}
+
+
+def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelled,
+                max_lines, max_changes, keep_full):
+    for limit in (max_lines, max_changes):
+        if limit is not None and (type(limit) is not int or limit < 0):
+            raise ValueError('Diff display limit must be a nonnegative integer.')
+    if max_lines is not None and max_changes is not None:
+        raise ValueError('Choose either a row limit or a change limit.')
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
         raise FileExistsError('Diff cache directory must be empty.')
-    # Claim the empty directory before entering cleanup ownership. Parent callers
-    # serialize cache builds; exclusive creation also rejects concurrent claims.
+    # Claim before taking cleanup ownership; reject concurrent builders unchanged.
     marker = directory / '.building'
     marker.touch(exist_ok=False)
     try:
@@ -144,58 +160,92 @@ def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelle
         _check_cancelled(cancelled)
         groups = changed_groups(old, new)
         _check_cancelled(cancelled)
-        page_rows = []
-        pages = total_lines = full_total_lines = additions = deletions = 0
-
-        def append(kind, text, old_line=None, new_line=None):
-            nonlocal pages, total_lines
-            _check_cancelled(cancelled)
-            if max_lines is not None and total_lines >= max_lines:
-                return
-            page_rows.append({'kind': kind, 'text': text, 'old_line': old_line, 'new_line': new_line})
-            total_lines += 1
-            if len(page_rows) == PAGE_SIZE:
-                _write_json(_page_path(directory, pages), page_rows)
-                pages += 1
-                page_rows.clear()
-
-        def display_stop(start, stop):
-            return stop if max_lines is None else min(stop, start + max_lines - total_lines)
-
+        # Count compact opcodes before writing to distinguish exactly-at-limit
+        # reports (which keep trailing context) from genuinely truncated ones.
+        additions = deletions = 0
+        full_total_lines = len(groups)
         for group in groups:
             _check_cancelled(cancelled)
-            first, last = group[0], group[-1]
-            full_total_lines += 1
-            append('hunk', f'@@ -{_span(first[1], last[2])} +{_span(first[3], last[4])} @@')
             for tag, i1, i2, j1, j2 in group:
                 _check_cancelled(cancelled)
                 if tag == 'equal':
                     full_total_lines += i2 - i1
+                if tag in ('delete', 'replace'):
+                    deletions += i2 - i1
+                    full_total_lines += i2 - i1
+                if tag in ('insert', 'replace'):
+                    additions += j2 - j1
+                    full_total_lines += j2 - j1
+        change_truncated = max_changes is not None and additions + deletions > max_changes
+        displayed_changes = 0
+        preview = _PageWriter(directory)
+        full = None
+        if keep_full:
+            (directory / 'full').mkdir()
+            full = _PageWriter(directory / 'full')
+
+        def preview_available():
+            return ((max_lines is None or preview.total_lines < max_lines)
+                    and (not change_truncated or displayed_changes < max_changes))
+
+        def append(kind, text, old_line=None, new_line=None):
+            nonlocal displayed_changes
+            _check_cancelled(cancelled)
+            show = preview_available()
+            if full is None and not show:
+                return
+            row = {'kind': kind, 'text': text, 'old_line': old_line, 'new_line': new_line}
+            if full is not None:
+                full.append(row)
+            if show:
+                preview.append(row)
+                if kind in ('add', 'delete'):
+                    displayed_changes += 1
+
+        def display_stop(start, stop, *, change=False):
+            if full is not None:
+                return stop
+            if not preview_available():
+                return start
+            if max_lines is not None:
+                return min(stop, start + max_lines - preview.total_lines)
+            if change and change_truncated:
+                return min(stop, start + max_changes - displayed_changes)
+            return stop
+
+        for group in groups:
+            _check_cancelled(cancelled)
+            first, last = group[0], group[-1]
+            append('hunk', f'@@ -{_span(first[1], last[2])} +{_span(first[3], last[4])} @@')
+            for tag, i1, i2, j1, j2 in group:
+                _check_cancelled(cancelled)
+                if tag == 'equal':
                     for i in range(i1, display_stop(i1, i2)):
                         j = j1 + i - i1
                         append('context', old[i], i + 1, j + 1)
                 if tag in ('delete', 'replace'):
-                    deletions += i2 - i1
-                    full_total_lines += i2 - i1
-                    for i in range(i1, display_stop(i1, i2)):
+                    for i in range(i1, display_stop(i1, i2, change=True)):
                         append('delete', old[i], i + 1)
                 if tag in ('insert', 'replace'):
-                    additions += j2 - j1
-                    full_total_lines += j2 - j1
-                    for j in range(j1, display_stop(j1, j2)):
+                    for j in range(j1, display_stop(j1, j2, change=True)):
                         append('add', new[j], new_line=j + 1)
-        if page_rows or not pages:
-            _write_json(_page_path(directory, pages), page_rows)
-            pages += 1
-        metadata = {
+        common = {
             'path': path, 'old_exists': old_exists, 'new_exists': new_exists,
             'identical': old_exists and new_exists and old == new,
             'additions': additions, 'deletions': deletions,
-            'total_lines': total_lines, 'page_size': PAGE_SIZE, 'pages': pages,
         }
+        metadata = common | preview.finish()
         if max_lines is not None:
-            metadata.update(display_limit=max_lines, truncated=full_total_lines > total_lines,
+            metadata.update(display_limit=max_lines, truncated=full_total_lines > preview.total_lines,
                             full_total_lines=full_total_lines)
+        if max_changes is not None:
+            metadata.update(change_limit=max_changes, displayed_changes=displayed_changes,
+                            truncated=change_truncated, full_total_lines=full_total_lines)
+        if full is not None:
+            full_metadata = common | full.finish()
+            _check_cancelled(cancelled)
+            _write_json(directory / 'full' / _METADATA, full_metadata)
+            metadata.update(full_total_lines=full.total_lines, full_pages=full.pages)
         _check_cancelled(cancelled)
         marker.unlink()
         _write_json(directory / _METADATA, metadata)

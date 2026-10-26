@@ -22,7 +22,6 @@ let jobRequest = 0;
 let pollTimer = null;
 let pageClosed = false;
 let diffRequestedPage = 0;
-let diffRequestedAnalyze = false;
 
 async function comparisonAPI(endpoint, data, extra = {}) {
   const response = await fetch(`/api/comparison/${endpoint}`, {
@@ -294,13 +293,10 @@ function clearDiff() {
   diffController = null;
   selectedPath = null;
   diffData = null;
-  diffRequestedAnalyze = false;
   $("diff-content").hidden = true;
   $("diff-path").hidden = true;
   $("diff-note").hidden = true;
   $("diff-limit-note").hidden = true;
-  $("diff-analyze").hidden = true;
-  $("diff-analyze").disabled = true;
   $("diff-message").hidden = false;
   $("diff-message").textContent = "목록에서 파일을 선택하세요.";
   $("diff-retry").hidden = true;
@@ -458,7 +454,7 @@ function renderDiffPage() {
   document.querySelector(".diff-scroll").scrollTop = 0;
 }
 
-async function showDiff(path, page = 0, analyze = false) {
+async function showDiff(path, page = 0) {
   diffController?.abort();
   const controller = new AbortController();
   diffController = controller;
@@ -466,7 +462,6 @@ async function showDiff(path, page = 0, analyze = false) {
   diffData = null;
   diffPage = page;
   diffRequestedPage = page;
-  diffRequestedAnalyze = analyze;
   for (const button of $("result-body").querySelectorAll("button[data-path]")) {
     const selected = button.dataset.path === path;
     button.setAttribute("aria-pressed", String(selected));
@@ -478,33 +473,23 @@ async function showDiff(path, page = 0, analyze = false) {
   $("diff-content").hidden = true;
   $("diff-code").replaceChildren();
   $("diff-retry").hidden = true;
-  $("diff-analyze").hidden = true;
-  $("diff-analyze").disabled = true;
   $("diff-limit-note").hidden = true;
   $("diff-note").hidden = false;
   const original = $("diff-mode").value === "original";
   $("diff-note").textContent = original ? "원본 줄 기준 · 줄바꿈 형식과 마지막 줄바꿈 유무는 무시합니다." : "옵션 적용 후 줄 기준 · 정렬 시 줄 번호도 정렬된 순서입니다.";
   $("diff-message").hidden = false;
-  $("diff-message").textContent = analyze ? "상세 내용을 분석하고 있습니다…" : "변경 내용을 읽고 있습니다…";
+  $("diff-message").textContent = "변경 내용을 읽고 있습니다…";
   $("diff-panel").setAttribute("aria-busy", "true");
   try {
     const session = comparisonSession, job = completedJob;
     if (!session || !job) throw new Error("파일 비교를 다시 실행하세요.");
-    const data = await comparisonAPI("diff", { session, job, path, mode: original ? "original" : "compared", page, ...(analyze ? { analyze: true } : {}) }, { signal: controller.signal });
+    const data = await comparisonAPI("diff", { session, job, path, mode: original ? "original" : "compared", page }, { signal: controller.signal });
     if (diffController !== controller) return;
     if (!data || !Array.isArray(data.lines)) throw new Error("변경 내용을 읽지 못했습니다.");
     diffData = data;
-    if (data.state === "deferred") {
-      diffRequestedAnalyze = false;
-      $("diff-message").textContent = `추가·삭제 합계가 ${Number(data.threshold || 1000).toLocaleString("ko-KR")}줄 이상입니다. 상세 내용 분석 버튼을 누르면 줄별 변경 내용을 준비합니다.`;
-      $("diff-analyze").hidden = false;
-      $("diff-analyze").disabled = false;
-      return;
-    }
-    diffRequestedAnalyze = false;
     $("diff-content").hidden = false;
     $("diff-limit-note").hidden = !data.truncated;
-    $("diff-limit-note").textContent = `상세 내용은 문맥을 포함해 처음 ${Number(data.display_limit || 1000).toLocaleString("ko-KR")}줄까지 표시합니다. 파일 비교 결과와 추가·삭제 수는 전체 내용을 기준으로 합니다.`;
+    $("diff-limit-note").textContent = `전체 상세 보고서 기록 완료 · 화면은 앞 ${Number(data.change_limit || 1000).toLocaleString("ko-KR")}개 변경 표시 (문맥 별도). 추가·삭제 수는 전체 내용을 기준으로 합니다.`;
     $("diff-added").textContent = `+${data.additions.toLocaleString("ko-KR")} 추가`;
     $("diff-deleted").textContent = `−${data.deletions.toLocaleString("ko-KR")} 삭제`;
     $("diff-headers").textContent = `diff --git a/${path} b/${path}\n--- ${data.old_exists ? `a/${path}` : "/dev/null"}\n+++ ${data.new_exists ? `b/${path}` : "/dev/null"}`;
@@ -540,10 +525,7 @@ $("result-body").addEventListener("click", (event) => {
   if (button) showDiff(button.dataset.path);
 });
 $("diff-mode").addEventListener("change", () => { if (selectedPath) showDiff(selectedPath); });
-$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath, diffRequestedPage, diffRequestedAnalyze); });
-$("diff-analyze").addEventListener("click", () => {
-  if (selectedPath && diffData?.state === "deferred" && !$("diff-analyze").disabled) showDiff(selectedPath, 0, true);
-});
+$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath, diffRequestedPage); });
 $("diff-prev").addEventListener("click", () => showDiff(selectedPath, diffPage - 1));
 $("diff-next").addEventListener("click", () => showDiff(selectedPath, diffPage + 1));
 $("reset-options").addEventListener("click", () => {
