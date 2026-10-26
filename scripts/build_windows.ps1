@@ -31,10 +31,11 @@ try {
     if ($SapTestClients) { $VerificationArgs += @("--sap-test-clients", $SapTestClients) }
     & $BuildPython @VerificationArgs
     if ($LASTEXITCODE -ne 0) { throw "Executable verification failed." }
-    & $BuildPython scripts/package_windows.py dist/nice-tools.exe release/nice-tools.z01
+    & $BuildPython scripts/package_windows.py dist/nice-tools.exe release/nice-tools.z01 --raw-output release/nice-tools-exe.z01
     if ($LASTEXITCODE -ne 0) { throw "Distribution archive verification failed." }
     Write-Host "Verified executable: dist/nice-tools.exe"
     Write-Host "Distribution: release/nice-tools.z01 (rename to .zip to extract)"
+    Write-Host "Distribution: release/nice-tools-exe.z01 (rename to .exe to run)"
 } finally {
     Pop-Location
 }

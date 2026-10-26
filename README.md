@@ -32,12 +32,21 @@ Windows의 디렉토리 비교는 파일을 브라우저로 전송하지 않고 
 
 ## 실행 파일 받기
 
-GitHub의 **Actions → Build Windows executable**에서 성공한 작업을 열고
-`nice-tools-windows-x64` 아티팩트를 내려받습니다.
-GitHub가 내려주는 ZIP을 풀면 **`nice-tools.z01`** 배포 파일이 나옵니다.
+| 직접 다운로드 | 받을 때의 내용 | 사용 방법 |
+|---|---|---|
+| [nice-tools.z01](https://github.com/HO-WANG/nice-tools/releases/latest/download/nice-tools.z01) | 일반 ZIP 압축 | `nice-tools.zip`으로 이름 변경 → 압축 해제 → EXE 실행 |
+| [nice-tools-exe.z01](https://github.com/HO-WANG/nice-tools/releases/latest/download/nice-tools-exe.z01) | EXE 원본 그대로 | `nice-tools.exe`로 이름 변경 → 바로 실행 |
+
+Releases에 첨부된 **`nice-tools.z01`** 파일을 그대로 내려받습니다.
 이 파일을 내부망 PC로 옮긴 뒤 **`nice-tools.zip`으로 이름을 바꾸고** 압축을 풀면
 `nice-tools.exe` 한 파일이 나옵니다. 일반 ZIP의 확장자만 바꾼 것이므로 분할 압축 파일은 아닙니다.
 확장자가 보이지 않으면 Windows 탐색기의 **파일 확장명** 표시를 켜세요.
+압축 해제 없이 사용하려면 **`nice-tools-exe.z01`**을 받아 `nice-tools.exe`로 이름만 바꿉니다.
+두 파일은 같은 검증된 EXE를 제공하는 대안이므로 하나만 받으면 됩니다.
+
+`main` 또는 `v*` 태그의 빌드·검증이 성공하면 Releases에 배포 파일을 자동으로 올립니다.
+Pull Request 검사는 배포하지 않습니다. Actions의 `nice-tools-windows-x64` 아티팩트도
+보관하지만, 일반 사용자는 위 Releases 링크에서 바깥 ZIP 없이 `.z01`을 바로 받으면 됩니다.
 
 `main` 변경, `v*` 태그와 Pull Request에는 Windows 빌드·검증이 자동 실행됩니다.
 Actions의 **Run workflow**로 수동 빌드할 수도 있습니다.

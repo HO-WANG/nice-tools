@@ -2,11 +2,13 @@
 
 Rename .z01 to .zip before extracting. This is one complete archive, not a
 split ZIP volume. Runtime verification must finish before calling this script.
+An optional raw delivery keeps exact EXE bytes under a separate .z01 filename.
 """
 
 import argparse
 import hashlib
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import zipfile
@@ -21,11 +23,14 @@ def digest(stream):
     return result.digest()
 
 
-def package(executable, output):
+def package(executable, output, raw_output=None):
     executable, output = Path(executable).resolve(), Path(output).resolve()
     validate_windows_x64(executable)
     if output.suffix.lower() != '.z01' or output == executable:
         raise ValueError('Distribution archive must have the .z01 extension.')
+    raw_output = Path(raw_output).resolve() if raw_output is not None else None
+    if raw_output is not None and (raw_output.suffix.lower() != '.z01' or raw_output in (executable, output)):
+        raise ValueError('Raw EXE delivery must use a separate .z01 output path.')
     output.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = tempfile.mkstemp(prefix='.nice-tools-package-', dir=output.parent)
     os.close(descriptor)
@@ -39,17 +44,33 @@ def package(executable, output):
             with archive.open('nice-tools.exe') as member, executable.open('rb') as original:
                 # Reading to EOF also verifies the member CRC. No full-file
                 # buffering or unverified EXE substitution is permitted.
-                if digest(member) != digest(original):
+                verified_digest = digest(original)
+                if digest(member) != verified_digest:
                     raise ValueError('Archive EXE differs from the verified source.')
         stage.replace(output)
     finally:
         stage.unlink(missing_ok=True)
     print(f'Verified distribution: {output.name} (ordinary ZIP; contains only nice-tools.exe)')
+    if raw_output is not None:
+        raw_output.parent.mkdir(parents=True, exist_ok=True)
+        descriptor, name = tempfile.mkstemp(prefix='.nice-tools-raw-', dir=raw_output.parent)
+        os.close(descriptor)
+        raw_stage = Path(name)
+        try:
+            shutil.copyfile(executable, raw_stage)
+            with raw_stage.open('rb') as stream:
+                if digest(stream) != verified_digest:
+                    raise ValueError('Raw EXE delivery differs from the verified source.')
+            raw_stage.replace(raw_output)
+        finally:
+            raw_stage.unlink(missing_ok=True)
+        print(f'Verified distribution: {raw_output.name} (raw EXE; rename to nice-tools.exe)')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('executable', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--raw-output', type=Path, help='Also copy exact EXE bytes to a separate .z01 file')
     args = parser.parse_args()
-    package(args.executable, args.output)
+    package(args.executable, args.output, args.raw_output)

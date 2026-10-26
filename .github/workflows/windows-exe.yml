@@ -42,7 +42,76 @@ jobs:
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: nice-tools-windows-x64
-          path: release/nice-tools.z01
+          path: |
+            release/nice-tools.z01
+            release/nice-tools-exe.z01
           compression-level: 0
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    needs: windows-exe
+    if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+    concurrency:
+      group: nice-tools-release
+      cancel-in-progress: false
+    steps:
+      - name: Download the verified z01 package
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: nice-tools-windows-x64
+          path: release
+      - name: Publish the z01 file as a direct release download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == branch ]]; then
+            current_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')
+            if [[ "$current_commit" != "$GITHUB_SHA" ]]; then
+              echo "A newer main build exists; skip publishing this older build."
+              exit 0
+            fi
+            release_tag="build-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT"
+          else
+            release_tag="$GITHUB_REF_NAME"
+          fi
+          notes_file=$(mktemp)
+          trap 'rm -f "$notes_file"' EXIT
+          cat > "$notes_file" <<EOF
+          Download nice-tools.z01 directly, rename it to nice-tools.zip, then extract nice-tools.exe.
+          Or download nice-tools-exe.z01, rename it directly to nice-tools.exe, and run it without extracting.
+
+          Windows source tests, native executable/dialog checks and ZIP integrity verification passed.
+          Source commit: $GITHUB_SHA
+          Verified build: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          EOF
+          python3 - <<'PY'
+          import hashlib, pathlib, zipfile
+          root = pathlib.Path('release')
+          def digest(stream):
+              result = hashlib.sha256()
+              for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                  result.update(chunk)
+              return result.digest()
+          with zipfile.ZipFile(root / 'nice-tools.z01') as archive, (root / 'nice-tools-exe.z01').open('rb') as raw:
+              assert archive.namelist() == ['nice-tools.exe']
+              assert raw.read(2) == b'MZ'
+              raw.seek(0)
+              with archive.open('nice-tools.exe') as member:
+                  assert digest(member) == digest(raw), 'Delivery formats contain different EXEs'
+          PY
+          gh release create "$release_tag" release/nice-tools.z01 release/nice-tools-exe.z01 --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "nice-tools $release_tag" --notes-file "$notes_file" --draft
+          for asset_name in nice-tools.z01 nice-tools-exe.z01; do
+            asset_size=$(gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json assets \
+              --jq ".assets[] | select(.name == \"$asset_name\") | .size")
+            test "$asset_size" = "$(stat -c %s "release/$asset_name")"
+          done
+          gh release edit "$release_tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
