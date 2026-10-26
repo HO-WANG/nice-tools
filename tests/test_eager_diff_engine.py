@@ -11,7 +11,7 @@ def source(tmp_path, name, lines):
     if lines is None:
         return None
     path = tmp_path / name
-    path.write_text(''.join(line + '\n' for line in lines), encoding='utf-8')
+    path.write_text(''.join(line + '\n' for line in lines), encoding='utf-8', newline='\n')
     return path
 
 
