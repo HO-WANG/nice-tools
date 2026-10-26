@@ -10,6 +10,8 @@ from playwright.sync_api import expect, sync_playwright
 
 SUMMARY = {"total": 3, "same": 1, "different": 2, "left_only": 0, "right_only": 0, "error": 0}
 RECORDS = [{"path": "<img onerror=alert(1)>.txt", "status": "different", "reports": {"compared": {"state": "ready"}, "original": {"state": "ready"}}}, {"path": "same.txt", "status": "same"}, {"path": "large.txt", "status": "different", "reports": {"compared": {"state": "ready"}, "original": {"state": "ready"}}}]
+RECORDS.append({"path": "unreadable.txt", "status": "error", "message": "텍스트 인코딩·권한을 확인하고 다시 비교하세요."})
+SUMMARY.update(total=4, error=1)
 
 
 # Context and hunk headings do not consume the 1,000-change preview budget.
@@ -184,7 +186,7 @@ def main():
                 assert set(data) == {"session", "job", "path", "mode", "page"}
                 if state["diff_fail"]:
                     state["diff_fail"] = False
-                    route.fulfill(status=500, json={"detail": "diff 재시도"})
+                    route.fulfill(status=400, json={"detail": "diff 재시도", "code": "report_missing"})
                     return
                 number = data["page"]
                 lines = [{"kind": "add", "new_line": number * 200 + i + 1, "text": f"<img onerror=alert(1)> {number * 200 + i}"} for i in range(200 if number < 2 else 1)]
@@ -225,7 +227,12 @@ def main():
         page.locator("#compare-button").click()
         expect(page.locator("#result-content")).to_be_visible()
         assert [data for name, data, _ in calls if name == "start"][-1]["options"] == {"sort_lines": True, "ignore_whitespace": True, "ignore_start": 1, "ignore_end": 2}
-        expect(page.locator("#result-body tr")).to_have_count(3)
+        expect(page.locator("#result-body tr")).to_have_count(4)
+        before_error_click = len([name for name, _, _ in calls if name == 'diff'])
+        page.get_by_role('button', name='unreadable.txt', exact=True).click()
+        expect(page.locator('#diff-message')).to_contain_text('텍스트 인코딩·권한')
+        expect(page.locator('#diff-mode')).to_be_disabled()
+        assert len([name for name, _, _ in calls if name == 'diff']) == before_error_click
         assert page.locator("#directory-tool img").count() == 0
         page.get_by_role("button", name=RECORDS[0]["path"], exact=True).click()
         expect(page.locator("#diff-code tr")).to_have_count(200)
@@ -245,6 +252,7 @@ def main():
         state["diff_fail"] = True
         page.get_by_role("button", name="same.txt", exact=True).click()
         expect(page.locator("#diff-retry")).to_be_visible()
+        expect(page.locator("#diff-message")).to_contain_text('[report_missing]')
         page.locator("#diff-retry").click()
         expect(page.locator("#diff-code tr")).to_have_count(200)
         page.locator("#diff-mode").select_option("compared")

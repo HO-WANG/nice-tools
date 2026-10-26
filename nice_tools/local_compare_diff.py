@@ -255,10 +255,32 @@ def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelle
         raise
 
 
+class DiffCacheError(ValueError):
+    def __init__(self, code):
+        messages = {'report_missing': 'Diff cache is missing.',
+                    'report_corrupt': 'Incomplete diff cache.',
+                    'report_page': 'Diff page is out of range.'}
+        if code not in messages:
+            raise ValueError('Invalid diff cache error code.')
+        self.code = code
+        super().__init__(messages[code])
+
+
 def read_page(directory: Path, page: int) -> dict:
+    try:
+        return _read_page(directory, page)
+    except DiffCacheError:
+        raise
+    except FileNotFoundError:
+        raise DiffCacheError('report_missing') from None
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise DiffCacheError('report_corrupt') from None
+
+
+def _read_page(directory: Path, page: int) -> dict:
     """Read an already built zero-based page without touching normalized files."""
     if type(page) is not int or page < 0:
-        raise ValueError('Diff page must be a nonnegative integer.')
+        raise DiffCacheError('report_page')
     directory = Path(directory)
     with (directory / _METADATA).open(encoding='utf-8') as source:
         metadata = json.load(source)
@@ -268,7 +290,7 @@ def read_page(directory: Path, page: int) -> dict:
             or metadata['pages'] != max(1, (metadata['total_lines'] + PAGE_SIZE - 1) // PAGE_SIZE)):
         raise ValueError('Incomplete diff cache metadata.')
     if page >= metadata['pages']:
-        raise ValueError('Diff page is out of range.')
+        raise DiffCacheError('report_page')
     try:
         with _page_path(directory, page).open(encoding='utf-8') as source:
             lines = json.load(source)

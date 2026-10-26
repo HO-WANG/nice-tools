@@ -33,6 +33,7 @@ async function comparisonAPI(endpoint, data, extra = {}) {
   const result = await response.json().catch(() => null);
   if (!response.ok) {
     const error = new Error(typeof result?.detail === "string" ? result.detail : "요청을 처리하지 못했습니다. 다시 시도하세요.");
+    error.code = typeof result?.code === "string" && /^[a-z_]{1,40}$/.test(result.code) ? result.code : null;
     error.sessionExpired = response.status === 404 || response.status === 410 || result?.code === "session_expired";
     throw error;
   }
@@ -480,6 +481,14 @@ async function showDiff(path, page = 0) {
   $("diff-message").hidden = false;
   $("diff-message").textContent = "변경 내용을 읽고 있습니다…";
   $("diff-panel").setAttribute("aria-busy", "true");
+  const entry = results.find((item) => item.path === path);
+  if (entry?.status === "error") {
+    $("diff-mode").disabled = true;
+    $("diff-note").hidden = true;
+    $("diff-message").textContent = entry.message || "이 파일은 읽기 오류로 상세 보고서를 만들지 못했습니다. 파일 상태·인코딩·권한을 확인하고 다시 비교하세요.";
+    $("diff-panel").setAttribute("aria-busy", "false");
+    return;
+  }
   try {
     const session = comparisonSession, job = completedJob;
     if (!session || !job) throw new Error("파일 비교를 다시 실행하세요.");
@@ -499,7 +508,7 @@ async function showDiff(path, page = 0) {
   } catch (error) {
     if (diffController !== controller || error.name === "AbortError") return;
     if (error.sessionExpired) { handleNativeError(error); return; }
-    $("diff-message").textContent = error instanceof TypeError ? "앱에 연결할 수 없습니다. 실행창을 확인한 뒤 다시 시도하세요." : error.message;
+    $("diff-message").textContent = error instanceof TypeError ? "앱에 연결할 수 없습니다. 실행창을 확인한 뒤 다시 시도하세요." : `${error.code ? `[${error.code}] ` : ""}${error.message}`;
     $("diff-retry").hidden = false;
   } finally {
     if (diffController === controller) $("diff-panel").setAttribute("aria-busy", "false");

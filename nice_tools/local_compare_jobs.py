@@ -143,7 +143,7 @@ class ComparisonManager(AseManager):
         session = self._session(token)
         job = session['jobs'].get(handle) if isinstance(handle, str) else None
         if job is None:
-            raise ValueError('비교 결과가 만료되었습니다. 다시 비교하세요.')
+            raise ComparisonError('job_expired')
         return job
 
     def start(self, token, left, right, options):

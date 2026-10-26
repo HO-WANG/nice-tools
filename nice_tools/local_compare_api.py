@@ -1,7 +1,6 @@
 """Local-only HTTP boundary for comparisons of native folder selections."""
 import asyncio
 import re
-import unicodedata
 import sys
 from dataclasses import asdict
 
@@ -11,7 +10,7 @@ from starlette.responses import JSONResponse
 
 from .ase_api import local_request
 from .local_compare_jobs import SessionExpired, manager
-from .local_compare_worker import ComparisonError
+from .local_compare_worker import ComparisonError, relative_path
 from .uploads import read_uploads
 from .limits import MAX_FILES
 
@@ -64,12 +63,11 @@ def _options(value):
 
 
 def _relative_path(value):
-    if (not isinstance(value, str) or not value or '\\' in value
-            or re.match(r'^[A-Za-z]:', value) or (sys.platform == 'win32' and ':' in value)
-            or any(unicodedata.category(char).startswith('C') for char in value)
-            or any(part in ('', '.', '..') for part in value.split('/'))):
+    if isinstance(value, str) and sys.platform == 'win32' and ':' in value:
         raise ValueError(_INVALID)
-    return value
+    # Use the worker's same relative-path grammar. A valid filename can contain
+    # a Unicode format character; an owned manifest still authorizes the file.
+    return relative_path(value)
 
 
 def _cleanup_finished(task):
@@ -144,7 +142,7 @@ def _error(error):
         return _response({'detail':str(error),'code':error.code},400)
     # Even ValueError/OSError may come from a native library. Only fixed text
     # crosses this boundary; native exception data is never logged here.
-    return _response({'detail': _FAILED}, 400)
+    return _response({'detail': _FAILED, 'code': 'comparison_failed'}, 400)
 
 
 @router.get('/status')

@@ -22,7 +22,14 @@ SAFE_ERRORS = {'changed': CHANGED,
                'busy': '변경 내용을 계산하고 있습니다. 잠시 후 다시 시도하세요.',
                'file_limit': '파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.',
                'encoding': '전체 파일을 올바르게 해석할 수 없습니다. 인코딩을 지정하고 다시 검사하세요.',
-               'inspection_cache': '검사 결과를 저장하거나 읽을 수 없습니다. 임시 저장 공간과 파일 상태를 확인하세요.'}
+               'inspection_cache': '검사 결과를 저장하거나 읽을 수 없습니다. 임시 저장 공간과 파일 상태를 확인하세요.',
+               'file_error': '이 파일은 최초 비교에서 읽기 오류가 발생해 상세 보고서가 없습니다. 결과 목록의 오류 안내를 확인하고 다시 비교하세요.',
+               'report_missing': '저장된 상세 보고서가 없거나 임시 캐시가 삭제되었습니다. 비교를 다시 실행하세요.',
+               'report_corrupt': '상세 보고서 캐시가 손상되었거나 일부 페이지를 읽을 수 없습니다. 비교를 다시 실행하세요.',
+               'report_page': '요청한 상세 보고서 페이지가 없습니다. 파일을 다시 선택해 첫 페이지부터 확인하세요.',
+               'report_access': '상세 보고서 캐시를 읽을 권한이 없거나 임시 저장소에 접근할 수 없습니다. 권한과 임시 폴더 상태를 확인하세요.',
+               'job_expired': '작업 결과가 만료되었거나 새 작업으로 정리되었습니다. 작업을 다시 실행하세요.',
+               'source_unavailable': '원본 파일·폴더 상태를 확인할 수 없습니다. 파일을 잠근 프로그램을 닫고 경로·접근 권한을 확인하세요.'}
 
 
 class ComparisonError(ValueError):
@@ -316,25 +323,44 @@ def _diff(payload):
     if mode not in ('compared', 'original') or type(page) is not int or page < 0 or type(analyze) is not bool:
         raise ValueError('변경 내용의 보기와 페이지를 확인하세요.')
     cache = Path(payload['cache_dir'])
-    with (cache / 'manifest.json').open(encoding='utf-8') as source:
-        manifest = json.load(source)
-    entry = manifest['entries'].get(relative)
-    if entry is None or entry['status'] == 'error':
-        raise ValueError('정상적으로 비교된 파일을 선택하세요.')
+    try:
+        with (cache / 'manifest.json').open(encoding='utf-8') as source:
+            manifest = json.load(source)
+        entry = manifest['entries'].get(relative)
+        if not isinstance(entry, dict):
+            raise ComparisonError('report_missing')
+        if entry['status'] == 'error':
+            raise ComparisonError('file_error')
+    except ComparisonError:
+        raise
+    except FileNotFoundError:
+        raise ComparisonError('report_missing') from None
+    except (OSError, PermissionError):
+        raise ComparisonError('report_access') from None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        raise ComparisonError('report_corrupt') from None
     report = entry.get('reports', {}).get(mode, {'state': 'error'})
     cache_mode = report.get('cache_mode', mode)
     if cache_mode not in ('compared', 'original'):
-        raise ValueError('상세 보고서를 읽을 수 없습니다.')
+        raise ComparisonError('report_corrupt')
     directory = _report_directory(cache, relative, cache_mode)
     descriptors = manifest['folders']
-    with contextlib.ExitStack() as stack:
-        for descriptor in descriptors.values():
-            stack.enter_context(_directory_guard(_root(descriptor)))
-        with _sources(descriptors, relative, entry) as sources:
-            if not (directory / 'metadata.json').exists():
-                raise ValueError('상세 보고서를 준비하지 못했습니다. 다시 비교하세요.')
-            result = diff_cache.read_page(directory, page)
+    try:
+        with contextlib.ExitStack() as stack:
+            for descriptor in descriptors.values():
+                stack.enter_context(_directory_guard(_root(descriptor)))
+            with _sources(descriptors, relative, entry):
+                try:
+                    result = diff_cache.read_page(directory, page)
+                except diff_cache.DiffCacheError as error:
+                    raise ComparisonError(error.code) from None
+                except OSError:
+                    raise ComparisonError('report_access') from None
         return result
+    except ComparisonError:
+        raise
+    except (OSError, ValueError):
+        raise ComparisonError('source_unavailable') from None
 
 
 def execute(payload, emit=None):

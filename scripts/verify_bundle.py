@@ -148,6 +148,14 @@ def local_comparison_worker_checks(executable, directory):
     complete=read_page(archive,0)
     assert complete['total_lines']==1002 and complete['additions']==1001
     assert read_page(archive,complete['pages']-1)['lines'][-1]['text']=='new 1000', 'Frozen full report lost later changes'
+    for selected,number,expected in (('invalid.txt',0,'file_error'),('limit.txt',999,'report_page')):
+        errors=worker_request(executable,{**query,'path':selected,'page':number},directory,
+                              expect_error=True,worker='--comparison-worker')
+        assert any(event.get('code')==expected for event in errors), 'Frozen lookup hid its safe diagnostic cause'
+    (_report_directory(cache,'limit.txt','compared')/'metadata.json').unlink()
+    missing=worker_request(executable,{**query,'path':'limit.txt'},directory,
+                           expect_error=True,worker='--comparison-worker')
+    assert any(event.get('code')=='report_missing' for event in missing), 'Frozen missing report became generic error'
     (right/'changed.txt').write_bytes(b'edited after comparison\n')
     failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
     assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'
