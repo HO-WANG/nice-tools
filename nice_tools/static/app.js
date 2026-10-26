@@ -12,7 +12,6 @@ let selectedPath = null;
 let diffController = null;
 let diffData = null;
 let diffPage = 0;
-const linesPerPage = 200;
 let comparisonMode = "pending";
 let comparisonSession = null;
 const nativeSelections = { left: null, right: null };
@@ -23,6 +22,7 @@ let jobRequest = 0;
 let pollTimer = null;
 let pageClosed = false;
 let diffRequestedPage = 0;
+let diffRequestedAnalyze = false;
 
 async function comparisonAPI(endpoint, data, extra = {}) {
   const response = await fetch(`/api/comparison/${endpoint}`, {
@@ -152,7 +152,7 @@ function showResults(data) {
 
 function applyJobStatus(data, job) {
   if (data.job !== job) throw new Error("작업 상태가 일치하지 않습니다. 상태를 다시 확인하세요.");
-  const phase = data.phase === "scanning" ? "폴더 확인" : data.phase === "done" ? "완료" : "파일 비교";
+  const phase = data.phase === "scanning" ? "폴더 확인" : data.phase === "preparing-reports" ? "상세 내용 준비" : data.phase === "done" ? "완료" : "파일 비교";
   const elapsed = Number(data.elapsed_seconds || 0).toFixed(1);
   $("comparison-job-status").textContent = `${phase} · ${data.completed ?? 0} / ${data.total ?? 0}개 · ${elapsed}초${data.path ? ` · ${data.path}` : ""}`;
   const progress = $("comparison-progress-bar");
@@ -225,6 +225,50 @@ async function startNativeComparison() {
   }
 }
 
+async function startUploadComparison() {
+  const generation = lifetime;
+  clearResults();
+  completedJob = null;
+  let form;
+  try { form = buildForm(); } catch (error) { feedback(error.message, "error"); return; }
+  setBusy(true);
+  $("comparison-progress").hidden = false;
+  $("comparison-job-status").textContent = "파일을 보내고 비교를 준비하고 있습니다…";
+  $("comparison-progress-bar").removeAttribute("value");
+  $("comparison-cancel").hidden = true;
+  $("comparison-job-retry").hidden = true;
+  try {
+    if (!comparisonSession) {
+      const data = await comparisonAPI("session", {});
+      if (pageClosed || generation !== lifetime) { closeComparisonSession(data.session); return; }
+      if (typeof data.session !== "string") throw new Error("비교 세션을 만들지 못했습니다.");
+      comparisonSession = data.session;
+    }
+    const session = comparisonSession;
+    const response = await fetch(`/api/comparison/upload?session=${encodeURIComponent(session)}`, {
+      method: "POST", credentials: "same-origin", cache: "no-store",
+      headers: { "X-Nice-Tools": "comparison" }, body: form,
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "비교 요청을 처리하지 못했습니다. 다시 시도하세요.");
+    if (pageClosed || generation !== lifetime || session !== comparisonSession) {
+      if (data?.job) comparisonAPI("cancel", { session, job: data.job }, { keepalive: true }).catch(() => {});
+      closeComparisonSession(session);
+      return;
+    }
+    if (typeof data?.job !== "string") throw new Error("비교 작업을 시작하지 못했습니다.");
+    activeJob = data.job;
+    $("comparison-cancel").hidden = false;
+    $("comparison-cancel").disabled = false;
+    pollComparisonJob();
+  } catch (error) {
+    if (pageClosed || generation !== lifetime) return;
+    // A disconnected upload can still own staged files or a job on the server.
+    retireComparisonSession();
+    feedback(connectionMessage(error), "error");
+  }
+}
+
 async function cancelNativeComparison() {
   if (!activeJob || pageClosed) return;
   const job = activeJob, session = comparisonSession, generation = lifetime, request = ++jobRequest;
@@ -250,9 +294,13 @@ function clearDiff() {
   diffController = null;
   selectedPath = null;
   diffData = null;
+  diffRequestedAnalyze = false;
   $("diff-content").hidden = true;
   $("diff-path").hidden = true;
   $("diff-note").hidden = true;
+  $("diff-limit-note").hidden = true;
+  $("diff-analyze").hidden = true;
+  $("diff-analyze").disabled = true;
   $("diff-message").hidden = false;
   $("diff-message").textContent = "목록에서 파일을 선택하세요.";
   $("diff-retry").hidden = true;
@@ -383,8 +431,7 @@ function renderRows() {
 
 function renderDiffPage() {
   const fragment = document.createDocumentFragment();
-  const start = diffPage * linesPerPage;
-  for (const line of (comparisonMode === "native" ? diffData.lines : diffData.lines.slice(start, start + linesPerPage))) {
+  for (const line of diffData.lines) {
     const row = document.createElement("tr");
     row.className = line.kind;
     if (line.kind === "hunk") {
@@ -402,8 +449,8 @@ function renderDiffPage() {
     fragment.append(row);
   }
   $("diff-code").replaceChildren(fragment);
-  const totalLines = comparisonMode === "native" ? diffData.total_lines : diffData.lines.length;
-  const pages = comparisonMode === "native" ? diffData.pages : Math.ceil(totalLines / linesPerPage);
+  const totalLines = diffData.total_lines;
+  const pages = diffData.pages;
   $("diff-pagination").hidden = pages <= 1;
   $("diff-page-label").textContent = `${diffPage + 1} / ${pages} · ${totalLines.toLocaleString("ko-KR")}줄`;
   $("diff-prev").disabled = diffPage === 0;
@@ -411,7 +458,7 @@ function renderDiffPage() {
   document.querySelector(".diff-scroll").scrollTop = 0;
 }
 
-async function showDiff(path, page = 0) {
+async function showDiff(path, page = 0, analyze = false) {
   diffController?.abort();
   const controller = new AbortController();
   diffController = controller;
@@ -419,6 +466,7 @@ async function showDiff(path, page = 0) {
   diffData = null;
   diffPage = page;
   diffRequestedPage = page;
+  diffRequestedAnalyze = analyze;
   for (const button of $("result-body").querySelectorAll("button[data-path]")) {
     const selected = button.dataset.path === path;
     button.setAttribute("aria-pressed", String(selected));
@@ -430,34 +478,33 @@ async function showDiff(path, page = 0) {
   $("diff-content").hidden = true;
   $("diff-code").replaceChildren();
   $("diff-retry").hidden = true;
+  $("diff-analyze").hidden = true;
+  $("diff-analyze").disabled = true;
+  $("diff-limit-note").hidden = true;
   $("diff-note").hidden = false;
   const original = $("diff-mode").value === "original";
   $("diff-note").textContent = original ? "원본 줄 기준 · 줄바꿈 형식과 마지막 줄바꿈 유무는 무시합니다." : "옵션 적용 후 줄 기준 · 정렬 시 줄 번호도 정렬된 순서입니다.";
   $("diff-message").hidden = false;
-  $("diff-message").textContent = "변경 내용을 읽고 있습니다…";
+  $("diff-message").textContent = analyze ? "상세 내용을 분석하고 있습니다…" : "변경 내용을 읽고 있습니다…";
   $("diff-panel").setAttribute("aria-busy", "true");
   try {
-    let data;
-    if (comparisonMode === "native") {
-      const session = comparisonSession, job = completedJob;
-      if (!session || !job) return;
-      data = await comparisonAPI("diff", { session, job, path, mode: original ? "original" : "compared", page }, { signal: controller.signal });
-    } else {
-      const form = new FormData();
-      for (const [side, input] of Object.entries(fileInputs)) {
-        const file = Array.from(input.files).find((item) => item.webkitRelativePath.split("/").slice(1).join("/") === path);
-        form.append(`${side}_paths`, JSON.stringify(file ? [path] : []));
-        if (file) form.append(`${side}_files`, file, file.name);
-      }
-      appendOptions(form, original);
-      const response = await fetch("/api/diff", { method: "POST", body: form, signal: controller.signal });
-      data = await response.json().catch(() => null);
-      if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "변경 내용을 읽지 못했습니다.");
-    }
+    const session = comparisonSession, job = completedJob;
+    if (!session || !job) throw new Error("파일 비교를 다시 실행하세요.");
+    const data = await comparisonAPI("diff", { session, job, path, mode: original ? "original" : "compared", page, ...(analyze ? { analyze: true } : {}) }, { signal: controller.signal });
     if (diffController !== controller) return;
     if (!data || !Array.isArray(data.lines)) throw new Error("변경 내용을 읽지 못했습니다.");
     diffData = data;
+    if (data.state === "deferred") {
+      diffRequestedAnalyze = false;
+      $("diff-message").textContent = `추가·삭제 합계가 ${Number(data.threshold || 1000).toLocaleString("ko-KR")}줄 이상입니다. 상세 내용 분석 버튼을 누르면 줄별 변경 내용을 준비합니다.`;
+      $("diff-analyze").hidden = false;
+      $("diff-analyze").disabled = false;
+      return;
+    }
+    diffRequestedAnalyze = false;
     $("diff-content").hidden = false;
+    $("diff-limit-note").hidden = !data.truncated;
+    $("diff-limit-note").textContent = `상세 내용은 문맥을 포함해 처음 ${Number(data.display_limit || 1000).toLocaleString("ko-KR")}줄까지 표시합니다. 파일 비교 결과와 추가·삭제 수는 전체 내용을 기준으로 합니다.`;
     $("diff-added").textContent = `+${data.additions.toLocaleString("ko-KR")} 추가`;
     $("diff-deleted").textContent = `−${data.deletions.toLocaleString("ko-KR")} 삭제`;
     $("diff-headers").textContent = `diff --git a/${path} b/${path}\n--- ${data.old_exists ? `a/${path}` : "/dev/null"}\n+++ ${data.new_exists ? `b/${path}` : "/dev/null"}`;
@@ -478,25 +525,10 @@ $("compare-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy) return;
   if (comparisonMode === "native") { await startNativeComparison(); return; }
-  if (comparisonMode !== "upload") return;
-  clearResults();
-  try {
-    const form = buildForm();
-    setBusy(true);
-    feedback("파일을 보내고 비교하고 있습니다. 잠시 기다려 주세요.");
-    const response = await fetch("/api/compare", { method: "POST", body: form });
-    const data = await response.json().catch(() => null);
-    if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "비교 요청을 처리하지 못했습니다. 다시 시도해 주세요.");
-    if (!data || !Array.isArray(data.results) || !data.summary) throw new Error("비교 결과를 읽을 수 없습니다. 다시 시도해 주세요.");
-    showResults(data);
-  } catch (error) {
-    feedback(error instanceof TypeError ? "서버에 연결할 수 없습니다. 연결 상태를 확인하고 다시 시도해 주세요." : error.message, "error");
-  } finally {
-    setBusy(false);
-  }
+  if (comparisonMode === "upload") await startUploadComparison();
 });
 
-for (const input of Object.values(fileInputs)) input.addEventListener("change", () => { clearResults(); updateSelection(); });
+for (const input of Object.values(fileInputs)) input.addEventListener("change", () => { clearResults(); completedJob = null; updateSelection(); });
 for (const input of optionInputs) input.addEventListener("input", () => { if (!busy) { clearResults(); completedJob = null; } });
 $("status-filter").addEventListener("change", () => {
   const filter = $("status-filter").value;
@@ -508,9 +540,12 @@ $("result-body").addEventListener("click", (event) => {
   if (button) showDiff(button.dataset.path);
 });
 $("diff-mode").addEventListener("change", () => { if (selectedPath) showDiff(selectedPath); });
-$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath, diffRequestedPage); });
-$("diff-prev").addEventListener("click", () => { if (comparisonMode === "native") showDiff(selectedPath, diffPage - 1); else { diffPage -= 1; renderDiffPage(); } });
-$("diff-next").addEventListener("click", () => { if (comparisonMode === "native") showDiff(selectedPath, diffPage + 1); else { diffPage += 1; renderDiffPage(); } });
+$("diff-retry").addEventListener("click", () => { if (selectedPath) showDiff(selectedPath, diffRequestedPage, diffRequestedAnalyze); });
+$("diff-analyze").addEventListener("click", () => {
+  if (selectedPath && diffData?.state === "deferred" && !$("diff-analyze").disabled) showDiff(selectedPath, 0, true);
+});
+$("diff-prev").addEventListener("click", () => showDiff(selectedPath, diffPage - 1));
+$("diff-next").addEventListener("click", () => showDiff(selectedPath, diffPage + 1));
 $("reset-options").addEventListener("click", () => {
   if (busy) return;
   completedJob = null;

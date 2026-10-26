@@ -2,6 +2,8 @@
 import asyncio
 import re
 import unicodedata
+import sys
+from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from starlette.concurrency import run_in_threadpool
@@ -10,6 +12,8 @@ from starlette.responses import JSONResponse
 from .ase_api import local_request
 from .local_compare_jobs import SessionExpired, manager
 from .local_compare_worker import ComparisonError
+from .uploads import read_uploads
+from .limits import MAX_FILES
 
 
 router = APIRouter(prefix='/api/comparison')
@@ -22,7 +26,7 @@ _FIELDS = {
     'start': ({'session', 'left', 'right'}, {'options'}),
     'job': ({'session', 'job'}, set()),
     'cancel': ({'session', 'job'}, set()),
-    'diff': ({'session', 'job', 'path'}, {'mode', 'page'}),
+    'diff': ({'session', 'job', 'path'}, {'mode', 'page', 'analyze'}),
     'close': ({'session'}, set()),
 }
 _INVALID = '파일 비교 요청을 확인하고 다시 시도하세요.'
@@ -60,7 +64,8 @@ def _options(value):
 
 
 def _relative_path(value):
-    if (not isinstance(value, str) or not value or '\\' in value or ':' in value
+    if (not isinstance(value, str) or not value or '\\' in value
+            or re.match(r'^[A-Za-z]:', value) or (sys.platform == 'win32' and ':' in value)
             or any(unicodedata.category(char).startswith('C') for char in value)
             or any(part in ('', '.', '..') for part in value.split('/'))):
         raise ValueError(_INVALID)
@@ -151,6 +156,27 @@ async def status(request: Request):
         return _error(error)
 
 
+@router.post('/upload')
+async def upload(request: Request):
+    try:
+        _boundary(request, mutation=True)
+        if manager.status()['native_available']:
+            raise ValueError(_INVALID)
+        if set(request.query_params) != {'session'}:
+            raise ValueError(_INVALID)
+        session = _handle(request.query_params['session'])
+        if request.headers.get('content-type', '').split(';', 1)[0].strip().lower() != 'multipart/form-data':
+            raise ValueError(_INVALID)
+        async with request.form(max_files=MAX_FILES, max_fields=6) as form:
+            left, right, options = await read_uploads(form)
+            result = await _owned_for_request(
+                request, manager.start_upload, session, left, right, asdict(options),
+                cleanup=lambda _: manager.close_session(session), close_immediately=True)
+        return _response(result)
+    except Exception as error:
+        return _error(error)
+
+
 @router.post('/{operation}')
 async def operation(request: Request, operation: str):
     try:
@@ -184,10 +210,14 @@ async def operation(request: Request, operation: str):
                 result = await run_in_threadpool(getattr(manager, operation), session, _handle(data['job']))
             elif operation == 'diff':
                 mode, page = data.get('mode', 'compared'), data.get('page', 0)
-                if mode not in ('compared', 'original') or type(page) is not int or page < 0:
+                analyze = data.get('analyze', False)
+                if mode not in ('compared', 'original') or type(page) is not int or page < 0 or type(analyze) is not bool:
                     raise ValueError(_INVALID)
+                arguments = (session, _handle(data['job']), _relative_path(data['path']), mode, page)
+                if analyze:
+                    arguments += (True,)
                 result = await _owned_for_request(
-                    request, manager.diff, session, _handle(data['job']), _relative_path(data['path']), mode, page,
+                    request, manager.diff, *arguments,
                     cleanup=lambda _: None)
             else:
                 result = await run_in_threadpool(manager.close_session, session)

@@ -3,22 +3,84 @@
 Run against a running source server; no native dialogs or user files are accessed.
 """
 import argparse
+from pathlib import Path
+import tempfile
 from playwright.sync_api import expect, sync_playwright
 
 
-SUMMARY = {"total": 2, "same": 1, "different": 1, "left_only": 0, "right_only": 0, "error": 0}
-RECORDS = [{"path": "<img onerror=alert(1)>.txt", "status": "different"}, {"path": "same.txt", "status": "same"}]
+SUMMARY = {"total": 3, "same": 1, "different": 2, "left_only": 0, "right_only": 0, "error": 0}
+RECORDS = [{"path": "<img onerror=alert(1)>.txt", "status": "different", "reports": {"compared": {"state": "ready"}, "original": {"state": "ready"}}}, {"path": "same.txt", "status": "same"}, {"path": "large.txt", "status": "different", "reports": {"compared": {"state": "deferred"}, "original": {"state": "deferred"}}}]
+
+
+def check_live_upload(browser, url):
+    """Exercise real multipart-to-owned-worker reports on a non-Windows server."""
+    with tempfile.TemporaryDirectory(prefix="nice-tools-browser-upload-") as directory:
+        root = Path(directory)
+        left, right = root / "before", root / "after"
+        for folder, prefix in ((left, "old"), (right, "new")):
+            folder.mkdir()
+            (folder / "small.txt").write_text(prefix + " 한글\n", encoding="utf-8")
+            (folder / "large.txt").write_text("\n".join(f"{prefix} {number}" for number in range(600)), encoding="utf-8")
+        page = browser.new_page(viewport={"width": 1280, "height": 900})
+        requests, errors = [], []
+        page.on("request", lambda request: requests.append(request))
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        page.goto(url, wait_until="networkidle")
+        expect(page.locator("#comparison-runtime")).to_contain_text("개발 환경")
+        page.locator("#left-folder").set_input_files(str(left))
+        page.locator("#right-folder").set_input_files(str(right))
+        page.locator("#compare-button").click()
+        expect(page.locator("#result-content")).to_be_visible(timeout=30000)
+        expect(page.locator('[data-stat="different"]')).to_have_text("2")
+        page.get_by_role("button", name="small.txt", exact=True).click()
+        expect(page.locator("#diff-added")).to_have_text("+1 추가")
+        expect(page.locator("#diff-deleted")).to_have_text("−1 삭제")
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        page.get_by_role("button", name="large.txt", exact=True).click()
+        expect(page.locator("#diff-analyze")).to_be_visible()
+        diff_requests = lambda: [request.post_data_json for request in requests if "/api/comparison/diff" in request.url]
+        assert all("analyze" not in data for data in diff_requests())
+        page.locator("#diff-analyze").click()
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5", timeout=30000)
+        expect(page.locator("#diff-limit-note")).to_contain_text("1,000줄")
+        expect(page.locator("#diff-added")).to_have_text("+600 추가")
+        expect(page.locator("#diff-deleted")).to_have_text("−600 삭제")
+        displayed_rows = page.locator("#diff-code tr").count()
+        for number in range(2, 6):
+            page.locator("#diff-next").click()
+            expect(page.locator("#diff-page-label")).to_contain_text(f"{number} / 5")
+            displayed_rows += page.locator("#diff-code tr").count()
+        assert displayed_rows == 1000
+        expect(page.locator("#diff-next")).to_be_disabled()
+        page.get_by_role("button", name="small.txt", exact=True).click()
+        expect(page.locator("#diff-added")).to_have_text("+1 추가")
+        page.get_by_role("button", name="large.txt", exact=True).click()
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5")
+        assert sum(bool(data.get("analyze")) for data in diff_requests()) == 1
+        assert all("analyze" not in data for data in diff_requests() if data["page"] > 0)
+        uploads = [request for request in requests if "/api/comparison/upload?" in request.url]
+        assert len(uploads) == 1
+        assert "multipart/form-data" in uploads[0].headers["content-type"]
+        assert uploads[0].headers["x-nice-tools"] == "comparison"
+        assert not any(request.url.endswith(("/api/compare", "/api/diff")) for request in requests)
+        with page.expect_response("**/api/comparison/close"):
+            page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+        assert not errors, errors
+        page.close()
+    print("Live upload comparison: one multipart upload, owned worker, prepared small report, explicit large analysis, full counts, 1,000 stored rows, cache reuse and session cleanup passed.")
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8000")
     parser.add_argument("--chromium", default="/usr/bin/chromium")
+    parser.add_argument("--live-upload", action="store_true", help="also test actual non-Windows upload/worker APIs")
     args = parser.parse_args()
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(executable_path=args.chromium, headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         calls, errors, held = [], [], {}
+        analyzed = set()
         state = {"status_fail": True, "pick_cancel": False, "hold": None, "job_state": "succeeded", "diff_fail": False, "job_fail": False, "sequence": 0, "expired": False, "start_fail": False, "pick_network_fail": False}
         page.on("pageerror", lambda error: errors.append(str(error)))
         page.add_init_script("""window.comparisonFetches = [];
@@ -78,9 +140,10 @@ def main():
                     route.fulfill(status=503, json={"detail": "잠시 후 다시 시도"})
                     return
                 job_state = "cancelled" if endpoint == "cancel" else state["job_state"]
-                result = {"job": data["job"], "state": job_state, "phase": "comparing", "completed": 1, "total": 2, "path": "<img onerror=alert(1)>.txt", "elapsed_seconds": 1.25, "message": "실패 후 다시 시도" if job_state == "failed" else "", "summary": SUMMARY, "results": RECORDS}
+                result = {"job": data["job"], "state": job_state, "phase": "preparing-reports", "completed": 1, "total": 2, "path": "<img onerror=alert(1)>.txt", "elapsed_seconds": 1.25, "message": "실패 후 다시 시도" if job_state == "failed" else "", "summary": SUMMARY, "results": RECORDS}
             elif endpoint == "diff":
-                assert set(data) == {"session", "job", "path", "mode", "page"}
+                assert set(data) in ({"session", "job", "path", "mode", "page"}, {"session", "job", "path", "mode", "page", "analyze"})
+                assert "analyze" not in data or data["analyze"] is True
                 if state["diff_fail"]:
                     state["diff_fail"] = False
                     route.fulfill(status=500, json={"detail": "diff 재시도"})
@@ -90,6 +153,15 @@ def main():
                 result = {"path": data["path"], "old_exists": True, "new_exists": True, "identical": data["path"] == "same.txt" and data["mode"] == "compared", "additions": 401, "deletions": 2, "total_lines": 401, "page": number, "page_size": 200, "pages": 3, "lines": lines}
                 if result["identical"]:
                     result.update(lines=[], total_lines=0, pages=0)
+                if data["path"] == "large.txt":
+                    key = (data["path"], data["mode"])
+                    if data.get("analyze"):
+                        analyzed.add(key)
+                    if key not in analyzed:
+                        result = {"state": "deferred", "threshold": 1000, "display_limit": 1000, "lines": []}
+                    else:
+                        result.update(state="ready", additions=2000, deletions=1500, total_lines=1000, pages=5, display_limit=1000, truncated=True, full_total_lines=3501,
+                                      lines=[{"kind": "add", "new_line": number * 200 + i + 1, "text": f"large {number * 200 + i}"} for i in range(200)])
             elif endpoint == "close":
                 result = {"ok": True}
             else:
@@ -120,7 +192,7 @@ def main():
         page.locator("#compare-button").click()
         expect(page.locator("#result-content")).to_be_visible()
         assert [data for name, data, _ in calls if name == "start"][-1]["options"] == {"sort_lines": True, "ignore_whitespace": True, "ignore_start": 1, "ignore_end": 2}
-        expect(page.locator("#result-body tr")).to_have_count(2)
+        expect(page.locator("#result-body tr")).to_have_count(3)
         assert page.locator("#directory-tool img").count() == 0
         page.get_by_role("button", name=RECORDS[0]["path"], exact=True).click()
         expect(page.locator("#diff-code tr")).to_have_count(200)
@@ -144,6 +216,71 @@ def main():
         expect(page.locator("#diff-code tr")).to_have_count(200)
         page.locator("#diff-mode").select_option("compared")
         expect(page.locator("#diff-message")).to_contain_text("차이가 없습니다")
+        # Selecting a deferred report never starts analysis. Only its separate button does.
+        page.get_by_role("button", name="large.txt", exact=True).click()
+        expect(page.locator("#diff-analyze")).to_be_visible()
+        expect(page.locator("#diff-analyze")).to_be_enabled()
+        expect(page.locator("#diff-message")).to_contain_text("1,000줄 이상")
+        expect(page.locator("#diff-content")).to_be_hidden()
+        expect(page.locator("#diff-limit-note")).to_be_hidden()
+        assert not any(data.get("analyze") for name, data, _ in calls if name == "diff")
+        page.locator("#diff-analyze").click()
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5")
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        expect(page.locator("#diff-limit-note")).to_contain_text("문맥을 포함해 처음 1,000줄")
+        expect(page.locator("#diff-limit-note")).to_contain_text("전체 내용")
+        expect(page.locator("#diff-added")).to_have_text("+2,000 추가")
+        expect(page.locator("#diff-deleted")).to_have_text("−1,500 삭제")
+        for number in range(2, 6):
+            page.locator("#diff-next").click()
+            expect(page.locator("#diff-page-label")).to_contain_text(f"{number} / 5")
+            expect(page.locator("#diff-code tr")).to_have_count(200)
+            expect(page.locator("#diff-limit-note")).to_be_visible()
+        expect(page.locator("#diff-next")).to_be_disabled()
+        page.get_by_role("button", name="same.txt", exact=True).click()
+        expect(page.locator("#diff-limit-note")).to_be_hidden()
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        page.get_by_role("button", name="large.txt", exact=True).click()
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5")
+        assert sum(bool(data.get("analyze")) for name, data, _ in calls if name == "diff") == 1
+        assert all("analyze" not in data for name, data, _ in calls if name == "diff" and data["page"] > 0)
+        # Explicit-analysis failures preserve intent only for retrying that request.
+        page.locator("#diff-mode").select_option("original")
+        expect(page.locator("#diff-analyze")).to_be_visible()
+        state["diff_fail"] = True
+        page.locator("#diff-analyze").click()
+        expect(page.locator("#diff-retry")).to_be_visible()
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        page.locator("#diff-retry").click()
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5")
+        assert [data for name, data, _ in calls if name == "diff"][-2:][0]["analyze"] is True
+        assert [data for name, data, _ in calls if name == "diff"][-1]["analyze"] is True
+        # Switching modes during analysis ignores its stale response and resets intent.
+        analyzed.remove(("large.txt", "compared"))
+        page.locator("#diff-mode").select_option("compared")
+        expect(page.locator("#diff-analyze")).to_be_visible()
+        state["hold"] = "diff"
+        page.locator("#diff-analyze").click()
+        expect(page.locator("#diff-panel")).to_have_attribute("aria-busy", "true")
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        expect(page.locator("#diff-analyze")).to_be_disabled()
+        page.locator("#diff-mode").select_option("original")
+        expect(page.locator("#diff-page-label")).to_contain_text("1 / 5")
+        held.pop("diff").fulfill(json={"state": "deferred", "threshold": 1000, "lines": []})
+        expect(page.locator("#diff-analyze")).to_be_hidden()
+        assert "analyze" not in [data for name, data, _ in calls if name == "diff"][-1]
+        # A different file's failed ordinary read must also retry without analysis.
+        page.locator("#diff-mode").select_option("compared")
+        expect(page.locator("#diff-analyze")).to_be_visible()
+        state["diff_fail"] = True
+        page.locator("#diff-analyze").click()
+        expect(page.locator("#diff-retry")).to_be_visible()
+        state["diff_fail"] = True
+        page.get_by_role("button", name="same.txt", exact=True).click()
+        expect(page.locator("#diff-retry")).to_be_visible()
+        page.locator("#diff-retry").click()
+        expect(page.locator("#diff-message")).to_contain_text("차이가 없습니다")
+        assert all("analyze" not in data for name, data, _ in calls if name == "diff" and data["path"] == "same.txt")
         state["hold"] = "diff"
         page.get_by_role("button", name=RECORDS[0]["path"], exact=True).click()
         expect(page.locator("#diff-panel")).to_have_attribute("aria-busy", "true")
@@ -158,6 +295,7 @@ def main():
         expect(page.locator("#ignore-start")).to_be_disabled()
         page.locator("#comparison-job-retry").click()
         expect(page.locator("#comparison-job-status")).to_contain_text("1 / 2")
+        expect(page.locator("#comparison-job-status")).to_contain_text("상세 내용 준비")
         expect(page.locator("#left-pick-directory")).to_be_disabled()
         page.locator("#comparison-cancel").click()
         expect(page.locator("#feedback")).to_contain_text("취소")
@@ -247,8 +385,10 @@ def main():
         assert not errors, errors
         assert all("multipart" not in headers.get("content-type", "") for _, _, headers in calls)
         assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        if args.live_upload:
+            check_live_upload(browser, args.url)
         browser.close()
-    print("Native comparison UI: runtime retry, native tokens, options, safe rendering, server pagination, diff retry, stale diff/job/picker/start/session, progress, cancellation, failures, layout and cleanup passed.")
+    print("Native comparison UI: deferred/manual analysis, capped five-page display, full counts, retry intent, stale analysis, runtime retry, native tokens, options, safe rendering, server pagination, stale diff/job/picker/start/session, progress, cancellation, failures, layout and cleanup passed.")
 
 
 if __name__ == "__main__":

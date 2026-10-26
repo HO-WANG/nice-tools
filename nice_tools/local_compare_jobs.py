@@ -160,31 +160,82 @@ class ComparisonManager(AseManager):
                 raise ValueError('폴더 두 개를 다시 선택하세요.')
             if selections['left']['file_count'] + selections['right']['file_count'] > 1000:
                 raise ValueError('파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.')
-            # At most two completed comparison caches per screen; old handles
-            # are removed before cleanup so no new operation can claim them.
-            old = list(session['jobs'].items())[:-1]
-            for key, previous in old:
-                session['jobs'].pop(key)
-                previous['cancelled'] = True
-                previous['future'].cancel()
-            old_processes = [process for process, owner in self.process_jobs.items()
-                             if any(owner is previous for _, previous in old)]
-            handle = secrets.token_urlsafe(24)
+            descriptors = {side: {key: selections[side][key] for key in ('path', 'identity')}
+                           for side in ('left', 'right')}
             folder = tempfile.TemporaryDirectory(prefix='nice-tools-comparison-')
-            job = {'job':handle, 'state':'queued', 'phase':'scanning', 'completed':0, 'total':0,
-                   'elapsed_seconds':0.0, 'cancelled':False, 'cache_dir':folder.name, 'folder':folder,
-                   'use_lock':threading.RLock(), 'started':time.monotonic()}
-            session['jobs'][handle] = job
-            payload = {'operation':'compare','cache_dir':folder.name,
-                       **{side:{key:selections[side][key] for key in ('path','identity')} for side in ('left','right')},
-                       'options':vars(normalized)}
-            job['future'] = self.executor.submit(self._run_job, token, handle, job, payload)
+            handle, old, old_processes = self._register_job(token, session, descriptors, normalized, folder)
+        self._retire_jobs(old, old_processes)
+        return {'job': handle}
+
+    def _register_job(self, token, session, descriptors, normalized, folder):
+        # Caller holds self.lock; registration and close/cancel are atomic.
+        # At most two completed comparison caches per screen; old handles
+        # are removed before cleanup so no new operation can claim them.
+        old = list(session['jobs'].items())[:-1]
+        for key, previous in old:
+            session['jobs'].pop(key)
+            previous['cancelled'] = True
+            previous['future'].cancel()
+        old_processes = [process for process, owner in self.process_jobs.items()
+                         if any(owner is previous for _, previous in old)]
+        handle = secrets.token_urlsafe(24)
+        job = {'job':handle, 'state':'queued', 'phase':'scanning', 'completed':0, 'total':0,
+               'elapsed_seconds':0.0, 'cancelled':False, 'cache_dir':folder.name, 'folder':folder,
+               'use_lock':threading.RLock(), 'started':time.monotonic()}
+        session['jobs'][handle] = job
+        payload = {'operation':'compare','cache_dir':folder.name, **descriptors, 'options':vars(normalized)}
+        job['future'] = self.executor.submit(self._run_job, token, handle, job, payload)
+        return handle, old, old_processes
+
+    def _retire_jobs(self, old, old_processes):
         for process in old_processes:
             self._terminate(process)
         for _, previous in old:
             with previous['use_lock']:
                 previous['folder'].cleanup()
-        return {'job':handle}
+
+    def start_upload(self, token, left, right, options):
+        """Development fallback: stage once and reuse the same owned-job path."""
+        if sys.platform == 'win32':
+            raise ValueError('Windows에서는 폴더 선택을 사용하세요.')
+        normalized = options_data(options)
+        if (not isinstance(left, dict) or not isinstance(right, dict)
+                or not left or not right or len(left) + len(right) > 1000):
+            raise ValueError('비교할 두 폴더의 파일을 확인하세요.')
+        with self.lock:
+            session = self._session(token)
+            if session['picking'] or any(job['state'] in ('queued','running') for job in session['jobs'].values()):
+                raise ValueError('진행 중인 작업이 끝난 뒤 비교하세요.')
+            session['picking'] = True
+        folder = None
+        registered = False
+        try:
+            folder = tempfile.TemporaryDirectory(prefix='nice-tools-comparison-upload-')
+            root = Path(folder.name).resolve()
+            descriptors = {}
+            for side, files in (('left', left), ('right', right)):
+                base = root / 'inputs' / side
+                base.mkdir(parents=True)
+                for relative, content in files.items():
+                    relative_path(relative)
+                    if not isinstance(content, bytes):
+                        raise ValueError('업로드 파일을 읽을 수 없습니다.')
+                    target = base.joinpath(*relative.split('/'))
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with target.open('xb') as output:
+                        output.write(content)
+                descriptors[side] = folder_descriptor(base)
+            with self.lock:
+                self._session(token)
+                handle, old, old_processes = self._register_job(token, session, descriptors, normalized, folder)
+                registered = True
+            self._retire_jobs(old, old_processes)
+            return {'job': handle}
+        finally:
+            with self.lock:
+                session['picking'] = False
+            if folder is not None and not registered:
+                folder.cleanup()
 
     def _run_job(self, token, handle, job, payload):
         failure = failure_code = None
@@ -199,7 +250,7 @@ class ComparisonManager(AseManager):
                         for name in ('completed','total'):
                             if type(event.get(name)) is int and event[name]>=0:
                                 job[name] = event[name]
-                        if event.get('phase') in ('scanning','comparing'):
+                        if event.get('phase') in ('scanning','comparing','preparing-reports'):
                             job['phase'] = event['phase']
                         if isinstance(event.get('path'),str):
                             job['path'] = event['path']
@@ -247,9 +298,9 @@ class ComparisonManager(AseManager):
                 job.update(state='cancelled',phase='done',message='비교를 취소했습니다.')
         return self.job(token,handle)
 
-    def diff(self, token, handle, path, mode='compared', page=0):
+    def diff(self, token, handle, path, mode='compared', page=0, analyze=False):
         relative_path(path)
-        if mode not in ('compared','original') or type(page) is not int or page<0:
+        if mode not in ('compared','original') or type(page) is not int or page<0 or type(analyze) is not bool:
             raise ValueError('변경 내용의 보기와 페이지를 확인하세요.')
         job = self._job(token,handle)
         # HTTP abandonment does not stop the owned build. Reject a duplicate
@@ -265,15 +316,24 @@ class ComparisonManager(AseManager):
             payload = {'operation':'diff','cache_dir':job['cache_dir'],
                        'path':path,'mode':mode,'page':page}
             try:
-                if (directory/'metadata.json').exists():
-                    # Completed pages need only lightweight source identity
-                    # checks and a <=200-row read, with no EXE bootstrap.
-                    return execute(payload)
-                return self._request(payload, token, owner_job=job)
+                try:
+                    prepared = execute(payload)
+                except ComparisonError:
+                    raise
+                except ValueError:
+                    if not analyze:
+                        raise
+                else:
+                    if not analyze or prepared.get('state') != 'deferred':
+                        return prepared
+                return self._request({**payload, 'analyze': True}, token, owner_job=job)
             except Exception:
                 # A killed partial build is never reused as a finished cache.
-                if not (directory/'metadata.json').exists():
-                    shutil.rmtree(directory,ignore_errors=True)
+                for candidate in ('compared', 'original'):
+                    key = hashlib.sha256((candidate+'\0'+path).encode('utf-8')).hexdigest()
+                    directory = Path(job['cache_dir'])/'diffs'/key
+                    if not (directory/'metadata.json').exists():
+                        shutil.rmtree(directory,ignore_errors=True)
                 raise
         finally:
             job['use_lock'].release()

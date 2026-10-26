@@ -210,6 +210,54 @@ def _write_manifest(directory, manifest):
     temporary.replace(directory / 'manifest.json')
 
 
+def _report_directory(cache, relative, mode):
+    key = hashlib.sha256((mode + '\0' + relative).encode('utf-8')).hexdigest()
+    return cache / 'diffs' / key
+
+
+def _normalized_pair(cache, relative, mode, entry, sources, options):
+    pair = entry.get('pair', {})
+    if pair.get('raw_identical') or (mode == 'compared' and pair.get('identical')):
+        empty = cache / 'equal.empty'
+        empty.touch(exist_ok=True)
+        return [empty, empty]
+    normalized = []
+    for side, source in zip(('left', 'right'), sources):
+        existing = pair.get(side + '_normalized') if mode == 'compared' else None
+        if source is None:
+            normalized.append(None)
+        elif existing:
+            normalized.append(Path(existing))
+        else:
+            directory = _report_directory(cache, relative, mode)
+            folder = cache / 'extra' / directory.name
+            folder.mkdir(parents=True, exist_ok=True)
+            target = folder / (side + '.txt')
+            if not target.exists():
+                selected_options = CompareOptions() if mode == 'original' else options
+                engine.normalize_file(source, target, selected_options, encoding=pair.get(side + '_encoding'))
+            normalized.append(target)
+    return normalized
+
+
+def _prepare_reports(cache, relative, entry, sources, options):
+    reports = {}
+    for mode in ('compared', 'original'):
+        if mode == 'original' and (options == CompareOptions() or entry.get('pair', {}).get('raw_identical')):
+            reports[mode] = {**reports['compared'], 'cache_mode': 'compared'}
+            continue
+        try:
+            normalized = _normalized_pair(cache, relative, mode, entry, sources, options)
+            prepared = diff_cache.prepare_diff(*normalized, _report_directory(cache, relative, mode),
+                                              path=relative, old_exists=sources[0] is not None,
+                                              new_exists=sources[1] is not None)
+            reports[mode] = {'state': prepared['state'], 'threshold': diff_cache.AUTO_DIFF_THRESHOLD,
+                             'display_limit': diff_cache.MAX_DIFF_LINES}
+        except (ValueError, OSError):
+            reports[mode] = {'state': 'error'}
+    return reports
+
+
 def _compare(payload, emit):
     descriptors = {side: payload[side] for side in ('left', 'right')}
     options = options_data(payload.get('options', {}))
@@ -234,15 +282,20 @@ def _compare(payload, emit):
             errors = [inventories[side].get(relative, {}).get('error') for side in ('left', 'right')]
             if any(errors):
                 item.update(status='error', message=' / '.join(error for error in errors if error))
-            elif relative not in inventories['right']:
-                item['status'] = 'left_only'
-            elif relative not in inventories['left']:
-                item['status'] = 'right_only'
             else:
                 try:
                     with _sources(descriptors, relative, entry) as (left, right):
-                        entry['pair'] = engine.compare_files(left, right, options, cache / 'pairs' / str(index))
-                    item['status'] = 'same' if entry['pair']['identical'] else 'different'
+                        if right is None:
+                            item['status'] = 'left_only'
+                        elif left is None:
+                            item['status'] = 'right_only'
+                        else:
+                            entry['pair'] = engine.compare_files(left, right, options, cache / 'pairs' / str(index))
+                            item['status'] = 'same' if entry['pair']['identical'] else 'different'
+                        emit({'phase': 'preparing-reports', 'completed': index, 'total': len(paths), 'path': relative})
+                        entry['reports'] = _prepare_reports(cache, relative, entry, (left, right), options)
+                        item['reports'] = {mode: {key: value for key, value in report.items() if key != 'cache_mode'}
+                                           for mode, report in entry['reports'].items()}
                 except (ValueError, OSError):
                     # No native exception, data value or absolute source path.
                     item.update(status='error', message='텍스트를 읽을 수 없거나 파일이 변경되었습니다. 인코딩·권한을 확인하고 다시 비교하세요.')
@@ -261,7 +314,8 @@ def _compare(payload, emit):
 def _diff(payload):
     relative = relative_path(payload.get('path'))
     mode, page = payload.get('mode', 'compared'), payload.get('page', 0)
-    if mode not in ('compared', 'original') or type(page) is not int or page < 0:
+    analyze = payload.get('analyze', False)
+    if mode not in ('compared', 'original') or type(page) is not int or page < 0 or type(analyze) is not bool:
         raise ValueError('변경 내용의 보기와 페이지를 확인하세요.')
     cache = Path(payload['cache_dir'])
     with (cache / 'manifest.json').open(encoding='utf-8') as source:
@@ -269,39 +323,26 @@ def _diff(payload):
     entry = manifest['entries'].get(relative)
     if entry is None or entry['status'] == 'error':
         raise ValueError('정상적으로 비교된 파일을 선택하세요.')
-    key = hashlib.sha256((mode + '\0' + relative).encode('utf-8')).hexdigest()
-    directory = cache / 'diffs' / key
+    report = entry.get('reports', {}).get(mode, {'state': 'error'})
+    cache_mode = report.get('cache_mode', mode)
+    if cache_mode not in ('compared', 'original'):
+        raise ValueError('상세 보고서를 읽을 수 없습니다.')
+    directory = _report_directory(cache, relative, cache_mode)
     descriptors = manifest['folders']
     with contextlib.ExitStack() as stack:
         for descriptor in descriptors.values():
             stack.enter_context(_directory_guard(_root(descriptor)))
         with _sources(descriptors, relative, entry) as sources:
             if not (directory / 'metadata.json').exists():
-                pair = entry.get('pair', {})
-                normalized = []
-                if pair.get('raw_identical') or (mode=='compared' and pair.get('identical')):
-                    # Validation occurred during comparison; source identities
-                    # were just rechecked. Empty caches represent equal texts.
-                    empty = cache / 'equal.empty'
-                    empty.touch(exist_ok=True)
-                    normalized = [empty, empty]
-                else:
-                    for side, source in zip(('left', 'right'), sources):
-                        existing = pair.get(side + '_normalized') if mode == 'compared' else None
-                        if source is None:
-                            normalized.append(None)
-                        elif existing:
-                            normalized.append(Path(existing))
-                        else:
-                            folder = cache / 'extra' / key
-                            folder.mkdir(parents=True, exist_ok=True)
-                            target = folder / (side + '.txt')
-                            if not target.exists():
-                                options = CompareOptions() if mode == 'original' else options_data(manifest['options'])
-                                engine.normalize_file(source, target, options, encoding=pair.get(side + '_encoding'))
-                            normalized.append(target)
+                if not analyze:
+                    if report.get('state') == 'deferred':
+                        return {'state': 'deferred', 'threshold': diff_cache.AUTO_DIFF_THRESHOLD,
+                                'display_limit': diff_cache.MAX_DIFF_LINES, 'lines': []}
+                    raise ValueError('상세 보고서를 준비하지 못했습니다. 다시 비교하세요.')
+                normalized = _normalized_pair(cache, relative, cache_mode, entry, sources, options_data(manifest['options']))
                 diff_cache.build_diff(*normalized, directory, path=relative,
-                                      old_exists=sources[0] is not None, new_exists=sources[1] is not None)
+                                      old_exists=sources[0] is not None, new_exists=sources[1] is not None,
+                                      max_lines=diff_cache.MAX_DIFF_LINES)
             result = diff_cache.read_page(directory, page)
         return result
 

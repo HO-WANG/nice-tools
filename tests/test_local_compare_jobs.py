@@ -24,11 +24,12 @@ def ready(manager, session, job):
     pytest.fail('Comparison did not settle')
 
 
-def select_pair(manager, tmp_path, monkeypatch):
+def select_pair(manager, tmp_path, monkeypatch, *, large=False):
     left, right = tmp_path / 'left', tmp_path / 'right'
     left.mkdir(); right.mkdir()
-    (left / 'data.txt').write_bytes(b'old\n')
-    (right / 'data.txt').write_bytes(b'new\n')
+    for root, label in ((left, 'old'), (right, 'new')):
+        records = [f'{label} {i}' for i in range(500)] if large else [label]
+        (root / 'data.txt').write_text('\n'.join(records) + '\n', encoding='utf-8')
     session = manager.create_session()['session']
     from nice_tools.local_compare_worker import folder_descriptor
     def choose(token, initial, side):
@@ -196,7 +197,7 @@ def start_diff_thread(manager, session, handle):
     results, errors = [], []
     def run():
         try:
-            results.append(manager.diff(session, handle, 'data.txt'))
+            results.append(manager.diff(session, handle, 'data.txt', analyze=True))
         except Exception as error:
             errors.append(error)
     thread = threading.Thread(target=run)
@@ -208,7 +209,7 @@ def test_cancelling_new_compare_preserves_older_job_diff(tmp_path, monkeypatch):
     manager, events = blocking_manager(tmp_path)
     diff_thread = None
     try:
-        session, left, right = select_pair(manager, tmp_path, monkeypatch)
+        session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
         old_handle = manager.start(session, left, right, {})['job']
         assert ready(manager, session, old_handle)['state'] == 'succeeded'
         diff_thread, results, errors = start_diff_thread(manager, session, old_handle)
@@ -221,7 +222,7 @@ def test_cancelling_new_compare_preserves_older_job_diff(tmp_path, monkeypatch):
         diff_thread.join(5)
         assert not diff_thread.is_alive()
         assert not errors, 'Cancelling a new comparison killed another job’s diff'
-        assert results[0]['additions'] == results[0]['deletions'] == 1
+        assert results[0]['additions'] == results[0]['deletions'] == 500
         assert not manager.processes
     finally:
         events['release-diff'].touch()
@@ -237,7 +238,7 @@ def test_busy_diff_fails_promptly_with_retry_guidance(tmp_path, monkeypatch):
     first_thread = second_thread = None
     done, errors = threading.Event(), []
     try:
-        session, left, right = select_pair(manager, tmp_path, monkeypatch)
+        session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
         handle = manager.start(session, left, right, {})['job']
         assert ready(manager, session, handle)['state'] == 'succeeded'
         first_thread, first_results, first_errors = start_diff_thread(manager, session, handle)
@@ -257,7 +258,7 @@ def test_busy_diff_fails_promptly_with_retry_guidance(tmp_path, monkeypatch):
         events['release-diff'].touch()
         first_thread.join(5)
         assert first_results and not first_errors
-        assert manager.diff(session, handle, 'data.txt', 'original')['additions'] == 1
+        assert manager.diff(session, handle, 'data.txt', 'original')['additions'] == 500
     finally:
         events['release-diff'].touch()
         manager.close()
@@ -272,7 +273,7 @@ def test_evicting_old_job_kills_its_diff_and_cleans_cache(tmp_path, monkeypatch)
     diff_thread = start_thread = None
     done, handles, start_errors = threading.Event(), [], []
     try:
-        session, left, right = select_pair(manager, tmp_path, monkeypatch)
+        session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
         old_handle = manager.start(session, left, right, {})['job']
         assert ready(manager, session, old_handle)['state'] == 'succeeded'
         old_cache = Path(manager.sessions[session]['jobs'][old_handle]['cache_dir'])
@@ -309,7 +310,7 @@ def test_closing_session_kills_all_job_workers_and_cleans_ownership(tmp_path, mo
     manager, events = blocking_manager(tmp_path)
     diff_thread = None
     try:
-        session, left, right = select_pair(manager, tmp_path, monkeypatch)
+        session, left, right = select_pair(manager, tmp_path, monkeypatch, large=True)
         old_handle = manager.start(session, left, right, {})['job']
         assert ready(manager, session, old_handle)['state'] == 'succeeded'
         diff_thread, _, errors = start_diff_thread(manager, session, old_handle)

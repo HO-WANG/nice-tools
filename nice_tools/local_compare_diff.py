@@ -13,9 +13,13 @@ from pathlib import Path
 import shutil
 from typing import Callable
 
+from rapidfuzz.distance import Indel
+
 from .diff import changed_groups
 
 PAGE_SIZE = 200
+AUTO_DIFF_THRESHOLD = 1000
+MAX_DIFF_LINES = 1000
 _METADATA = 'metadata.json'
 
 
@@ -57,7 +61,17 @@ def _page_path(directory: Path, page: int) -> Path:
     return directory / f'page-{page:08d}.json'
 
 
-def build_diff(
+def _load_lines(left_normalized, right_normalized, old_exists, new_exists, cancelled):
+    _check_cancelled(cancelled)
+    if (left_normalized is not None) != old_exists or (right_normalized is not None) != new_exists:
+        raise ValueError('Normalized paths must match file existence.')
+    old = _read_lines(left_normalized, cancelled)
+    new = _read_lines(right_normalized, cancelled)
+    _check_cancelled(cancelled)
+    return old, new
+
+
+def prepare_diff(
     left_normalized: Path | None,
     right_normalized: Path | None,
     directory: Path,
@@ -67,14 +81,55 @@ def build_diff(
     new_exists: bool,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict:
+    """Build small reports once; defer large edits without aligning or writing.
+
+    The bounded insertion/deletion distance counts a replacement twice and
+    preserves duplicate-line LCS semantics. Both complete normalized inputs are
+    strictly read before deciding, and ready reports reuse those loaded lists.
+    """
+    old, new = _load_lines(left_normalized, right_normalized, old_exists, new_exists, cancelled)
+    if abs(len(old) - len(new)) >= AUTO_DIFF_THRESHOLD:
+        distance = AUTO_DIFF_THRESHOLD
+    else:
+        distance = Indel.distance(old, new, score_cutoff=AUTO_DIFF_THRESHOLD - 1)
+    _check_cancelled(cancelled)
+    if distance >= AUTO_DIFF_THRESHOLD:
+        return {'state': 'deferred', 'threshold': AUTO_DIFF_THRESHOLD}
+    metadata = _build_diff(lambda: (old, new), directory, path=path,
+                           old_exists=old_exists, new_exists=new_exists,
+                           cancelled=cancelled, max_lines=MAX_DIFF_LINES)
+    return metadata | {'state': 'ready'}
+
+
+def build_diff(
+    left_normalized: Path | None,
+    right_normalized: Path | None,
+    directory: Path,
+    *,
+    path: str,
+    old_exists: bool,
+    new_exists: bool,
+    cancelled: Callable[[], bool] | None = None,
+    max_lines: int | None = None,
+) -> dict:
     """Create a complete cache in a new/empty owned directory.
 
     Existing nonempty directories are rejected unchanged. Failed or cancelled
     builds remove their owned directory. Metadata is published last, after every
     page has closed. Even an empty diff has page zero. Cancellation is checked
     between reads and emitted rows; callers can kill their owned worker while
-    the existing matcher is running.
+    the existing matcher is running. An optional display cap limits stored rows
+    including context/hunks; full-file additions and deletions stay exact.
     """
+    return _build_diff(
+        lambda: _load_lines(left_normalized, right_normalized, old_exists, new_exists, cancelled),
+        directory, path=path, old_exists=old_exists, new_exists=new_exists,
+        cancelled=cancelled, max_lines=max_lines)
+
+
+def _build_diff(load_lines, directory, *, path, old_exists, new_exists, cancelled, max_lines):
+    if max_lines is not None and (type(max_lines) is not int or max_lines < 0):
+        raise ValueError('Diff display limit must be a nonnegative integer.')
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     if any(directory.iterdir()):
@@ -85,40 +140,49 @@ def build_diff(
     marker.touch(exist_ok=False)
     try:
         _check_cancelled(cancelled)
-        if (left_normalized is not None) != old_exists or (right_normalized is not None) != new_exists:
-            raise ValueError('Normalized paths must match file existence.')
-        old = _read_lines(left_normalized, cancelled)
-        new = _read_lines(right_normalized, cancelled)
+        old, new = load_lines()
         _check_cancelled(cancelled)
         groups = changed_groups(old, new)
         _check_cancelled(cancelled)
         page_rows = []
-        pages = total_lines = additions = deletions = 0
+        pages = total_lines = full_total_lines = additions = deletions = 0
 
         def append(kind, text, old_line=None, new_line=None):
-            nonlocal pages, total_lines, additions, deletions
+            nonlocal pages, total_lines
             _check_cancelled(cancelled)
+            if max_lines is not None and total_lines >= max_lines:
+                return
             page_rows.append({'kind': kind, 'text': text, 'old_line': old_line, 'new_line': new_line})
             total_lines += 1
-            additions += kind == 'add'
-            deletions += kind == 'delete'
             if len(page_rows) == PAGE_SIZE:
                 _write_json(_page_path(directory, pages), page_rows)
                 pages += 1
                 page_rows.clear()
 
+        def display_stop(start, stop):
+            return stop if max_lines is None else min(stop, start + max_lines - total_lines)
+
         for group in groups:
+            _check_cancelled(cancelled)
             first, last = group[0], group[-1]
+            full_total_lines += 1
             append('hunk', f'@@ -{_span(first[1], last[2])} +{_span(first[3], last[4])} @@')
             for tag, i1, i2, j1, j2 in group:
+                _check_cancelled(cancelled)
                 if tag == 'equal':
-                    for i, j in zip(range(i1, i2), range(j1, j2), strict=True):
+                    full_total_lines += i2 - i1
+                    for i in range(i1, display_stop(i1, i2)):
+                        j = j1 + i - i1
                         append('context', old[i], i + 1, j + 1)
                 if tag in ('delete', 'replace'):
-                    for i in range(i1, i2):
+                    deletions += i2 - i1
+                    full_total_lines += i2 - i1
+                    for i in range(i1, display_stop(i1, i2)):
                         append('delete', old[i], i + 1)
                 if tag in ('insert', 'replace'):
-                    for j in range(j1, j2):
+                    additions += j2 - j1
+                    full_total_lines += j2 - j1
+                    for j in range(j1, display_stop(j1, j2)):
                         append('add', new[j], new_line=j + 1)
         if page_rows or not pages:
             _write_json(_page_path(directory, pages), page_rows)
@@ -129,6 +193,9 @@ def build_diff(
             'additions': additions, 'deletions': deletions,
             'total_lines': total_lines, 'page_size': PAGE_SIZE, 'pages': pages,
         }
+        if max_lines is not None:
+            metadata.update(display_limit=max_lines, truncated=full_total_lines > total_lines,
+                            full_total_lines=full_total_lines)
         _check_cancelled(cancelled)
         marker.unlink()
         _write_json(directory / _METADATA, metadata)

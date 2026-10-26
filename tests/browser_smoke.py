@@ -128,14 +128,14 @@ def main():
             page.locator("#diff-prev").click()
             expect(page.locator("#diff-page-label")).to_contain_text("2 / 3")
             # Request errors can be retried without losing the file selection.
-            page.route("**/api/diff", lambda route: route.fulfill(status=500, json={"detail": "검증용 요청 오류"}), times=1)
+            page.route("**/api/comparison/diff", lambda route: route.fulfill(status=500, json={"detail": "검증용 요청 오류"}), times=1)
             page.get_by_role("button", name="long.txt", exact=True).click()
             expect(page.locator("#diff-message")).to_have_text("검증용 요청 오류")
             page.locator("#diff-retry").click()
             expect(page.locator("#diff-code tr")).to_have_count(200)
             # Discard a response if options were edited while it was in flight.
             delayed = []
-            page.route("**/api/diff", lambda route: delayed.append(route), times=1)
+            page.route("**/api/comparison/diff", lambda route: delayed.append(route), times=1)
             page.get_by_role("button", name="long.txt", exact=True).click()
             expect(page.locator("#diff-panel")).to_have_attribute("aria-busy", "true")
             page.locator("#ignore-start").fill("1")

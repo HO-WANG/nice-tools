@@ -114,6 +114,7 @@ def local_comparison_worker_checks(executable, directory):
     (right/'large.txt').write_bytes(content+b'y')
     (left/'invalid.txt').write_bytes(b'binary\0invalid')
     (right/'invalid.txt').write_bytes(b'binary\0invalid')
+    (right/'limit.txt').write_text(''.join(f'new {i}\n' for i in range(1000)),encoding='utf-8')
     shared='202609|1011156045|CT9701|101'
     for root,prefix,middle in ((left,'old',['removed',shared]),(right,'new',[shared,'inserted'])):
         records=([f'{prefix} {i}' for i in range(300)] + ['before'] + middle
@@ -123,16 +124,26 @@ def local_comparison_worker_checks(executable, directory):
     payload={'operation':'compare','left':folder_descriptor(left),'right':folder_descriptor(right),
              'options':{},'cache_dir':str(cache)}
     result=worker_request(executable,payload,directory,worker='--comparison-worker')
-    assert result['summary']=={'total':5,'same':1,'different':3,'left_only':0,'right_only':0,'error':1}, 'Frozen local full-file/encoding comparison failed'
+    assert result['summary']=={'total':6,'same':1,'different':3,'left_only':0,'right_only':1,'error':1}, 'Frozen local full-file/encoding comparison failed'
+    reports={item['path']:item.get('reports',{}) for item in result['results']}
+    assert reports['changed.txt']['compared']['state']=='ready', 'Frozen small report was not prepared'
+    assert reports['limit.txt']['compared']['state']=='deferred', 'Frozen exact1000 threshold was not deferred'
     query={'operation':'diff','cache_dir':str(cache),'path':'changed.txt','mode':'compared','page':0}
     page=worker_request(executable,query,directory,worker='--comparison-worker')
     assert page['additions']==225 and page['deletions']==225 and len(page['lines'])==200 and page['pages']==3
     last=worker_request(executable,{**query,'page':2},directory,worker='--comparison-worker')
     assert last['lines'][-1]['text']=='new 224' and last['total_lines']==451, 'Frozen cached diff lost its final line'
-    alignment=worker_request(executable,{**query,'path':'alignment.txt','page':3},directory,worker='--comparison-worker')
+    deferred=worker_request(executable,{**query,'path':'alignment.txt'},directory,worker='--comparison-worker')
+    assert deferred['state']=='deferred' and deferred['lines']==[], 'Frozen lookup started deferred analysis'
+    alignment=worker_request(executable,{**query,'path':'alignment.txt','page':3,'analyze':True},directory,worker='--comparison-worker')
     assert (alignment['additions'],alignment['deletions'])==(601,601), 'Frozen diff inflated change counts'
     assert [row for row in alignment['lines'] if row['text']==shared]==[
         {'kind':'context','text':shared,'old_line':303,'new_line':302}], 'Frozen diff changed an identical shifted record'
+    assert alignment['truncated'] and alignment['total_lines']==1000 and alignment['pages']==5
+    limit=worker_request(executable,{**query,'path':'limit.txt','analyze':True},directory,worker='--comparison-worker')
+    assert limit['additions']==1000 and limit['deletions']==0 and limit['truncated'] and limit['full_total_lines']==1001
+    tail=worker_request(executable,{**query,'path':'limit.txt','page':4},directory,worker='--comparison-worker')
+    assert len(tail['lines'])==200 and tail['lines'][-1]['text']=='new 998', 'Frozen report exceeded/lost display cap'
     (right/'changed.txt').write_bytes(b'edited after comparison\n')
     failed=worker_request(executable,query,directory,expect_error=True,worker='--comparison-worker')
     assert any(event.get('code')=='changed' for event in failed), 'Frozen diff reused stale source metadata'

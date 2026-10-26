@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 import threading
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -128,6 +129,9 @@ def test_unknown_routes_and_methods_are_no_store_400(client, service, method, pa
     ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'page': True}),
     ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'page': -1}),
     ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'page': 0.5}),
+    ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'analyze': 1}),
+    ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'analyze': 'true'}),
+    ('diff', {'session': 's', 'job': 'j', 'path': 'a', 'analyze': None}),
 ])
 def test_rejects_missing_unknown_or_invalid_fields(client, service, operation, payload):
     response = client.post('/api/comparison/' + operation, json=payload, headers=HEADERS)
@@ -145,6 +149,21 @@ def test_diff_rejects_paths_before_calling_manager(client, service, path):
     assert response.status_code == 400
     assert response.headers['cache-control'] == 'no-store'
     assert not service[1]
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='Colon is not a Windows filename character')
+def test_uploaded_posix_filename_can_be_used_for_report_lookup(client, service):
+    response = client.post('/api/comparison/diff', json={
+        'session': 's', 'job': 'j', 'path': 'sub/foo:bar.txt'}, headers=HEADERS)
+    assert response.status_code == 200
+    assert service[1] == [('diff', ('s', 'j', 'sub/foo:bar.txt', 'compared', 0))]
+
+
+def test_explicit_analysis_is_forwarded_only_for_true(client, service):
+    response = client.post('/api/comparison/diff', json={
+        'session': 's', 'job': 'j', 'path': 'data.txt', 'analyze': True}, headers=HEADERS)
+    assert response.status_code == 200
+    assert service[1] == [('diff', ('s', 'j', 'data.txt', 'compared', 0, True))]
 
 
 @pytest.mark.parametrize('options', [{'sort_lines': 1}, {'sort_lines': 'true'},
