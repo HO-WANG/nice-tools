@@ -20,7 +20,9 @@ from . import local_compare_diff as diff_cache
 CHANGED = '파일 또는 폴더가 변경되었습니다. 폴더를 다시 선택하고 비교하세요.'
 SAFE_ERRORS = {'changed': CHANGED,
                'busy': '변경 내용을 계산하고 있습니다. 잠시 후 다시 시도하세요.',
-               'file_limit': '파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.'}
+               'file_limit': '파일은 두 폴더 합계 1,000개까지 비교할 수 있습니다.',
+               'encoding': '전체 파일을 올바르게 해석할 수 없습니다. 인코딩을 지정하고 다시 검사하세요.',
+               'inspection_cache': '검사 결과를 저장하거나 읽을 수 없습니다. 임시 저장 공간과 파일 상태를 확인하세요.'}
 
 
 class ComparisonError(ValueError):

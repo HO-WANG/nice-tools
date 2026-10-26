@@ -31,6 +31,10 @@ analysis = Analysis(
         "nice_tools.local_compare_worker",
         "nice_tools.local_compare_engine",
         "nice_tools.local_compare_diff",
+        "nice_tools.text_inspection_api",
+        "nice_tools.text_inspection_jobs",
+        "nice_tools.text_inspection_worker",
+        "nice_tools.text_inspection_engine",
 
         "nice_tools.ase_clients",
         "nice_tools.ase_process",

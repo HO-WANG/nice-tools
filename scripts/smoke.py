@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 def json_request(base, route, payload=None, error_code=None):
-    headers = {"Content-Type": "application/json", "X-Nice-Tools": "iq" if route.startswith("/api/iq/") else "ase"}
+    tool='text-inspection' if route.startswith('/api/text-inspection/') else 'iq' if route.startswith('/api/iq/') else 'ase'
+    headers = {"Content-Type": "application/json", "X-Nice-Tools": tool}
     request = urllib.request.Request(f"{base}{route}", headers=headers,
                                      data=json.dumps(payload).encode() if payload is not None else None)
     try:
@@ -294,12 +295,13 @@ def main(argv=None):
     with urllib.request.urlopen(f"{base}/", timeout=10) as response:
         page = response.read()
         assert b'id="left-folder"' in page and b'id="diff-panel"' in page and b'id="jasypt-tool"' in page and b'id="ase-tool"' in page and b'id="iq-tool"' in page
+        assert all(f'id="{name}"'.encode() in page for name in ('text-inspection-tool','text-inspection-strict','text-inspection-auto','text-inspection-encoding'))
         assert all(f'id="{name}"'.encode() in page for name in ('left-pick-directory','right-pick-directory','comparison-cancel'))
         assert b'id="ase-search-button"' in page and b'id="ase-catalog-timings"' in page and b'id="ase-out-statistics"' in page
         assert b'id="ase-master-password"' not in page, 'ASE still asks for a profile encryption key'
         assert all(f'id="{name}"'.encode() in page for name in ('ase-select-all', 'ase-concurrency', 'ase-start', 'ase-job-items'))
         assert b'id="ase-preview"' not in page and b'id="ase-review"' not in page, 'Retired confirmation step remains in the executable'
-    for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js", "iq.css", "iq.js"):
+    for asset in ("styles.css", "app.js", "tools.js", "ase.css", "ase.js", "iq.css", "iq.js",'text_inspection.js','text_inspection.css'):
         with urllib.request.urlopen(f"{base}/static/{asset}", timeout=10) as response:
             assert response.read()
     with urllib.request.urlopen(f'{base}/api/comparison/status',timeout=10) as response:
@@ -308,6 +310,14 @@ def main(argv=None):
         assert isinstance(native['native_available'],bool) and native['diff_page_size']==200
         if args.require_odbc:
             assert native['native_available'] is True, 'Windows EXE did not enable direct-folder comparison'
+    with urllib.request.urlopen(f'{base}/api/text-inspection/status',timeout=10) as response:
+        inspection=json.load(response)
+        assert response.headers['Cache-Control']=='no-store' and inspection['page_size']==200
+        if args.require_odbc:
+            assert inspection['native_available'] is True
+    owned=json_request(base,'/api/text-inspection/session',{})
+    assert owned['session']
+    assert json_request(base,'/api/text-inspection/close',owned)=={'ok':True}
     result = compare_request(base, {
         "left_paths": '["a.txt", "only-left.txt"]',
         "right_paths": '["a.txt", "only-right.txt"]',

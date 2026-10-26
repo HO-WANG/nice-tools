@@ -1,5 +1,11 @@
 # Project rules
 
+## Core product priorities
+
+- The user explicitly makes **light weight and speed the highest priorities for every tool in this project**. Carry this requirement into every feature, fix and review.
+- Prefer direct local I/O, bounded streaming, small standard-library implementations and reuse of existing infrastructure. Avoid heavy dependencies, eager work, repeated decoding/copying/worker startup and oversized responses.
+- Measure material performance changes with representative file sizes, settings, elapsed time and memory. Include end-to-end overhead where relevant and distinguish engine benchmarks from EXE/UI timings. Preserve full-file correctness, strict decoding and the user's existing behavior requirements while optimizing.
+
 ## Distribution
 
 - The user requires every end-user release to be **one Windows 10/11 x64 executable: `nice-tools.exe`**.
@@ -26,6 +32,14 @@ Windows comparison uses native folder dialogs and direct Python reads, with no m
 Use the owned --comparison-worker process tree for scanning/comparison/initial diff generation; cancellation must be checked atomically with process registration and kill only the target job. Close/eviction must terminate owned work before cleaning caches. Reject/fail safely on moved/replaced sources; revalidate missing counterpart paths before one-sided cached diffs. Never follow descendant symlinks/junctions, including queued-directory replacement races: keep Windows non-delete-sharing no-reparse directory handles and POSIX no-follow scandir descriptors. Source files remain unchanged.
 
 Byte-identical pairs still require full strict text validation once (invalid binary cannot become same); skip normalization/sorting only after that validation. Normalize streams with the same Unicode/line/trim/whitespace rules as comparison.py. Sort with bounded external runs/merge and preserve duplicates. Reuse owned normalized caches and metadata-last 200-row diff pages; completed pages must not spawn a new frozen EXE or re-decode sources. Matching may still hold one selected pair's line lists; memory also scales with the largest line. Do not promise constant memory or universal speedups. Keep browser cancellation/stale-request/cleanup regressions, actual HTTP-token-to-worker integration, and real frozen worker full-file/mixed-encoding/late-difference/page/change-detection checks.
+
+## Hidden character inspection
+
+- Keep the text-inspection tool read-only. Windows selects a file through the existing native open dialog, mints an opaque session-owned grant and reads locally in --text-inspection-worker. Do not accept browser filesystem paths. Non-Windows upload fallback is explicit; stream it to owned storage and keep the input alive until any cancelled reader thread settles.
+- Inspect complete text with strict automatic or free-text manual encoding. NUL/control characters are findings, not decoding failures; do not reuse comparison validation that rejects them. Leading BOM is metadata, embedded BOM is a candidate. Manual codec aliases use real incremental byte-to-text decoders; disallow escape/base64/compression/domain transforms. Never replace/ignore malformed bytes or publish partial success.
+- Strict mode is off by default and allows printable ASCII, TAB/CR/LF and assigned Hangul syllables/Jamo, except blank fillers remain candidates. All other characters are findings, with existing invisible classifications preserved. Explain the exact policy in a hover tooltip/accessibility description. Normal whitespace has separate counts and optional detailed findings. Unicode line/column positions are one-based, CRLF one newline; candidates are not automatically errors.
+- Keep chunked scanning, bounded contexts and 200-result disk pages with no byte/finding caps. Escape invisible/bidi/control context to visible markers, render using textContent, and never log/store contents in browser storage. Source read-sharing/fingerprint checks and atomic cache publication must survive cancellation and changed originals. Reuse job-specific native process ownership; register jobs atomically with session close, clean upload stages and result caches after owned work releases them.
+- Exercise real source HTTP/worker scans and native frozen Unicode/NUL/BOM/strict/free-codec/late-finding/page/stale-source cases before distribution. Report big-file timings with size, options and input context rather than universal speed claims. Keep existing comparison/ASE/IQ/Jasypt behavior and native checks.
 
 ## Validation
 

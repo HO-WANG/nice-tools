@@ -9,10 +9,12 @@
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/ase.css">
   <link rel="stylesheet" href="/static/iq.css">
+  <link rel="stylesheet" href="/static/text_inspection.css">
   <script src="/static/app.js" defer></script>
   <script src="/static/tools.js" defer></script>
   <script src="/static/ase.js" defer></script>
   <script src="/static/iq.js" defer></script>
+  <script src="/static/text_inspection.js" defer></script>
 </head>
 <body>
   <svg class="sprite" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -30,6 +32,7 @@
         <a class="nav-item" href="#jasypt-tool" data-tool="jasypt-tool" aria-label="Jasypt 암호화" title="Jasypt 암호화"><svg aria-hidden="true"><use href="#icon-lock"/></svg><span class="nav-text">Jasypt 암호화</span></a>
         <a class="nav-item" href="#ase-tool" data-tool="ase-tool" aria-label="ASE / BCP" title="ASE / BCP"><svg aria-hidden="true"><use href="#icon-database"/></svg><span class="nav-text">ASE / BCP</span></a>
         <a class="nav-item" href="#iq-tool" data-tool="iq-tool" aria-label="SAP IQ 내보내기" title="SAP IQ 내보내기"><svg aria-hidden="true"><use href="#icon-database"/></svg><span class="nav-text">SAP IQ 내보내기</span></a>
+        <a class="nav-item" href="#text-inspection-tool" data-tool="text-inspection-tool" aria-label="숨은 문자 검사" title="숨은 문자 검사"><svg aria-hidden="true"><use href="#icon-compare"/></svg><span class="nav-text">숨은 문자 검사</span></a>
       </nav>
       <p class="sidebar-bottom nav-text">내 PC에서 실행 중</p>
     </aside>
@@ -101,6 +104,38 @@
             </div>
             <p class="results-note">동일 여부는 비교 옵션을 적용한 결과입니다. 파일을 선택하면 줄별 차이를 확인할 수 있습니다.</p>
           </div>
+        </section>
+      </section>
+      <section id="text-inspection-tool" aria-labelledby="text-inspection-title" hidden>
+        <div class="page-heading"><h1 id="text-inspection-title">숨은 문자 검사</h1><p>텍스트 파일의 보이지 않는 문자와 특수 공백을 위치·코드·문맥으로 확인합니다.</p></div>
+        <p id="text-inspection-runtime" class="feedback" role="status" aria-live="polite">파일 선택 기능을 확인하고 있습니다…</p>
+        <button id="text-inspection-runtime-retry" class="secondary-button" type="button" hidden>연결 다시 시도</button>
+        <form id="text-inspection-form">
+          <section class="panel" aria-labelledby="text-inspection-file-title">
+            <div class="section-heading"><h2 id="text-inspection-file-title">파일과 검사 옵션</h2><span class="section-note">읽기 전용</span></div>
+            <div class="text-inspection-settings">
+              <div><input id="text-inspection-file" class="visually-hidden" type="file" aria-label="검사할 텍스트 파일" disabled><button id="text-inspection-pick" class="folder-card" type="button" disabled><svg aria-hidden="true"><use href="#icon-folder"/></svg><span class="folder-copy"><strong id="text-inspection-name">파일을 선택하세요</strong><span id="text-inspection-detail" class="folder-detail">내 PC의 텍스트 파일 한 개 선택</span></span><span class="folder-select">파일 선택</span></button></div>
+              <div class="text-inspection-options">
+                <div class="field"><span>파일 인코딩</span><label class="inline-checkbox"><input id="text-inspection-auto" type="checkbox" checked>자동 감지 (기본)</label><label for="text-inspection-encoding">직접 입력</label><input id="text-inspection-encoding" type="text" value="UTF-8" maxlength="128" list="text-inspection-codecs" autocomplete="off" spellcheck="false" aria-describedby="text-inspection-encoding-note" disabled><datalist id="text-inspection-codecs"><option value="UTF-8"></option><option value="CP949"></option><option value="EUC-KR"></option><option value="CP932"></option><option value="CP1251"></option><option value="CP1252"></option><option value="UTF-16"></option><option value="UTF-16-LE"></option><option value="UTF-16-BE"></option><option value="UTF-32"></option><option value="UTF-32-LE"></option><option value="UTF-32-BE"></option></datalist></div>
+                <label class="checkbox-option" title="엄격 모드: ASCII 영문·숫자·기호(일반 공백 포함), 한글 음절·자모, 탭, CR/LF만 허용합니다. 나머지 한자·이모지·전각 문자 등을 확인 대상으로 표시합니다. 채움 문자는 계속 확인 대상입니다."><input id="text-inspection-strict" type="checkbox" aria-describedby="text-inspection-strict-note"><span>엄격 모드<small>허용 범위 밖의 모든 문자 확인</small><span id="text-inspection-strict-note" class="visually-hidden">ASCII 영문·숫자·기호(일반 공백 포함), 한글 음절·자모, 탭, CR/LF를 허용합니다. 한자·이모지·전각 문자 등은 확인 대상으로 표시하며, 채움 문자도 계속 확인합니다. 확인 대상이 반드시 오류는 아닙니다.</span></span></label>
+                <label class="checkbox-option"><input id="text-inspection-common" type="checkbox"><span>일반 공백도 결과에 포함<small>스페이스·탭·줄바꿈 집계는 항상 표시합니다.</small></span></label>
+              </div>
+            </div>
+            <p id="text-inspection-encoding-note" class="text-inspection-note">짧거나 모호한 텍스트는 인코딩을 정확히 감지하기 어렵습니다. 예상과 다르면 자동 감지를 끄고 UTF-8, CP949, EUC-KR, CP1251 등 인코딩 이름을 직접 입력하세요.</p>
+            <p class="panel-footnote">원본을 읽기만 하며 문자를 자동으로 삭제하거나 파일을 수정하지 않습니다. 파일 전체를 검사하며 처리 가능 용량은 PC의 메모리와 임시 저장 공간에 따라 달라집니다.</p>
+          </section>
+          <div class="action-row"><p>행·열은 1부터 시작하는 유니코드 문자 위치입니다. CRLF는 한 번의 줄바꿈으로 셉니다.</p><button id="text-inspection-scan" class="primary-button" type="submit" disabled>검사 시작</button></div>
+        </form>
+        <p id="text-inspection-feedback" class="feedback" role="status" aria-live="polite" hidden></p>
+        <div id="text-inspection-progress" class="text-inspection-progress" hidden><p id="text-inspection-job-status" role="status" aria-live="polite"></p><button id="text-inspection-job-retry" class="secondary-button" type="button" hidden>상태 다시 확인</button><button id="text-inspection-cancel" class="secondary-button" type="button" hidden>검사 취소</button><progress id="text-inspection-bar" aria-label="검사 진행률"></progress></div>
+        <section id="text-inspection-results" class="panel" aria-labelledby="text-inspection-results-title" aria-busy="false" hidden>
+          <div class="section-heading"><h2 id="text-inspection-results-title">검사 결과 · 확인 대상 문자</h2></div>
+          <dl id="text-inspection-summary" class="text-inspection-summary"></dl>
+          <p id="text-inspection-whitespace" class="text-inspection-note"></p><div id="text-inspection-kinds" aria-label="문자 종류별 개수"></div>
+          <p class="text-inspection-note">확인 대상 문자가 반드시 오류는 아닙니다. ZWJ·모양 선택자 등은 이모지와 언어 표기에 필요할 수 있습니다. 선두 BOM은 요약 정보이며, 중간에 나온 BOM은 확인 대상으로 표시합니다.</p>
+          <div class="text-inspection-scroll" tabindex="0" role="region" aria-label="확인 대상 문자 목록 (가로 스크롤 가능)"><table class="text-inspection-table"><caption class="visually-hidden">행, 열, 유니코드 코드, 이름, 설명, 강조한 문자와 주변 문맥</caption><thead><tr><th scope="col">행</th><th scope="col">열</th><th scope="col">코드</th><th scope="col">유니코드 이름</th><th scope="col">종류·설명</th><th scope="col">주변 문맥 · 강조한 확인 대상</th></tr></thead><tbody id="text-inspection-rows"></tbody></table></div>
+          <p id="text-inspection-empty" class="empty-state" hidden></p><button id="text-inspection-page-retry" class="secondary-button" type="button" hidden>결과 다시 불러오기</button>
+          <div class="diff-pagination"><button id="text-inspection-prev" class="secondary-button" type="button" disabled>이전</button><span id="text-inspection-page-label" aria-live="polite"></span><button id="text-inspection-next" class="secondary-button" type="button" disabled>다음</button></div>
         </section>
       </section>
       <section id="jasypt-tool" aria-labelledby="jasypt-title" hidden>

@@ -120,7 +120,7 @@ def pick_directory(initial_directory: str | None = None) -> dict:
         ole.CoUninitialize()
 
 
-def pick_file(direction: str, suggested_name: str | None = None) -> dict:
+def pick_file(direction: str, suggested_name: str | None = None, *, text_only: bool = False) -> dict:
     """Return a real Windows path, or an explicit cancellation result."""
     if not isinstance(direction, str) or direction.lower() not in {"in", "out"}:
         raise ValueError("File direction must be 'in' or 'out'.")
@@ -154,6 +154,12 @@ def pick_file(direction: str, suggested_name: str | None = None) -> dict:
     request.nMaxFile = MAX_PATH_CHARS
     request.lpstrTitle = "Select a BCP input file" if direction == "in" else "Save a BCP output file"
     request.lpstrDefExt = "bcp"
+    if text_only:
+        if direction != 'in':
+            raise ValueError('Text inspection only opens existing files.')
+        request.lpstrFilter = 'Text files (*.txt;*.csv;*.log;*.sql;*.dat)\0*.txt;*.csv;*.log;*.sql;*.dat\0All files (*.*)\0*.*\0\0'
+        request.lpstrTitle = 'Select a text file'
+        request.lpstrDefExt = 'txt'
     request.Flags = OFN_EXPLORER | OFN_HIDEREADONLY | OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST | OFN_DONTADDTORECENT
     request.Flags |= OFN_FILEMUSTEXIST if direction == "in" else OFN_OVERWRITEPROMPT
     function = library.GetOpenFileNameW if direction == "in" else library.GetSaveFileNameW

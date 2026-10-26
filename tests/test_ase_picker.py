@@ -55,6 +55,18 @@ def test_windows_dialog_reports_user_cancellation(picker, monkeypatch):
     assert picker.pick_file("out", "output.bcp") == {"cancelled": True}
 
 
+def test_text_inspection_dialog_opens_existing_text_files(picker,monkeypatch):
+    def invoke(request):
+        assert request.Flags & picker.OFN_FILEMUSTEXIST
+        assert request.lpstrTitle=='Select a text file'
+        assert request.lpstrDefExt=='txt'
+        assert request.lpstrFilter.startswith('Text files')
+        return 0
+    monkeypatch.setattr(picker.sys,'platform','win32')
+    monkeypatch.setattr(picker,'_load_dialog_library',lambda:dialog_library(picker,invoke))
+    assert picker.pick_file('in',text_only=True)=={'cancelled':True}
+
+
 def test_windows_dialog_error_is_distinct_from_cancellation(picker, monkeypatch):
     monkeypatch.setattr(picker.sys, "platform", "win32")
     monkeypatch.setattr(picker, "_load_dialog_library", lambda: dialog_library(picker, lambda request: 0, extended_error=0x3002))

@@ -20,12 +20,15 @@ from .iq_api import router as iq_router
 from .iq_jobs import manager as iq_manager
 from .local_compare_api import router as comparison_router
 from .local_compare_jobs import manager as comparison_manager
+from .text_inspection_api import router as inspection_router
+from .text_inspection_jobs import manager as inspection_manager
 
 @asynccontextmanager
 async def lifespan(app):
     try:
         yield
     finally:
+        inspection_manager.close()
         comparison_manager.close()
         ase_manager.close()
         iq_manager.close()
@@ -35,6 +38,7 @@ app = FastAPI(title="nice-tools", docs_url=None, redoc_url=None, openapi_url=Non
 app.include_router(ase_router)
 app.include_router(iq_router)
 app.include_router(comparison_router)
+app.include_router(inspection_router)
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

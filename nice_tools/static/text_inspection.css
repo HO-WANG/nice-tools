@@ -1,0 +1,43 @@
+#text-inspection-tool { min-width: 0; }
+.text-inspection-settings { padding: 0 20px 20px; display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+#text-inspection-pick { width: 100%; text-align: left; background: white; }
+#text-inspection-name, #text-inspection-detail { unicode-bidi: plaintext; }
+.text-inspection-options { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.text-inspection-options .field > input[type="text"] { width: 100%; min-height: 36px; padding: 6px 10px; border: 1px solid #cbd3d9; border-radius: var(--radius); background: white; color: var(--text); min-width: 0; }
+.text-inspection-options .field > input:disabled { background: #f4f6f8; color: var(--muted); }
+.text-inspection-options .field { display: flex; flex-direction: column; gap: 6px; }
+.text-inspection-note { color: var(--muted); font-size: 13px; padding: 0 20px 16px; overflow-wrap: anywhere; }
+.text-inspection-progress { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 16px 20px; margin-bottom: 16px; background: white; border: 1px solid var(--line); border-radius: var(--radius); }
+.text-inspection-progress progress { width: 100%; accent-color: var(--accent); }
+#text-inspection-job-status { flex: 1 1 200px; overflow-wrap: anywhere; font-size: 13px; }
+.text-inspection-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 16px 20px; margin: 0; background: #fafbfc; border-block: 1px solid var(--line); }
+.text-inspection-summary dt { color: var(--muted); font-size: 12px; }
+.text-inspection-summary dd { margin: 4px 0 0; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+#text-inspection-whitespace { padding-top: 14px; }
+#text-inspection-kinds { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 20px 16px; }
+#text-inspection-kinds span { background: #edf4f0; color: var(--accent); padding: 3px 8px; border-radius: 4px; font-size: 12px; }
+.text-inspection-scroll { max-height: 560px; overflow: auto; overscroll-behavior: contain; }
+.text-inspection-scroll:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.text-inspection-table { width: 100%; min-width: 980px; border-collapse: collapse; font-size: 13px; text-align: left; }
+.text-inspection-table th { position: sticky; top: 0; background: #fafbfc; z-index: 1; color: var(--muted); font-weight: 500; }
+.text-inspection-table td, .text-inspection-table th { padding: 10px 14px; border-block: 1px solid var(--line); vertical-align: top; }
+.text-inspection-table td:nth-child(-n+3) { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.text-inspection-table td:nth-child(4) { min-width: 160px; max-width: 240px; overflow-wrap: anywhere; }
+.text-inspection-table td:nth-child(5) { min-width: 180px; max-width: 240px; }
+.text-inspection-table small { display: block; color: var(--muted); margin-top: 4px; }
+.text-inspection-context { min-width: 280px; max-width: 520px; font-family: ui-monospace, Consolas, "Malgun Gothic", monospace; white-space: pre-wrap; overflow-wrap: anywhere; direction: ltr; unicode-bidi: isolate; }
+.text-inspection-context bdi, .text-inspection-context mark { direction: ltr; unicode-bidi: isolate; }
+.text-inspection-context mark { display: inline-block; background: #fff0be; color: #714b00; border: 1px solid #e5c65a; border-radius: 3px; padding-inline: 3px; margin-inline: 2px; font-weight: 600; }
+#text-inspection-page-retry, #text-inspection-runtime-retry { margin-bottom: 16px; }
+#text-inspection-page-retry { margin-left: 20px; }
+@media (max-width: 900px) {
+  .text-inspection-settings { grid-template-columns: minmax(0, 1fr); }
+  .text-inspection-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .text-inspection-settings, .text-inspection-summary, .text-inspection-progress { padding-inline: 14px; }
+  .text-inspection-note, #text-inspection-kinds { padding-inline: 14px; }
+  #text-inspection-pick { gap: 8px; }
+  #text-inspection-pick > svg { display: none; }
+  #text-inspection-page-label { text-align: center; overflow-wrap: anywhere; }
+}
