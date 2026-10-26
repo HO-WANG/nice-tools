@@ -18,7 +18,7 @@ PC의 문자형 파일로 BCP IN / OUT을 실행합니다. **PC에 설치된
 
 ## 사용자 실행 방법
 
-1. 검증된 `nice-tools.exe`를 사용자 PC로 옮깁니다.
+1. 배포 파일 `nice-tools.z01`을 사용자 PC로 옮기고, 이름을 `nice-tools.zip`으로 바꿔 압축을 풉니다.
 2. EXE를 더블클릭합니다. 실행창이 열리고 기본 브라우저가 자동으로 열립니다.
 3. Chrome 또는 Edge의 왼쪽 메뉴에서 사용할 도구를 선택합니다.
 4. 종료하려면 실행창에서 `Ctrl+C`를 누릅니다. 브라우저 탭만 닫으면 앱은 계속 실행됩니다.
@@ -34,8 +34,10 @@ Windows의 디렉토리 비교는 파일을 브라우저로 전송하지 않고 
 
 GitHub의 **Actions → Build Windows executable**에서 성공한 작업을 열고
 `nice-tools-windows-x64` 아티팩트를 내려받습니다.
-GitHub가 내려주는 ZIP의 내용은 `nice-tools.exe` 한 파일입니다.
-압축을 풀어 EXE만 내부망 PC로 반입합니다.
+GitHub가 내려주는 ZIP을 풀면 **`nice-tools.z01`** 배포 파일이 나옵니다.
+이 파일을 내부망 PC로 옮긴 뒤 **`nice-tools.zip`으로 이름을 바꾸고** 압축을 풀면
+`nice-tools.exe` 한 파일이 나옵니다. 일반 ZIP의 확장자만 바꾼 것이므로 분할 압축 파일은 아닙니다.
+확장자가 보이지 않으면 Windows 탐색기의 **파일 확장명** 표시를 켜세요.
 
 `main` 변경, `v*` 태그와 Pull Request에는 Windows 빌드·검증이 자동 실행됩니다.
 Actions의 **Run workflow**로 수동 빌드할 수도 있습니다.

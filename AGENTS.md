@@ -9,6 +9,7 @@
 ## Distribution
 
 - The user requires every end-user release to be **one Windows 10/11 x64 executable: `nice-tools.exe`**.
+- Deliver the verified EXE inside one ordinary ZIP archive named **nice-tools.z01**. The user renames it to nice-tools.zip and extracts the single EXE; this is not a split-volume ZIP. Keep build output dist/nice-tools.exe separate from delivery release/nice-tools.z01. Verify archive membership/CRC and byte identity with the verified EXE before upload. GitHub Actions transport downloads a wrapper ZIP containing nice-tools.z01; never substitute a renamed raw EXE or split .z01/.zip set.
 - Bundle Python, runtime dependencies and all HTML/CSS/JavaScript assets into that executable. End users need their existing browser; ASE tools additionally use the PC's installed 64-bit SAP ASE ODBC driver and SAP bcp.exe (Windows 10 1809+).
 - Start on `127.0.0.1` with an available port and open the local UI automatically. User files stay on the user's PC.
 - Keep source-based commands for development. Do not present Python installation, virtualenvs or wheelhouse folders as the normal end-user deployment.

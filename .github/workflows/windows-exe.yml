@@ -38,10 +38,11 @@ jobs:
       - name: Build and verify the single executable
         shell: pwsh
         run: ./scripts/build_windows.ps1 -SapTestClients "$env:NICE_TOOLS_SAP_TEST_CLIENTS"
-      - name: Upload the verified executable
+      - name: Upload the verified z01 package
         uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
         with:
           name: nice-tools-windows-x64
-          path: dist/nice-tools.exe
+          path: release/nice-tools.z01
+          compression-level: 0
           if-no-files-found: error
           retention-days: 14
